@@ -19,7 +19,7 @@ While a connected dashboard is open, it requests a Gmail refresh every 30 minute
 ## One-time provider setup
 
 1. Create or select a Google Cloud project and enable the Gmail API. Configure the OAuth consent screen and a Web application OAuth client. Add authorized test users if the app is in testing.
-2. Register the exact redirect URI `https://gmail-hub-brief.grey-bead-5907.chatgpt.site/api/auth/google/callback`.
+2. Register the exact redirect URI `https://gmail-hub-brief.lukeli1708.chatgpt.site/api/auth/google/callback`.
 3. Add `GOOGLE_CLIENT_ID` and secret `GOOGLE_CLIENT_SECRET` to the Site runtime environment. Add secret `OPENAI_API_KEY` through the OpenAI Developers plugin or the Site's secret settings. Keep keys out of source control and browser code. Redeploy to apply hosted environment changes.
 4. Have the hosting operator provision the Worker cron `*/30 * * * *` and verify a successful invocation. The dashboard then changes the scheduler indicator from pending to active after its heartbeat is visible.
 5. Open Settings & connections and Continue with Google. Each user grants consent once; the app requests offline access and renews access tokens automatically. Google may require verification before an externally distributed app can use restricted Gmail scopes. Testing refresh tokens can expire after seven days.
