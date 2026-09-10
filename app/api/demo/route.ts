@@ -23,7 +23,11 @@ export async function GET(){
     const claim=await e.DB.prepare('INSERT OR IGNORE INTO demo_digest (id,data,updated) VALUES (?,?,?)').bind(cacheId,pending,started).run();
     if(!claim.meta.changes)return json(fallback());
     let analysis;
-    try{analysis=await summarize(demoEmails,e);}catch(error){await e.DB.prepare('DELETE FROM demo_digest WHERE id = ? AND data = ?').bind(cacheId,pending).run();throw error;}
+    try{analysis=await summarize(demoEmails,e);}
+    catch{
+      await e.DB.prepare('DELETE FROM demo_digest WHERE id = ? AND data = ?').bind(cacheId,pending).run();
+      return json(fallback());
+    }
     const snapshot={emails:analysis.emails,updated:Date.now(),ai:analysis.ai,hasMore:false};
     await e.DB.prepare('UPDATE demo_digest SET data = ?, updated = ? WHERE id = ?').bind(JSON.stringify(snapshot),snapshot.updated,cacheId).run();
     return json(snapshot);

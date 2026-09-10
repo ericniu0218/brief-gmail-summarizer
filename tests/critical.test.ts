@@ -110,6 +110,19 @@ test('a concurrent demo digest request uses deterministic fallback instead of du
   assert.ok(body.emails.some(email=>email.category==='noise'));
  }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
 });
+test('the demo digest stays available when Gemini is out of credit',async()=>{
+ globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
+ const fakeDb={prepare(){return {bind(){return this;},async first(){return null;},async run(){return {meta:{changes:1}};}};}};
+ globalThis.__briefTestEnv={...testEnv,DB:fakeDb as unknown as D1Database,GEMINI_API_KEY:'test-key'};
+ const original=globalThis.fetch;
+ globalThis.fetch=async()=>Response.json({error:{message:'Your prepayment credits are depleted.'}},{status:429});
+ try{
+  const response=await demoDigest();const body=await response.json() as {emails:typeof demoEmails;ai:boolean};
+  assert.equal(response.status,200);assert.equal(body.ai,false);assert.equal(body.emails.length,demoEmails.length);
+  assert.deepEqual(body.emails.map(email=>email.id),demoEmails.map(email=>email.id));
+  assert.ok(body.emails.some(email=>email.category==='work'&&email.needsReply));
+ }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
+});
 test('sample replies generate only from the demo inbox, never from caller-supplied text',async()=>{
  globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  globalThis.__briefTestEnv={...testEnv,GEMINI_API_KEY:'test-key'};

@@ -57,7 +57,7 @@ D1 schema is defined in `db/schema.ts`; generated migrations are in `drizzle/`. 
 
 ## Validation
 
-Production build, TypeScript checking, and affected-file linting pass. Twenty focused tests cover encryption ownership, CSRF rejection, the protected scheduler, trusted unsubscribe targets, fallback classification, Gemini billing, schema and sync failures, authenticated model-generated sample replies, duplicate-send prevention, sign-in recovery, and Google OAuth configuration with PKCE. Live Gmail connection still needs Google OAuth credentials before end-to-end testing. An unauthenticated dashboard offers a top-level ChatGPT sign-in action; Gmail-token failures remain separate and do not trigger that action.
+Production build, TypeScript checking, and affected-file linting pass. Twenty-one focused tests cover encryption ownership, CSRF rejection, the protected scheduler, trusted unsubscribe targets, fallback classification, Gemini billing, schema, demo and sync failures, authenticated model-generated sample replies, duplicate-send prevention, sign-in recovery, and Google OAuth configuration with PKCE. Live Gmail connection still needs Google OAuth credentials before end-to-end testing. An unauthenticated dashboard offers a top-level ChatGPT sign-in action; Gmail-token failures remain separate and do not trigger that action.
 
 ## Provider references
 
