@@ -1,7 +1,7 @@
 import { HttpError, runtime, type Runtime } from './runtime';
 import type { Email } from '@/lib/mail';
 const DEFAULT_GEMINI_MODEL='gemini-3.5-flash-lite';
-const PROMPT_VERSION='2026-09-10-1';
+const PROMPT_VERSION='2026-09-10-2';
 function geminiModel(e:Runtime){return (e.GEMINI_MODEL||DEFAULT_GEMINI_MODEL).replace(/^models\//,'');}
 export function analysisVersion(e:Runtime){return `gemini:${geminiModel(e)}:${PROMPT_VERSION}`;}
 type JsonSchema={type?:string;enum?:unknown[];properties?:Record<string,JsonSchema>;required?:string[];additionalProperties?:boolean;items?:JsonSchema;minItems?:number;maxItems?:number;minimum?:number;maximum?:number};
@@ -81,7 +81,7 @@ export async function summarize(emails:Email[],e:Runtime) {
   for(let start=0;start<emails.length;start+=10){
     const group=emails.slice(start,start+10);
     const result=await generate<{items:{id:string;summary:string;category:Email['category'];priority:Email['priority'];needsReply:boolean;label:string}[]}>(
-      'Summarize each email in one short sentence. Highlight work decisions, requests, and explicit deadlines. Classify work, personal, or noise. Marketing and newsletters are noise; do not classify ordinary mail as spam. High priority requires a concrete urgent work action. needsReply means the user is directly asked to respond. Use only facts in the messages. Give a short label; never invent a deadline.',
+      'Summarize each email in one short sentence. Highlight decisions, requests, security events, account access, and explicit deadlines. Classify work, personal, or noise. Marketing and newsletters are noise; do not classify ordinary mail as spam. High priority means the user must act, the user is directly asked to respond, there is a time-sensitive deadline, or the message contains a security or account-access event such as a verification code, password reset, or new sign-in. Routine product updates and optional setup tips are normal priority. needsReply means the sender directly asks the user to answer; automated codes and alerts do not need a reply unless they explicitly ask for one. Use only facts in the messages. Give a short label; use Important for every high-priority message and never invent a deadline.',
       group.map(({id,subject,body,sender,category})=>({id,subject,body:body.slice(0,7000),sender,category})),
       {type:'object',properties:{items:{type:'array',items:{type:'object',properties:{id:{type:'string'},summary:{type:'string'},category:{type:'string',enum:['work','personal','noise']},priority:{type:'string',enum:['high','normal']},needsReply:{type:'boolean'},label:{type:'string'}},required:['id','summary','category','priority','needsReply','label'],additionalProperties:false}}},required:['items'],additionalProperties:false},e);
     const expectedIds=new Set(group.map(m=>m.id));

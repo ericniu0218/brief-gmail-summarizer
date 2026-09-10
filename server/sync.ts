@@ -2,6 +2,7 @@ import { accessToken, gmail, parseMessage, safeUnsubscribe, type GmailMessage } 
 import { analysisVersion, summarize } from './ai';
 import { HttpError, type Runtime } from './runtime';
 import type { Email } from '@/lib/mail';
+import { isImportantEmail } from '@/lib/inbox-priority';
 export type Snapshot={emails:Email[];ai:boolean;analysisVersion:string;updated:number;limit:number;hasMore:boolean};
 export async function summarizeInbox(emails:Email[],e:Runtime){
   try{return await summarize(emails,e);}
@@ -33,7 +34,9 @@ export async function syncInbox(user:string,e:Runtime) {
     const muted=new Set(removed.results.map(r=>r.address));
     const emails=messages.map(m=>{
       const enriched=analyzed.get(m.id)||cached.get(m.id);
-      return {...m,...(enriched?{summary:enriched.summary,category:enriched.category,priority:enriched.priority,needsReply:enriched.needsReply,label:enriched.label}:{}),oneClick:!!(m.oneClick&&m.unsubscribe&&safeUnsubscribe(m.unsubscribe,e))};
+      const combined={...m,...(enriched?{summary:enriched.summary,category:enriched.category,priority:enriched.priority,needsReply:enriched.needsReply,label:enriched.label}:{}),oneClick:!!(m.oneClick&&m.unsubscribe&&safeUnsubscribe(m.unsubscribe,e))};
+      const important=isImportantEmail(m)||isImportantEmail(combined);
+      return important?{...combined,category:combined.category==='noise'?m.category:combined.category,priority:'high' as const,label:'Important'}:combined;
     }).filter(m=>!muted.has(m.address));
     const snapshot:Snapshot={emails,ai:analysis.ai,analysisVersion:currentAnalysisVersion,updated:Date.now(),limit:60,hasMore:!!list.nextPageToken};
     await e.DB.batch([

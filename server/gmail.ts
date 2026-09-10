@@ -1,4 +1,5 @@
 import type { Email } from '@/lib/mail';
+import { hasImportantSignal } from '@/lib/inbox-priority';
 import { decode, decrypt, HttpError, runtime, type Runtime } from './runtime';
 export type Connection = { user_id:string; email:string; token:string; last_sync:number|null; sync_lock:number; error:string|null };
 export async function connection(user:string,e=runtime()) {
@@ -29,11 +30,13 @@ export function parseMessage(m:GmailMessage):Email {
   const header=(name:string)=>m.payload.headers?.find(h=>h.name.toLowerCase()===name.toLowerCase())?.value||'';
   const from=header('From'); const address=(from.match(/<([^>]+)>/)?.[1]||from).trim();
   const sender=(from.includes('<')?from.split('<')[0].replaceAll('"','').trim():address.split('@')[0])||'Unknown sender';
+  const subject=header('Subject')||'(No subject)';
+  const body=(plainText(m.payload)||m.snippet).slice(0,20000);
   const list=header('List-Unsubscribe');
   const unsubscribe=list.match(/<(https:\/\/[^>]+)>/i)?.[1];
   const noise=m.labelIds.some(l=>['CATEGORY_PROMOTIONS','SPAM'].includes(l)) || !!list;
-  const priority=m.labelIds.includes('IMPORTANT') && !noise;
-  return {id:m.id,threadId:m.threadId,sender,address,initials:sender.split(/\s+/).slice(0,2).map(n=>n[0]).join('').toUpperCase(),subject:header('Subject')||'(No subject)',summary:m.snippet,body:(plainText(m.payload)||m.snippet).slice(0,20000),time:new Date(Number(m.internalDate)).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}),category:noise?'noise':'personal',priority:priority?'high':'normal',needsReply:false,unread:m.labelIds.includes('UNREAD'),color:['purple','blue','rose','green'][sender.length%4],label:noise?'Newsletter':priority?'Important':'Mail',messageId:header('Message-ID'),unsubscribe,oneClick:header('List-Unsubscribe-Post').toLowerCase().includes('list-unsubscribe=one-click')};
+  const priority=!noise&&(m.labelIds.includes('IMPORTANT')||hasImportantSignal(subject,body));
+  return {id:m.id,threadId:m.threadId,sender,address,initials:sender.split(/\s+/).slice(0,2).map(n=>n[0]).join('').toUpperCase(),subject,summary:m.snippet,body,time:new Date(Number(m.internalDate)).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}),category:noise?'noise':'personal',priority:priority?'high':'normal',needsReply:false,unread:m.labelIds.includes('UNREAD'),color:['purple','blue','rose','green'][sender.length%4],label:noise?'Newsletter':priority?'Important':'Mail',messageId:header('Message-ID'),unsubscribe,oneClick:header('List-Unsubscribe-Post').toLowerCase().includes('list-unsubscribe=one-click')};
 }
 export function safeUnsubscribe(url:string,e:Runtime) {
   let target:URL; try{target=new URL(url);}catch{return false;}

@@ -10,6 +10,8 @@ Suggested replies are always model-generated, in the sample workspace as well as
 
 The server implements per-user Gmail OAuth with PKCE and single-use state, encrypted offline refresh tokens, automatic access-token renewal, summaries through the Gemini API, Gmail drafts and send, duplicate-send protection, and RFC 8058 one-click unsubscribe for trusted provider endpoints. Email bodies are displayed as text and treated as untrusted input to AI. API routes require the platform-authenticated user and validate the origin of mutations.
 
+Overview contains only important mail. Direct replies rank first, followed by security, account-access, deadline, and Gmail Important messages. Routine mail remains available in Inbox at the bottom. Related important setup and security notifications from the same company are folded into one marked group; expanding it shows every message's one-line summary and a direct reply action.
+
 ## Activation status
 
 The Site URL, a 256-bit encryption secret, the default Gemini model, and a Gemini API key are configured in hosting. A Google OAuth client is still required. Google app credentials cannot be obtained from the Gmail connector in a Codex conversation. No real Gmail account has been connected or accessed by this implementation.

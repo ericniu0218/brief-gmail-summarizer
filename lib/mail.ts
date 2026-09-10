@@ -8,7 +8,7 @@ export type Email = {
 // AI replaces them with richer summaries and labels when `/api/demo` succeeds.
 type Seed = {id:string;sender:string;address:string;subject:string;body:string;time:string;color:string;unread:boolean;unsubscribe?:string;oneClick?:boolean};
 const workIds=new Set(['1','2','3','4','5','15','16','17','18','19','20','21','22']);
-const highPriorityIds=new Set(['1','2','15','16','17','20']);
+const highPriorityIds=new Set(['1','2','15','16','17','20','40','41']);
 const replyIds=new Set(['1','2','3','5','6','17','20','21','23','25']);
 function seed(s:Seed):Email {
   const category:Email['category']=s.oneClick?'noise':workIds.has(s.id)?'work':'personal';
@@ -36,6 +36,8 @@ export const demoEmails: Email[] = [
   seed({id:'23',sender:'David Chen',address:'david@family.example',subject:'Mom’s birthday dinner — can you make Sunday?',body:'Hey,\n\nWe’re doing dinner for Mom’s birthday this Sunday at 6, at the usual place. Can you make it? Let me know so I can give the restaurant a headcount.\n\nDavid',time:'3 days ago',color:'purple',unread:true}),
   seed({id:'24',sender:'Lauren Wells',address:'lauren@personal.example',subject:'Loved catching up yesterday!',body:'Hey!\n\nHad such a good time catching up yesterday, it had been way too long. We should make it a regular thing. Let’s not wait another six months!\n\nLauren',time:'4 days ago',color:'amber',unread:false}),
   seed({id:'25',sender:'Jordan Reyes',address:'jordan@personal.example',subject:'Still on for 6 AM tomorrow?',body:'Hey, still good for the gym at 6 tomorrow? Let me know if you need to push it — no worries either way.\n\nJordan',time:'4 days ago',color:'green',unread:true}),
+  seed({id:'40',sender:'GitHub',address:'noreply@github.com',subject:'Your GitHub verification code',body:'Use verification code 482917 to finish signing in. If you did not request this code, secure your account.',time:'Today',color:'gray',unread:true}),
+  seed({id:'41',sender:'GitHub Security',address:'security@github.com',subject:'Complete your two-factor authentication setup',body:'Your account setup is incomplete. Complete two-factor authentication to keep repository access secure.',time:'Today',color:'gray',unread:true}),
   ...[
     ['26','The Daily Edit','Your daily dose of inspiration','A roundup of design inspiration and this week’s stories.','purple'],
     ['27','The Daily Edit','Five things worth a look','Five links from around the web.','purple'],

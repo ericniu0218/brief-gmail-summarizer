@@ -9,6 +9,7 @@ import { demoEmails } from '../lib/mail';
 import { GET as demoDigest } from '../app/api/demo/route';
 import { POST as runScheduledAgent } from '../app/api/agent/route';
 import { summarizeInbox } from '../server/sync';
+import { buildInboxRows, isImportantEmail, sortInboxEmails } from '../lib/inbox-priority';
 
 declare global { var __briefTestEnv: Runtime; var __briefTestHeaders: Headers; }
 const testEnv = {TOKEN_ENCRYPTION_KEY:encode(crypto.getRandomValues(new Uint8Array(32))),APP_URL:'https://brief.example'} as Runtime;
@@ -45,6 +46,31 @@ test('one-click targets require trusted HTTPS domains without credentials or cus
 test('newsletter headers cannot promote marketing to an urgent work item',()=>{
  const parsed=parseMessage({id:'abc',threadId:'thread',snippet:'Newsletter',internalDate:'1788960000000',labelIds:['INBOX','IMPORTANT'],payload:{mimeType:'text/plain',headers:[{name:'From',value:'Daily News <hello@news.example>'},{name:'Subject',value:'Our latest issue'},{name:'List-Unsubscribe',value:'<https://news.list-manage.com/u>'},{name:'List-Unsubscribe-Post',value:'List-Unsubscribe=One-Click'}],body:{data:encode('Hello, reader.')}}});
  assert.equal(parsed.category,'noise');assert.equal(parsed.priority,'normal');assert.equal(parsed.address,'hello@news.example');assert.equal(parsed.body,'Hello, reader.');
+});
+test('security and account-access mail is important even without Gmail Important',()=>{
+ const parsed=parseMessage({id:'security',threadId:'thread',snippet:'Use code 482917 to finish signing in.',internalDate:'1788960000000',labelIds:['INBOX'],payload:{mimeType:'text/plain',headers:[{name:'From',value:'GitHub <noreply@github.com>'},{name:'Subject',value:'Your GitHub verification code'}],body:{data:encode('Use code 482917 to finish signing in.')}}});
+ assert.equal(parsed.priority,'high');
+ assert.equal(parsed.label,'Important');
+ assert.equal(isImportantEmail(parsed),true);
+});
+test('reply-needed mail ranks first and routine mail stays at the bottom',()=>{
+ const routine={...demoEmails[3],id:'routine',priority:'normal' as const,needsReply:false};
+ const security={...demoEmails[3],id:'security',sender:'GitHub',address:'noreply@github.com',subject:'Security alert: new sign-in',priority:'high' as const,needsReply:false};
+ const replyNeeded={...demoEmails[3],id:'reply',priority:'normal' as const,needsReply:true};
+ assert.deepEqual(sortInboxEmails([routine,security,replyNeeded]).map(email=>email.id),['reply','security','routine']);
+});
+test('related important company notifications fold without pulling routine mail into the group',()=>{
+ const verification={...demoEmails[3],id:'verify',sender:'GitHub',address:'noreply@github.com',subject:'Your GitHub verification code',summary:'Use this code to sign in.',priority:'high' as const,needsReply:false};
+ const setup={...demoEmails[3],id:'setup',sender:'GitHub Security',address:'security@github.com',subject:'Complete your two-factor setup',summary:'Finish account security setup.',priority:'high' as const,needsReply:true};
+ const routine={...demoEmails[3],id:'routine',sender:'GitHub',address:'news@github.com',subject:'This month on GitHub',summary:'A product roundup.',priority:'normal' as const,needsReply:false};
+ const rows=buildInboxRows([routine,verification,setup]);
+ assert.equal(rows[0].kind,'fold');
+ if(rows[0].kind!=='fold')throw new Error('Expected a folded company row');
+ assert.equal(rows[0].company,'GitHub');
+ assert.deepEqual(rows[0].emails.map(email=>email.id),['setup','verify']);
+ assert.equal(rows[0].needsReplyCount,1);
+ assert.equal(rows[1].kind,'email');
+ if(rows[1].kind==='email')assert.equal(rows[1].email.id,'routine');
 });
 test('the demo inbox keeps useful work and noise classifications without AI',()=>{
  assert.ok(demoEmails.some(email=>email.category==='work'&&email.priority==='high'&&email.needsReply));
