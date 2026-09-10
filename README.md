@@ -47,7 +47,7 @@ D1 schema is defined in `db/schema.ts`; generated migrations are in `drizzle/`. 
 ## Limits and behavior
 
 - Each sync covers the latest 60 inbox messages and indicates when additional mail exists. AI analysis is reused for cached messages, reducing repeated processing. The agent processes up to 20 due accounts per invocation; larger deployments need a queue and pagination.
-- A database lease prevents concurrent refreshes for a user. Failures retain the prior inbox snapshot and record an account-level error.
+- A database lease prevents concurrent refreshes for a user. Gmail failures retain the prior inbox snapshot and record an account-level error. Gemini failures still store current mail with basic Gmail-derived classifications and retry AI analysis on the next refresh.
 - Sending uses a deterministic user/message/action/body fingerprint. Completed retries return the stored receipt. An uncertain send stays pending and asks the user to check Gmail before retrying.
 - Unsubscribing uses the message's original List-Unsubscribe headers and an HTTPS endpoint from a trusted provider domain. Redirects are not followed. Unsupported senders open their conversation in Gmail for manual review. Additional trusted endpoint domains can be configured with `UNSUBSCRIBE_ALLOWED_HOSTS`.
 - Unsubscribing does not delete mail or apply Gmail spam labels. Successfully unsubscribed senders are hidden from the dashboard. Existing mail remains in Gmail.
@@ -57,7 +57,7 @@ D1 schema is defined in `db/schema.ts`; generated migrations are in `drizzle/`. 
 
 ## Validation
 
-Production build, TypeScript checking, and affected-file linting pass. Nineteen focused tests cover encryption ownership, CSRF rejection, the protected scheduler, trusted unsubscribe targets, fallback classification, Gemini billing and schema failures, authenticated model-generated sample replies, duplicate-send prevention, sign-in recovery, and Google OAuth configuration with PKCE. Live Gmail connection still needs Google OAuth credentials before end-to-end testing. An unauthenticated dashboard offers a top-level ChatGPT sign-in action; Gmail-token failures remain separate and do not trigger that action.
+Production build, TypeScript checking, and affected-file linting pass. Twenty focused tests cover encryption ownership, CSRF rejection, the protected scheduler, trusted unsubscribe targets, fallback classification, Gemini billing, schema and sync failures, authenticated model-generated sample replies, duplicate-send prevention, sign-in recovery, and Google OAuth configuration with PKCE. Live Gmail connection still needs Google OAuth credentials before end-to-end testing. An unauthenticated dashboard offers a top-level ChatGPT sign-in action; Gmail-token failures remain separate and do not trigger that action.
 
 ## Provider references
 

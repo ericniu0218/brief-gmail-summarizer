@@ -8,6 +8,7 @@ import { generate } from '../server/ai';
 import { demoEmails } from '../lib/mail';
 import { GET as demoDigest } from '../app/api/demo/route';
 import { POST as runScheduledAgent } from '../app/api/agent/route';
+import { summarizeInbox } from '../server/sync';
 
 declare global { var __briefTestEnv: Runtime; var __briefTestHeaders: Headers; }
 const testEnv = {TOKEN_ENCRYPTION_KEY:encode(crypto.getRandomValues(new Uint8Array(32))),APP_URL:'https://brief.example'} as Runtime;
@@ -75,6 +76,16 @@ test('Gemini JSON is rejected when it does not match the requested schema',async
    (error:unknown)=>{assert.equal((error as {status?:number}).status,502);assert.match((error as Error).message,/expected format/i);return true;},
   );
  }finally{globalThis.fetch=original;}
+});
+test('a Gemini outage does not prevent Gmail messages from loading',async()=>{
+ const original=globalThis.fetch;
+ globalThis.fetch=async()=>Response.json({error:{message:'Your prepayment credits are depleted.'}},{status:429});
+ const originalError=console.error;console.error=()=>{};
+ try{
+  const messages=demoEmails.slice(0,2);
+  const result=await summarizeInbox(messages,{...testEnv,GEMINI_API_KEY:'test-key'});
+  assert.equal(result.ai,false);assert.deepEqual(result.emails,messages);
+ }finally{globalThis.fetch=original;console.error=originalError;}
 });
 test('send endpoint rejects unauthenticated callers before contacting any provider',async()=>{
  const original=globalThis.fetch;let called=false;

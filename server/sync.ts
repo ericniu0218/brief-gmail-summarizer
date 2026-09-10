@@ -3,6 +3,13 @@ import { analysisVersion, summarize } from './ai';
 import { HttpError, type Runtime } from './runtime';
 import type { Email } from '@/lib/mail';
 export type Snapshot={emails:Email[];ai:boolean;analysisVersion:string;updated:number;limit:number;hasMore:boolean};
+export async function summarizeInbox(emails:Email[],e:Runtime){
+  try{return await summarize(emails,e);}
+  catch{
+    console.error('Gemini inbox analysis failed; storing the inbox without AI enrichment.');
+    return {emails,ai:false};
+  }
+}
 export async function syncInbox(user:string,e:Runtime) {
   const now=Date.now();
   const lock=await e.DB.prepare('UPDATE connections SET sync_lock = ? WHERE user_id = ? AND sync_lock < ?').bind(now+600000,user,now).run();
@@ -20,7 +27,7 @@ export async function syncInbox(user:string,e:Runtime) {
       messages.push(...await Promise.all(refs.slice(i,i+6).map(async ({id})=>parseMessage(await gmail<GmailMessage>('messages/'+encodeURIComponent(id)+'?format=full',token)))));
     }
     const fresh=messages.filter(m=>!cached.has(m.id)||!old?.ai||old.analysisVersion!==currentAnalysisVersion);
-    const analysis=await summarize(fresh,e);
+    const analysis=await summarizeInbox(fresh,e);
     const analyzed=new Map(analysis.emails.map(m=>[m.id,m]));
     const removed=await e.DB.prepare('SELECT address FROM unsubscribed WHERE user_id = ?').bind(user).all<{address:string}>();
     const muted=new Set(removed.results.map(r=>r.address));
