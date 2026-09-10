@@ -12,7 +12,7 @@ The server implements per-user Gmail OAuth with PKCE and single-use state, encry
 
 ## Activation status
 
-The Site URL, a 256-bit encryption secret, and the default model were configured automatically. A Google OAuth client and an OpenAI API key are still required. They cannot be obtained from the Gmail connector in a Codex conversation. No real Gmail account has been connected or accessed by this implementation.
+The Site URL, a 256-bit encryption secret, the default model, and the existing OpenAI API key are configured in hosting. A Google OAuth client is still required. Google app credentials cannot be obtained from the Gmail connector in a Codex conversation. No real Gmail account has been connected or accessed by this implementation.
 
 The Worker exports both `fetch` and `scheduled` handlers. The Cloudflare build configuration declares `*/30 * * * *`. A hosted schedule must actually be provisioned by the hosting provider before the agent runs with the browser closed. The Sites tools available during this build do not expose a cron provisioning operation, so background activation is unverified. The interface derives agent activity from a recorded server-side scheduler heartbeat, never from a timer or a configuration flag.
 
@@ -57,7 +57,7 @@ D1 schema is defined in `db/schema.ts`; generated migrations are in `drizzle/`. 
 
 ## Validation
 
-Production build and TypeScript checking pass. Six focused tests cover encryption ownership, CSRF rejection, trusted unsubscribe targets, newsletter classification, unauthenticated send rejection, and duplicate-send prevention. Live Google/OpenAI requests and scheduled delivery need provider setup before end-to-end testing.
+Production build and TypeScript checking pass. Thirteen focused tests cover encryption ownership, CSRF rejection, trusted unsubscribe targets, newsletter classification, authenticated model-generated sample replies, duplicate-send prevention, sign-in recovery, and Google OAuth configuration with PKCE. The existing OpenAI key was accepted by the provider’s models endpoint. Live Gmail connection and scheduled delivery still need provider setup before end-to-end testing. An unauthenticated dashboard now offers a top-level ChatGPT sign-in action instead of leaving users at a connection error; Gmail-token failures remain separate and do not trigger that action.
 
 ## Provider references
 

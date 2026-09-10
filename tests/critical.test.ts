@@ -78,3 +78,62 @@ test('a known successful send returns its receipt without sending a duplicate',a
  globalThis.fetch=async(input)=>{const url=String(input);if(url.includes('oauth2.googleapis.com'))return Response.json({access_token:'access'});if(url.includes('messages/send')){sends++;return Response.json({id:'unexpected'});}return Response.json({id:'abc',threadId:'thread',snippet:'Can you review?',internalDate:'1788960000000',labelIds:['INBOX'],payload:{mimeType:'text/plain',headers:[{name:'From',value:'Sender <sender@example.com>'},{name:'Subject',value:'Review'}],body:{data:encode('Can you review?')}}});};
  try{const response=await reply(new Request('https://brief.example/api/reply',{method:'POST',headers:{origin:'https://brief.example','Content-Type':'application/json'},body:JSON.stringify({id:'abc',action:'send',body:'Thanks, received.'})}));assert.equal(response.status,200);assert.deepEqual(await response.json(),{id:'sent-1',status:'sent'});assert.equal(sends,0);}finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
 });
+
+test('an expired dashboard session returns a usable sign-in destination',async()=>{
+ const {GET:connectionStatus}=await import('../app/api/connection/route');
+ const {api}=await import('../hooks/use-inbox');
+ globalThis.__briefTestHeaders=new Headers();
+ const original=globalThis.fetch;
+ globalThis.fetch=async()=>connectionStatus();
+ try{
+  const response=await connectionStatus();
+  assert.equal(response.status,401);
+  const body=await response.json() as {signInUrl?:string};
+  assert.equal(body.signInUrl,'/signin-with-chatgpt?return_to=%2F');
+  await assert.rejects(api('/api/connection'),(error:unknown)=>{
+   assert.equal((error as {signInUrl?:string}).signInUrl,body.signInUrl);
+   return true;
+  });
+ }finally{globalThis.fetch=original;}
+});
+
+test('missing Gmail credentials are reported before starting Google OAuth',async()=>{
+ const {GET:startGoogle}=await import('../app/api/auth/google/route');
+ globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
+ const original=globalThis.fetch;let called=false;
+ globalThis.fetch=async()=>{called=true;throw new Error('Must not contact Google before setup');};
+ try{
+  const response=await startGoogle();
+  assert.equal(response.status,503);
+  assert.match((await response.json() as {error:string}).error,/Google app credentials are not configured/);
+  assert.equal(called,false);
+ }finally{globalThis.fetch=original;globalThis.__briefTestHeaders=new Headers();}
+});
+
+test('a Gmail token failure does not masquerade as a dashboard sign-in failure',async()=>{
+ const {failure,HttpError}=await import('../server/runtime');
+ const response=failure(new HttpError(401,'Reconnect Gmail.'));
+ const body=await response.json() as {signInUrl?:string};
+ assert.equal(response.status,401);
+ assert.equal(body.signInUrl,undefined);
+});
+
+test('configured Gmail starts OAuth with PKCE and the exact callback origin',async()=>{
+ const {GET:startGoogle}=await import('../app/api/auth/google/route');
+ globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
+ let bound:unknown[]=[];
+ const db={prepare(){return {bind(...values:unknown[]){bound=values;return this;},async run(){return {};}};}};
+ globalThis.__briefTestEnv={...testEnv,GOOGLE_CLIENT_ID:'client-id',GOOGLE_CLIENT_SECRET:'client-secret',DB:db as unknown as D1Database};
+ try{
+  const response=await startGoogle();
+  assert.equal(response.status,302);
+  const destination=new URL(response.headers.get('location')!);
+  assert.equal(destination.origin,'https://accounts.google.com');
+  assert.equal(destination.searchParams.get('redirect_uri'),'https://brief.example/api/auth/google/callback');
+  assert.equal(destination.searchParams.get('code_challenge_method'),'S256');
+  assert.equal(destination.searchParams.get('state'),bound[0]);
+  assert.equal(bound[1],'user-a');
+  const challenge=encode(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(String(bound[2])))));
+  assert.equal(destination.searchParams.get('code_challenge'),challenge);
+ }finally{globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
+});

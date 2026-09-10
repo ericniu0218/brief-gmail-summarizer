@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:workers';
-import { getChatGPTUser } from '@/app/chatgpt-auth';
+import { chatGPTSignInPath, getChatGPTUser } from '@/app/chatgpt-auth';
 export type Runtime = {
   DB: D1Database; GOOGLE_CLIENT_ID?: string; GOOGLE_CLIENT_SECRET?: string;
   TOKEN_ENCRYPTION_KEY?: string; OPENAI_API_KEY?: string; OPENAI_MODEL?: string; OPENAI_BASE_URL?: string; APP_URL?: string;
@@ -7,9 +7,12 @@ export type Runtime = {
 };
 export function runtime() { return env as unknown as Runtime; }
 export class HttpError extends Error { constructor(public status: number, message: string) { super(message); } }
+export class SignInRequiredError extends HttpError {
+  constructor() { super(401, 'Please sign in to connect your inbox.'); }
+}
 export async function userId() {
   const user = await getChatGPTUser();
-  if (!user) throw new HttpError(401, 'Please sign in to connect your inbox.');
+  if (!user) throw new SignInRequiredError();
   return user.userId;
 }
 export function mutation(request: Request) {
@@ -21,7 +24,7 @@ export function json(data: unknown, status=200) {
   return Response.json(data, {status, headers: {'Cache-Control':'private, no-store'}});
 }
 export function failure(error: unknown) {
-  return json({error: error instanceof HttpError ? error.message : 'Something went wrong. Please try again.'}, error instanceof HttpError ? error.status : 500);
+  return json({error: error instanceof HttpError ? error.message : 'Something went wrong. Please try again.', ...(error instanceof SignInRequiredError ? {signInUrl: chatGPTSignInPath('/')} : {})}, error instanceof HttpError ? error.status : 500);
 }
 export function configured(e=runtime()) { return !!(e.GOOGLE_CLIENT_ID && e.GOOGLE_CLIENT_SECRET && e.TOKEN_ENCRYPTION_KEY && e.APP_URL); }
 export function encode(input: string | Uint8Array) {
