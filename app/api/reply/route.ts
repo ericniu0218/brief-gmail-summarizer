@@ -1,18 +1,23 @@
 import { accessToken, gmail, parseMessage, type GmailMessage } from '@/server/gmail';
-import { replySuggestion } from '@/server/ai';
+import { polishReply, replyOptions } from '@/server/ai';
 import { encode, failure, HttpError, json, mutation, runtime, userId } from '@/server/runtime';
 export async function POST(request:Request){
   try{
     mutation(request);const user=await userId();const e=runtime();
-    const input=await request.json() as {id?:string;action?:string;tone?:string;body?:string;variation?:number};
+    const input=await request.json() as {id?:string;action?:string;tone?:string;body?:string;variation?:number;notes?:string};
     if(!input.id||!/^[a-zA-Z0-9_-]{1,150}$/.test(input.id))throw new HttpError(400,'Choose a valid email.');
-    if(!['generate','draft','send'].includes(input.action||''))throw new HttpError(400,'Choose a reply action.');
+    if(!['options','polish','draft','send'].includes(input.action||''))throw new HttpError(400,'Choose a reply action.');
     const token=await accessToken(user);
     const email=parseMessage(await gmail<GmailMessage>('messages/'+encodeURIComponent(input.id)+'?format=full',token));
-    if(input.action==='generate'){
+    if(input.action==='options'||input.action==='polish'){
       const tone=['Concise','Friendly','Professional'].includes(input.tone||'')?input.tone!:'Concise';
+      if(input.action==='polish'){
+        if(typeof input.notes!=='string'||!input.notes.trim())throw new HttpError(400,'Describe what you want to say first.');
+        if(input.notes.length>4000)throw new HttpError(400,'Keep your notes under 4,000 characters.');
+        return json(await polishReply(email,input.notes,tone));
+      }
       const variation=typeof input.variation==='number'&&Number.isInteger(input.variation)?Math.min(Math.max(input.variation,0),50):0;
-      return json(await replySuggestion(email,tone,variation));
+      return json(await replyOptions(email,tone,variation));
     }
     if(typeof input.body!=='string'||!input.body.trim()||input.body.length>20000)throw new HttpError(400,'Write a reply of up to 20,000 characters.');
     if(!/^[^\s<>\r\n@]+@[^\s<>\r\n@]+\.[^\s<>\r\n@]+$/.test(email.address))throw new HttpError(400,'The sender address could not be verified. Please reply in Gmail.');

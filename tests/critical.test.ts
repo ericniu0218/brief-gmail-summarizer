@@ -42,7 +42,7 @@ test('sample replies reject unauthenticated callers before contacting any provid
 });
 test('sample replies generate only from the demo inbox, never from caller-supplied text',async()=>{
  globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
- globalThis.__briefTestEnv={...testEnv,OPENAI_API_KEY:'test-key'};
+ globalThis.__briefTestEnv={...testEnv,GEMINI_API_KEY:'test-key'};
  const original=globalThis.fetch;let called=false;
  globalThis.fetch=async()=>{called=true;throw new Error('Must not contact a provider');};
  try{
@@ -50,23 +50,41 @@ test('sample replies generate only from the demo inbox, never from caller-suppli
   assert.equal(called,false);
  }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
 });
-test('sample replies send the chosen tone and regeneration attempt to the model',async()=>{
+test('sample reply options send the chosen tone and regeneration attempt to the model',async()=>{
  globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
- globalThis.__briefTestEnv={...testEnv,OPENAI_API_KEY:'test-key',OPENAI_MODEL:'test-model'};
- const original=globalThis.fetch;let sent:{instructions:string;input:string;model:string}|null=null;
- globalThis.fetch=async(_input,init)=>{sent=JSON.parse(typeof init?.body==='string'?init.body:'{}') as typeof sent;return Response.json({status:'completed',output:[{content:[{type:'output_text',text:'{"reply":"Hi Sarah, sending approval before 2 PM."}'}]}]});};
+ globalThis.__briefTestEnv={...testEnv,GEMINI_API_KEY:'test-key',GEMINI_MODEL:'test-model'};
+ const original=globalThis.fetch;let url='';let sent:{systemInstruction:{parts:{text:string}[]};contents:{role:string;parts:{text:string}[]}[]}|null=null;
+ globalThis.fetch=async(input,init)=>{url=String(input);sent=JSON.parse(typeof init?.body==='string'?init.body:'{}') as typeof sent;return Response.json({candidates:[{content:{parts:[{text:'{"options":["Hi Sarah, approving before 2 PM.","Hi Sarah, I will sign off shortly.","Hi Sarah, you have my approval."]}'}]},finishReason:'STOP'}]});};
  try{
   const response=await suggest(sampleRequest({id:'1',tone:'Professional',variation:2}));
   assert.equal(response.status,200);
-  assert.deepEqual(await response.json(),{reply:'Hi Sarah, sending approval before 2 PM.'});
+  const body=await response.json() as {options:string[]};
+  assert.equal(body.options.length,3);
+  assert.match(url,/models\/test-model:generateContent/);
   const payload=sent!;
-  assert.equal(payload.model,'test-model');
-  assert.match(payload.instructions,/Tone: Professional/);
-  assert.match(payload.instructions,/regeneration/);
-  const modelInput=JSON.parse(payload.input) as {subject:string;tone:string;attempt:number};
+  const instructions=payload.systemInstruction.parts[0].text;
+  assert.match(instructions,/Tone: Professional/);
+  assert.match(instructions,/regeneration/);
+  const modelInput=JSON.parse(payload.contents[0].parts[0].text) as {subject:string;tone:string;attempt:number};
   assert.equal(modelInput.subject,'Website launch — final approval');
   assert.equal(modelInput.tone,'Professional');
   assert.equal(modelInput.attempt,2);
+ }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
+});
+test('polishing a reply sends the user’s notes and rejects empty ones before contacting any provider',async()=>{
+ globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
+ globalThis.__briefTestEnv={...testEnv,GEMINI_API_KEY:'test-key'};
+ const original=globalThis.fetch;let called=false;let sent:{contents:{role:string;parts:{text:string}[]}[]}|null=null;
+ globalThis.fetch=async(_input,init)=>{called=true;sent=JSON.parse(typeof init?.body==='string'?init.body:'{}') as typeof sent;return Response.json({candidates:[{content:{parts:[{text:'{"reply":"Hi Sarah, I will review by Friday and need two more days."}'}]},finishReason:'STOP'}]});};
+ try{
+  const empty=await suggest(sampleRequest({id:'1',action:'polish',tone:'Concise',notes:'   '}));
+  assert.equal(empty.status,400);
+  assert.equal(called,false);
+  const response=await suggest(sampleRequest({id:'1',action:'polish',tone:'Concise',notes:'tell her I will review by Friday and need two more days'}));
+  assert.equal(response.status,200);
+  assert.deepEqual(await response.json(),{reply:'Hi Sarah, I will review by Friday and need two more days.'});
+  const modelInput=JSON.parse(sent!.contents[0].parts[0].text) as {notes:string};
+  assert.match(modelInput.notes,/two more days/);
  }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
 });
 test('a known successful send returns its receipt without sending a duplicate',async()=>{
