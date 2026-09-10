@@ -24,6 +24,10 @@ export function useInbox(){
   const connected=!!status?.connected;
   const inFlight=useRef(false);
   const apply=useCallback((data:Snapshot)=>{setEmails(data.emails);setUpdated(data.updated);setAi(data.ai);setHasMore(!!data.hasMore);},[]);
+  const resetToDemo=useCallback(()=>{
+    apply({emails:demoEmails,updated:null,ai:false,hasMore:false});
+    void api<Snapshot>('/api/demo').then(apply).catch(()=>{});
+  },[apply]);
   const refresh=useCallback(async(silent=false)=>{
     if(inFlight.current)return;
     if(!connected){if(!silent)setNotice('Sample inbox refreshed. Connect Gmail to receive your own email updates.');return;}
@@ -35,22 +39,23 @@ export function useInbox(){
   useEffect(()=>{
     let active=true;
     const error=new URLSearchParams(window.location.search).get('connection_error');
-    if(error)setNotice(error);
+    const noticeTimer=error?window.setTimeout(()=>{if(active)setNotice(error);},0):null;
     if(window.location.search)window.history.replaceState(null,'',window.location.pathname);
     void api<ConnectionStatus>('/api/connection').then(async result=>{
       if(!active)return;setStatus(result);
       if(result.connected){setEmails([]);const data=await api<Snapshot>('/api/mailbox');if(active)apply(data);}
+      else{const data=await api<Snapshot>('/api/demo').catch(()=>null);if(active&&data)apply(data);}
     }).catch(error=>{if(active){setNotice(error instanceof Error?error.message:'Connection status is unavailable. The sample inbox is still available.');if(error instanceof ApiError&&error.signInUrl)setSignInUrl(error.signInUrl);}});
-    return()=>{active=false;};
+    return()=>{active=false;if(noticeTimer!==null)window.clearTimeout(noticeTimer);};
   },[apply]);
   useEffect(()=>{
     if(!connected)return;
-    void refresh(true);
+    const initialSync=window.setTimeout(()=>void refresh(true),0);
     const syncTimer=window.setInterval(()=>void refresh(true),30*60*1000);
     const pollTimer=window.setInterval(()=>{if(document.visibilityState==='visible'&&!inFlight.current)void api<Snapshot>('/api/mailbox').then(apply).catch(()=>{});},60000);
     const visible=()=>{if(document.visibilityState==='visible')void refresh(true);};
     document.addEventListener('visibilitychange',visible);
-    return()=>{clearInterval(syncTimer);clearInterval(pollTimer);document.removeEventListener('visibilitychange',visible);};
+    return()=>{clearTimeout(initialSync);clearInterval(syncTimer);clearInterval(pollTimer);document.removeEventListener('visibilitychange',visible);};
   },[connected,refresh,apply]);
-  return {emails,setEmails,status,setStatus,connected,busy,notice,setNotice,signInUrl,updated,ai,hasMore,refresh};
+  return {emails,setEmails,status,setStatus,connected,busy,notice,setNotice,signInUrl,updated,ai,hasMore,refresh,resetToDemo};
 }

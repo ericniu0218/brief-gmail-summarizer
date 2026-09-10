@@ -14,7 +14,7 @@ The server implements per-user Gmail OAuth with PKCE and single-use state, encry
 
 The Site URL, a 256-bit encryption secret, the default Gemini model, and a Gemini API key are configured in hosting. A Google OAuth client is still required. Google app credentials cannot be obtained from the Gmail connector in a Codex conversation. No real Gmail account has been connected or accessed by this implementation.
 
-The Worker exports both `fetch` and `scheduled` handlers. The Cloudflare build configuration declares `*/30 * * * *`. A hosted schedule must actually be provisioned by the hosting provider before the agent runs with the browser closed. The Sites tools available during this build do not expose a cron provisioning operation, so background activation is unverified. The interface derives agent activity from a recorded server-side scheduler heartbeat, never from a timer or a configuration flag.
+The Worker exports both `fetch` and `scheduled` handlers. The Cloudflare build configuration declares `*/30 * * * *`. Because Sites does not currently expose cron provisioning, the repository also contains a GitHub Actions schedule that calls the protected `/api/agent` endpoint every 30 minutes. The interface derives agent activity from a recorded server-side scheduler heartbeat.
 
 While a connected dashboard is open, it requests a Gmail refresh every 30 minutes, reads completed server snapshots every minute, and checks for updates on return to the tab. Browser refresh is not a substitute for the background schedule.
 
@@ -22,8 +22,8 @@ While a connected dashboard is open, it requests a Gmail refresh every 30 minute
 
 1. Create or select a Google Cloud project and enable the Gmail API. Configure the OAuth consent screen and a Web application OAuth client. Add authorized test users if the app is in testing.
 2. Register the exact redirect URI `https://gmail-hub-brief.lukeli1708.chatgpt.site/api/auth/google/callback`.
-3. Add `GOOGLE_CLIENT_ID` and secret `GOOGLE_CLIENT_SECRET` to the Site runtime environment. Create a free-tier key at [Google AI Studio](https://aistudio.google.com/apikey) and add it as secret `GEMINI_API_KEY` through the Site's secret settings. Keep keys out of source control and browser code. Redeploy to apply hosted environment changes.
-4. Have the hosting operator provision the Worker cron `*/30 * * * *` and verify a successful invocation. The dashboard then changes the scheduler indicator from pending to active after its heartbeat is visible.
+3. Add `GOOGLE_CLIENT_ID` and secret `GOOGLE_CLIENT_SECRET` to the Site runtime environment. Create a key at [Google AI Studio](https://aistudio.google.com/apikey), add it as secret `GEMINI_API_KEY`, and set `GEMINI_MODEL=gemini-3.5-flash-lite`. Keep keys out of source control and browser code. Redeploy to apply hosted environment changes. Google Cloud welcome credits do not cover Gemini API usage; use an unbilled free-tier project or add Gemini prepay credit in AI Studio.
+4. Generate one strong `AGENT_CRON_SECRET`, add it to the Site runtime and the GitHub repository's Actions secrets, and add the Site bypass token as `SITES_BYPASS_TOKEN` in GitHub. Run the **Refresh Gmail inboxes** workflow once and verify its heartbeat. Scheduled runs then invoke the agent every 30 minutes.
 5. Open Settings & connections and Continue with Google. Each user grants consent once; the app requests offline access and renews access tokens automatically. Google may require verification before an externally distributed app can use restricted Gmail scopes. Testing refresh tokens can expire after seven days.
 
 Gmail scopes are `gmail.readonly`, `gmail.send`, and `gmail.compose`. No email is sent by the scheduled agent. The app sends only after the user clicks Send reply. Email content used for summaries and generated replies is sent to the configured Gemini API.
@@ -57,7 +57,7 @@ D1 schema is defined in `db/schema.ts`; generated migrations are in `drizzle/`. 
 
 ## Validation
 
-Production build and TypeScript checking pass. Thirteen focused tests cover encryption ownership, CSRF rejection, trusted unsubscribe targets, newsletter classification, authenticated model-generated sample replies, duplicate-send prevention, sign-in recovery, and Google OAuth configuration with PKCE. Live Gmail connection and scheduled delivery still need provider setup before end-to-end testing. An unauthenticated dashboard offers a top-level ChatGPT sign-in action; Gmail-token failures remain separate and do not trigger that action.
+Production build, TypeScript checking, and affected-file linting pass. Nineteen focused tests cover encryption ownership, CSRF rejection, the protected scheduler, trusted unsubscribe targets, fallback classification, Gemini billing and schema failures, authenticated model-generated sample replies, duplicate-send prevention, sign-in recovery, and Google OAuth configuration with PKCE. Live Gmail connection still needs Google OAuth credentials before end-to-end testing. An unauthenticated dashboard offers a top-level ChatGPT sign-in action; Gmail-token failures remain separate and do not trigger that action.
 
 ## Provider references
 

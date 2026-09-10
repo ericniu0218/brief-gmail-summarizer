@@ -1,0 +1,31 @@
+name: Refresh Gmail summaries
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: refresh-gmail-summaries
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Run the protected inbox agent
+        env:
+          AGENT_CRON_SECRET: ${{ secrets.AGENT_CRON_SECRET }}
+          SITES_BYPASS_TOKEN: ${{ secrets.SITES_BYPASS_TOKEN }}
+        run: |
+          response="$(curl --silent --show-error --fail-with-body \
+            --retry 3 --retry-all-errors \
+            --request POST \
+            --header "Authorization: Bearer ${AGENT_CRON_SECRET}" \
+            --header "OAI-Sites-Authorization: Bearer ${SITES_BYPASS_TOKEN}" \
+            "https://gmail-hub-brief.lukeli1708.chatgpt.site/api/agent")"
+          test "$response" = '{"ok":true}'

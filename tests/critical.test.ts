@@ -4,6 +4,10 @@ import { encrypt, decrypt, encode, mutation, type Runtime } from '../server/runt
 import { parseMessage, safeUnsubscribe } from '../server/gmail';
 import { POST as reply } from '../app/api/reply/route';
 import { POST as suggest } from '../app/api/suggest/route';
+import { generate } from '../server/ai';
+import { demoEmails } from '../lib/mail';
+import { GET as demoDigest } from '../app/api/demo/route';
+import { POST as runScheduledAgent } from '../app/api/agent/route';
 
 declare global { var __briefTestEnv: Runtime; var __briefTestHeaders: Headers; }
 const testEnv = {TOKEN_ENCRYPTION_KEY:encode(crypto.getRandomValues(new Uint8Array(32))),APP_URL:'https://brief.example'} as Runtime;
@@ -21,6 +25,18 @@ test('rejects external-origin mutations and requests without an origin',()=>{
  assert.throws(()=>mutation(new Request('https://brief.example/api/reply',{method:'POST'})));
  assert.doesNotThrow(()=>mutation(new Request('https://brief.example/api/reply',{method:'POST',headers:{origin:'https://brief.example'}})));
 });
+test('the scheduled agent endpoint requires its secret and records a heartbeat',async()=>{
+ const statements:string[]=[];
+ const fakeDb={prepare(sql:string){return {bind(){return this;},async run(){statements.push(sql);return {meta:{changes:1}};},async all(){return {results:[]};}};}};
+ globalThis.__briefTestEnv={...testEnv,DB:fakeDb as unknown as D1Database,AGENT_CRON_SECRET:'cron-secret'};
+ try{
+  const rejected=await runScheduledAgent(new Request('https://brief.example/api/agent',{method:'POST',headers:{authorization:'Bearer wrong'}}));
+  assert.equal(rejected.status,401);assert.equal(statements.length,0);
+  const accepted=await runScheduledAgent(new Request('https://brief.example/api/agent',{method:'POST',headers:{authorization:'Bearer cron-secret'}}));
+  assert.equal(accepted.status,200);assert.deepEqual(await accepted.json(),{ok:true});
+  assert.ok(statements.some(sql=>sql.includes('agent_status')));
+ }finally{globalThis.__briefTestEnv=testEnv;}
+});
 test('one-click targets require trusted HTTPS domains without credentials or custom ports',()=>{
  assert.equal(safeUnsubscribe('https://news.list-manage.com/unsubscribe?id=1',testEnv),true);
  for(const url of ['http://news.list-manage.com/unsubscribe','https://list-manage.com.attacker.example','https://attacker.example','https://127.0.0.1','https://localhost','https://user:pass@list-manage.com','https://list-manage.com:8443'])assert.equal(safeUnsubscribe(url,testEnv),false,url);
@@ -28,6 +44,37 @@ test('one-click targets require trusted HTTPS domains without credentials or cus
 test('newsletter headers cannot promote marketing to an urgent work item',()=>{
  const parsed=parseMessage({id:'abc',threadId:'thread',snippet:'Newsletter',internalDate:'1788960000000',labelIds:['INBOX','IMPORTANT'],payload:{mimeType:'text/plain',headers:[{name:'From',value:'Daily News <hello@news.example>'},{name:'Subject',value:'Our latest issue'},{name:'List-Unsubscribe',value:'<https://news.list-manage.com/u>'},{name:'List-Unsubscribe-Post',value:'List-Unsubscribe=One-Click'}],body:{data:encode('Hello, reader.')}}});
  assert.equal(parsed.category,'noise');assert.equal(parsed.priority,'normal');assert.equal(parsed.address,'hello@news.example');assert.equal(parsed.body,'Hello, reader.');
+});
+test('the demo inbox keeps useful work and noise classifications without AI',()=>{
+ assert.ok(demoEmails.some(email=>email.category==='work'&&email.priority==='high'&&email.needsReply));
+ assert.ok(demoEmails.some(email=>email.category==='noise'&&email.label==='Newsletter'));
+ assert.ok(demoEmails.some(email=>email.category==='personal'&&email.needsReply));
+});
+test('Gemini prepay depletion is reported as a billing-project problem',async()=>{
+ const original=globalThis.fetch;let endpoint='';
+ globalThis.fetch=async input=>{endpoint=String(input);return Response.json({error:{code:429,status:'RESOURCE_EXHAUSTED',message:'Your prepayment credits are depleted. Please go to AI Studio to manage your project and billing.'}},{status:429});};
+ try{
+  await assert.rejects(
+   generate('Return a status.',{message:'test'},{type:'object',properties:{status:{type:'string'}},required:['status']},{...testEnv,GEMINI_API_KEY:'test-key'}),
+   (error:unknown)=>{
+    assert.equal((error as {status?:number}).status,502);
+    assert.match((error as Error).message,/prepay balance/i);
+    assert.match((error as Error).message,/free tier/i);
+    return true;
+   },
+  );
+  assert.match(endpoint,/\/models\/gemini-3\.5-flash-lite:generateContent$/);
+ }finally{globalThis.fetch=original;}
+});
+test('Gemini JSON is rejected when it does not match the requested schema',async()=>{
+ const original=globalThis.fetch;
+ globalThis.fetch=async()=>Response.json({candidates:[{content:{parts:[{text:'{"options":["only one"]}'}]},finishReason:'STOP'}]});
+ try{
+  await assert.rejects(
+   generate('Return options.',{message:'test'},{type:'object',properties:{options:{type:'array',minItems:3,maxItems:3,items:{type:'string'}}},required:['options'],additionalProperties:false},{...testEnv,GEMINI_API_KEY:'test-key'}),
+   (error:unknown)=>{assert.equal((error as {status?:number}).status,502);assert.match((error as Error).message,/expected format/i);return true;},
+  );
+ }finally{globalThis.fetch=original;}
 });
 test('send endpoint rejects unauthenticated callers before contacting any provider',async()=>{
  const original=globalThis.fetch;let called=false;
@@ -39,6 +86,18 @@ test('sample replies reject unauthenticated callers before contacting any provid
  const original=globalThis.fetch;let called=false;
  globalThis.fetch=async()=>{called=true;throw new Error('Must not contact a provider');};
  try{const response=await suggest(sampleRequest({id:'1',tone:'Concise'}));assert.equal(response.status,401);assert.equal(called,false);}finally{globalThis.fetch=original;}
+});
+test('a concurrent demo digest request uses deterministic fallback instead of duplicating Gemini work',async()=>{
+ globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
+ const fakeDb={prepare(){return {bind(){return this;},async first(){return {data:'{"pending":true}',updated:Date.now()};}};}};
+ globalThis.__briefTestEnv={...testEnv,DB:fakeDb as unknown as D1Database,GEMINI_API_KEY:'test-key'};
+ const original=globalThis.fetch;let called=false;
+ globalThis.fetch=async()=>{called=true;throw new Error('Must not duplicate Gemini work');};
+ try{
+  const response=await demoDigest();const body=await response.json() as {emails:typeof demoEmails;ai:boolean};
+  assert.equal(response.status,200);assert.equal(body.ai,false);assert.equal(called,false);
+  assert.ok(body.emails.some(email=>email.category==='noise'));
+ }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
 });
 test('sample replies generate only from the demo inbox, never from caller-supplied text',async()=>{
  globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});

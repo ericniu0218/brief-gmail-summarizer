@@ -4,14 +4,18 @@ export type Email = {
   priority: 'high' | 'normal'; needsReply: boolean; unread: boolean; color: string; label?: string;
   messageId?: string; unsubscribe?: string; oneClick?: boolean;
 };
-// Only the raw message is authored here — sender, subject, body. The AI-derived fields
-// (summary, category, priority, needsReply, label) are placeholders until `/api/demo`
-// runs the same summarize() pass a connected mailbox gets; nothing here is hand-classified.
+// These deterministic classifications keep the demo useful when Gemini is unavailable.
+// AI replaces them with richer summaries and labels when `/api/demo` succeeds.
 type Seed = {id:string;sender:string;address:string;subject:string;body:string;time:string;color:string;unread:boolean;unsubscribe?:string;oneClick?:boolean};
+const workIds=new Set(['1','2','3','4','5','15','16','17','18','19','20','21','22']);
+const highPriorityIds=new Set(['1','2','15','16','17','20']);
+const replyIds=new Set(['1','2','3','5','6','17','20','21','23','25']);
 function seed(s:Seed):Email {
+  const category:Email['category']=s.oneClick?'noise':workIds.has(s.id)?'work':'personal';
+  const priority:Email['priority']=highPriorityIds.has(s.id)?'high':'normal';
   return {id:s.id,sender:s.sender,address:s.address,initials:s.sender.split(/\s+/).slice(0,2).map(n=>n[0]).join('').toUpperCase(),
     subject:s.subject,summary:s.body.replace(/\s+/g,' ').trim().slice(0,140),body:s.body,time:s.time,
-    category:'personal',priority:'normal',needsReply:false,unread:s.unread,color:s.color,label:'Mail',
+    category,priority,needsReply:replyIds.has(s.id),unread:s.unread,color:s.color,label:category==='noise'?'Newsletter':priority==='high'?'Important':category==='work'?'Work':'Personal',
     unsubscribe:s.unsubscribe,oneClick:s.oneClick};
 }
 export const demoEmails: Email[] = [
