@@ -37,7 +37,7 @@ export default function Dashboard() {
 
   return <SidebarProvider style={{'--sidebar-width':'238px'} as React.CSSProperties}>
     <Sidebar className="brief-sidebar">
-      <SidebarHeader className="brand-block"><a className="brand" href="/"><span className="brand-icon"><Layers3 size={23}/></span>brief<span className="brand-dot">.</span></a><span className="brand-caption">A little clarity. A lot less email.</span></SidebarHeader>
+      <SidebarHeader className="brand-block"><a className="brand" href="/"><span className="brand-icon"><Layers3 size={23}/></span>brief<span className="brand-dot">.</span></a><span className="brand-caption">Bedrock Systems 2026</span></SidebarHeader>
       <SidebarContent>
         <div className="workspace-label">WORKSPACE</div>
         <SidebarMenu className="main-navigation">{[{name:'Overview',icon:Sparkles,count:null},{name:'Inbox',icon:Inbox,count:mail.length},{name:'Work',icon:BriefcaseBusiness,count:work.length},{name:'Noise',icon:Layers3,count:noise.length}].map(item=><SidebarMenuItem key={item.name}><SidebarMenuButton isActive={view===item.name} onClick={()=>setView(item.name)} className="nav-button"><item.icon size={18}/><span>{item.name}</span>{item.count!==null&&<span className="nav-count">{item.count}</span>}</SidebarMenuButton></SidebarMenuItem>)}</SidebarMenu>

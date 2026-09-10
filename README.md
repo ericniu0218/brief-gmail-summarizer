@@ -4,7 +4,9 @@ An Apple-inspired Gmail dashboard with a priority briefing, compact email rows, 
 
 ## What works now
 
-The private Site includes an interactive sample workspace. Overview, Inbox, Work, and Noise views, summary collapse, conversation panels, reply tone and text editing, sample replies, and sample unsubscribe actions work without external credentials. Demo actions are labelled and never change real Gmail.
+The private Site includes an interactive sample workspace. Overview, Inbox, Work, and Noise views, summary collapse, conversation panels, reply tone and text editing, and sample unsubscribe actions work without external credentials. Demo actions are labelled and never change real Gmail.
+
+Suggested replies are always model-generated, in the sample workspace as well as a connected mailbox, so they need `OPENAI_API_KEY`. Without it the Generate button is disabled and explains why, rather than showing canned text. Sample replies go to `/api/suggest`, which looks the message up by id in the demo corpus server-side and never generates from caller-supplied text; connected mailboxes go to `/api/reply`, which reads the real message from Gmail. Both pass the selected tone and a regeneration counter to the model, so Regenerate asks for a genuinely different draft instead of reformatting the same one.
 
 The server implements per-user Gmail OAuth with PKCE and single-use state, encrypted offline refresh tokens, automatic access-token renewal, summaries through the OpenAI Responses API, Gmail drafts and send, duplicate-send protection, and RFC 8058 one-click unsubscribe for trusted provider endpoints. Email bodies are displayed as text and treated as untrusted input to AI. API routes require the platform-authenticated user and validate the origin of mutations.
 

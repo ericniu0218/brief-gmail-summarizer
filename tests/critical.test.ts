@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { encrypt, decrypt, encode, mutation, type Runtime } from '../server/runtime';
 import { parseMessage, safeUnsubscribe } from '../server/gmail';
 import { POST as reply } from '../app/api/reply/route';
+import { POST as suggest } from '../app/api/suggest/route';
 
 declare global { var __briefTestEnv: Runtime; var __briefTestHeaders: Headers; }
 const testEnv = {TOKEN_ENCRYPTION_KEY:encode(crypto.getRandomValues(new Uint8Array(32))),APP_URL:'https://brief.example'} as Runtime;
@@ -32,6 +33,41 @@ test('send endpoint rejects unauthenticated callers before contacting any provid
  const original=globalThis.fetch;let called=false;
  globalThis.fetch=async()=>{called=true;throw new Error('Must not contact a provider');};
  try{const response=await reply(new Request('https://brief.example/api/reply',{method:'POST',headers:{origin:'https://brief.example','Content-Type':'application/json'},body:JSON.stringify({id:'abc',action:'send',body:'Hello'})}));assert.equal(response.status,401);assert.equal(called,false);}finally{globalThis.fetch=original;}
+});
+function sampleRequest(body:unknown){return new Request('https://brief.example/api/suggest',{method:'POST',headers:{origin:'https://brief.example','Content-Type':'application/json'},body:JSON.stringify(body)});}
+test('sample replies reject unauthenticated callers before contacting any provider',async()=>{
+ const original=globalThis.fetch;let called=false;
+ globalThis.fetch=async()=>{called=true;throw new Error('Must not contact a provider');};
+ try{const response=await suggest(sampleRequest({id:'1',tone:'Concise'}));assert.equal(response.status,401);assert.equal(called,false);}finally{globalThis.fetch=original;}
+});
+test('sample replies generate only from the demo inbox, never from caller-supplied text',async()=>{
+ globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
+ globalThis.__briefTestEnv={...testEnv,OPENAI_API_KEY:'test-key'};
+ const original=globalThis.fetch;let called=false;
+ globalThis.fetch=async()=>{called=true;throw new Error('Must not contact a provider');};
+ try{
+  for(const id of ['does-not-exist','','99'])assert.equal((await suggest(sampleRequest({id,tone:'Concise'}))).status,400,id);
+  assert.equal(called,false);
+ }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
+});
+test('sample replies send the chosen tone and regeneration attempt to the model',async()=>{
+ globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
+ globalThis.__briefTestEnv={...testEnv,OPENAI_API_KEY:'test-key',OPENAI_MODEL:'test-model'};
+ const original=globalThis.fetch;let sent:{instructions:string;input:string;model:string}|null=null;
+ globalThis.fetch=async(_input,init)=>{sent=JSON.parse(typeof init?.body==='string'?init.body:'{}') as typeof sent;return Response.json({status:'completed',output:[{content:[{type:'output_text',text:'{"reply":"Hi Sarah, sending approval before 2 PM."}'}]}]});};
+ try{
+  const response=await suggest(sampleRequest({id:'1',tone:'Professional',variation:2}));
+  assert.equal(response.status,200);
+  assert.deepEqual(await response.json(),{reply:'Hi Sarah, sending approval before 2 PM.'});
+  const payload=sent!;
+  assert.equal(payload.model,'test-model');
+  assert.match(payload.instructions,/Tone: Professional/);
+  assert.match(payload.instructions,/regeneration/);
+  const modelInput=JSON.parse(payload.input) as {subject:string;tone:string;attempt:number};
+  assert.equal(modelInput.subject,'Website launch — final approval');
+  assert.equal(modelInput.tone,'Professional');
+  assert.equal(modelInput.attempt,2);
+ }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
 });
 test('a known successful send returns its receipt without sending a duplicate',async()=>{
  globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
