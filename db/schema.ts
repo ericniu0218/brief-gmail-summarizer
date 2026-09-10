@@ -21,3 +21,6 @@ export const unsubscribed = sqliteTable('unsubscribed', {
 export const agentStatus = sqliteTable('agent_status', {
   id: text('id').primaryKey(), lastRun: integer('last_run').notNull(),
 });
+export const demoDigest = sqliteTable('demo_digest', {
+  id: text('id').primaryKey(), data: text('data').notNull(), updated: integer('updated').notNull(),
+});

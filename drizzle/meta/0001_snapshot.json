@@ -1,33 +1,9 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "7d09be1b-5f08-46a6-8ffc-760c6acec430",
+  "id": "2cc1c90c-4d67-45e3-94e4-a4b7bd7229f7",
   "prevId": "ba0a0b10-09b3-467b-81a4-72221733d431",
   "tables": {
-    "account_preferences": {
-      "name": "account_preferences",
-      "columns": {
-        "user_id": {
-          "name": "user_id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "default_account_id": {
-          "name": "default_account_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
     "agent_status": {
       "name": "agent_status",
       "columns": {
@@ -55,17 +31,10 @@
     "connections": {
       "name": "connections",
       "columns": {
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
         "user_id": {
           "name": "user_id",
           "type": "text",
-          "primaryKey": false,
+          "primaryKey": true,
           "notNull": true,
           "autoincrement": false
         },
@@ -106,16 +75,38 @@
           "autoincrement": false
         }
       },
-      "indexes": {
-        "connections_user_email": {
-          "name": "connections_user_email",
-          "columns": [
-            "user_id",
-            "email"
-          ],
-          "isUnique": true
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "demo_digest": {
+      "name": "demo_digest",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "data": {
+          "name": "data",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated": {
+          "name": "updated",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
         }
       },
+      "indexes": {},
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
@@ -176,13 +167,6 @@
           "notNull": true,
           "autoincrement": false
         },
-        "account_id": {
-          "name": "account_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
         "status": {
           "name": "status",
           "type": "text",
@@ -210,14 +194,7 @@
         "user_id": {
           "name": "user_id",
           "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "account_id": {
-          "name": "account_id",
-          "type": "text",
-          "primaryKey": false,
+          "primaryKey": true,
           "notNull": true,
           "autoincrement": false
         },
@@ -238,15 +215,7 @@
       },
       "indexes": {},
       "foreignKeys": {},
-      "compositePrimaryKeys": {
-        "snapshots_user_id_account_id_pk": {
-          "columns": [
-            "user_id",
-            "account_id"
-          ],
-          "name": "snapshots_user_id_account_id_pk"
-        }
-      },
+      "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
@@ -262,13 +231,6 @@
         },
         "user_id": {
           "name": "user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "account_id": {
-          "name": "account_id",
           "type": "text",
           "primaryKey": false,
           "notNull": true,

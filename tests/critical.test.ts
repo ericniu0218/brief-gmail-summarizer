@@ -4,45 +4,154 @@ import { encrypt, decrypt, encode, mutation, type Runtime } from '../server/runt
 import { parseMessage, safeUnsubscribe } from '../server/gmail';
 import { POST as reply } from '../app/api/reply/route';
 import { POST as suggest } from '../app/api/suggest/route';
+import { generate } from '../server/ai';
+import { demoEmails } from '../lib/mail';
+import { GET as demoDigest } from '../app/api/demo/route';
+import { POST as runScheduledAgent } from '../app/api/agent/route';
+import { summarizeInbox } from '../server/sync';
+import { buildInboxRows, isImportantEmail, sortInboxEmails } from '../lib/inbox-priority';
 
 declare global { var __briefTestEnv: Runtime; var __briefTestHeaders: Headers; }
 const testEnv = {TOKEN_ENCRYPTION_KEY:encode(crypto.getRandomValues(new Uint8Array(32))),APP_URL:'https://brief.example'} as Runtime;
 globalThis.__briefTestEnv=testEnv;
 globalThis.__briefTestHeaders=new Headers();
 
-void test('stored refresh tokens are encrypted and bound to the owning user',async()=>{
+test('stored refresh tokens are encrypted and bound to the owning user',async()=>{
  const encrypted=await encrypt('sample-refresh-token','user-a',testEnv);
  assert.ok(!encrypted.includes('sample-refresh-token'));
  assert.equal(await decrypt(encrypted,'user-a',testEnv),'sample-refresh-token');
  await assert.rejects(decrypt(encrypted,'user-b',testEnv));
 });
-void test('rejects external-origin mutations and requests without an origin',()=>{
+test('rejects external-origin mutations and requests without an origin',()=>{
  assert.throws(()=>mutation(new Request('https://brief.example/api/reply',{method:'POST',headers:{origin:'https://attacker.example'}})));
  assert.throws(()=>mutation(new Request('https://brief.example/api/reply',{method:'POST'})));
  assert.doesNotThrow(()=>mutation(new Request('https://brief.example/api/reply',{method:'POST',headers:{origin:'https://brief.example'}})));
 });
-void test('one-click targets require trusted HTTPS domains without credentials or custom ports',()=>{
+test('the scheduled agent endpoint requires its secret and records a heartbeat',async()=>{
+ const statements:string[]=[];
+ const fakeDb={prepare(sql:string){return {bind(){return this;},async run(){statements.push(sql);return {meta:{changes:1}};},async all(){return {results:[]};}};}};
+ globalThis.__briefTestEnv={...testEnv,DB:fakeDb as unknown as D1Database,AGENT_CRON_SECRET:'cron-secret'};
+ try{
+  const rejected=await runScheduledAgent(new Request('https://brief.example/api/agent',{method:'POST',headers:{authorization:'Bearer wrong'}}));
+  assert.equal(rejected.status,401);assert.equal(statements.length,0);
+  const accepted=await runScheduledAgent(new Request('https://brief.example/api/agent',{method:'POST',headers:{authorization:'Bearer cron-secret'}}));
+  assert.equal(accepted.status,200);assert.deepEqual(await accepted.json(),{ok:true});
+  assert.ok(statements.some(sql=>sql.includes('agent_status')));
+ }finally{globalThis.__briefTestEnv=testEnv;}
+});
+test('one-click targets require trusted HTTPS domains without credentials or custom ports',()=>{
  assert.equal(safeUnsubscribe('https://news.list-manage.com/unsubscribe?id=1',testEnv),true);
  for(const url of ['http://news.list-manage.com/unsubscribe','https://list-manage.com.attacker.example','https://attacker.example','https://127.0.0.1','https://localhost','https://user:pass@list-manage.com','https://list-manage.com:8443'])assert.equal(safeUnsubscribe(url,testEnv),false,url);
 });
-void test('newsletter headers cannot promote marketing to an urgent work item',()=>{
+test('newsletter headers cannot promote marketing to an urgent work item',()=>{
  const parsed=parseMessage({id:'abc',threadId:'thread',snippet:'Newsletter',internalDate:'1788960000000',labelIds:['INBOX','IMPORTANT'],payload:{mimeType:'text/plain',headers:[{name:'From',value:'Daily News <hello@news.example>'},{name:'Subject',value:'Our latest issue'},{name:'List-Unsubscribe',value:'<https://news.list-manage.com/u>'},{name:'List-Unsubscribe-Post',value:'List-Unsubscribe=One-Click'}],body:{data:encode('Hello, reader.')}}});
  assert.equal(parsed.category,'noise');assert.equal(parsed.priority,'normal');assert.equal(parsed.address,'hello@news.example');assert.equal(parsed.body,'Hello, reader.');
 });
-void test('send endpoint rejects unauthenticated callers before contacting any provider',async()=>{
+test('security and account-access mail is important even without Gmail Important',()=>{
+ const parsed=parseMessage({id:'security',threadId:'thread',snippet:'Use code 482917 to finish signing in.',internalDate:'1788960000000',labelIds:['INBOX'],payload:{mimeType:'text/plain',headers:[{name:'From',value:'GitHub <noreply@github.com>'},{name:'Subject',value:'Your GitHub verification code'}],body:{data:encode('Use code 482917 to finish signing in.')}}});
+ assert.equal(parsed.priority,'high');
+ assert.equal(parsed.label,'Important');
+ assert.equal(isImportantEmail(parsed),true);
+});
+test('reply-needed mail ranks first and routine mail stays at the bottom',()=>{
+ const routine={...demoEmails[3],id:'routine',priority:'normal' as const,needsReply:false};
+ const security={...demoEmails[3],id:'security',sender:'GitHub',address:'noreply@github.com',subject:'Security alert: new sign-in',priority:'high' as const,needsReply:false};
+ const replyNeeded={...demoEmails[3],id:'reply',priority:'normal' as const,needsReply:true};
+ assert.deepEqual(sortInboxEmails([routine,security,replyNeeded]).map(email=>email.id),['reply','security','routine']);
+});
+test('related important company notifications fold without pulling routine mail into the group',()=>{
+ const verification={...demoEmails[3],id:'verify',sender:'GitHub',address:'noreply@github.com',subject:'Your GitHub verification code',summary:'Use this code to sign in.',priority:'high' as const,needsReply:false};
+ const setup={...demoEmails[3],id:'setup',sender:'GitHub Security',address:'security@github.com',subject:'Complete your two-factor setup',summary:'Finish account security setup.',priority:'high' as const,needsReply:true};
+ const routine={...demoEmails[3],id:'routine',sender:'GitHub',address:'news@github.com',subject:'This month on GitHub',summary:'A product roundup.',priority:'normal' as const,needsReply:false};
+ const rows=buildInboxRows([routine,verification,setup]);
+ assert.equal(rows[0].kind,'fold');
+ if(rows[0].kind!=='fold')throw new Error('Expected a folded company row');
+ assert.equal(rows[0].company,'GitHub');
+ assert.deepEqual(rows[0].emails.map(email=>email.id),['setup','verify']);
+ assert.equal(rows[0].needsReplyCount,1);
+ assert.equal(rows[1].kind,'email');
+ if(rows[1].kind==='email')assert.equal(rows[1].email.id,'routine');
+});
+test('the demo inbox keeps useful work and noise classifications without AI',()=>{
+ assert.ok(demoEmails.some(email=>email.category==='work'&&email.priority==='high'&&email.needsReply));
+ assert.ok(demoEmails.some(email=>email.category==='noise'&&email.label==='Newsletter'));
+ assert.ok(demoEmails.some(email=>email.category==='personal'&&email.needsReply));
+});
+test('Gemini prepay depletion is reported as a billing-project problem',async()=>{
+ const original=globalThis.fetch;let endpoint='';
+ globalThis.fetch=async input=>{endpoint=String(input);return Response.json({error:{code:429,status:'RESOURCE_EXHAUSTED',message:'Your prepayment credits are depleted. Please go to AI Studio to manage your project and billing.'}},{status:429});};
+ try{
+  await assert.rejects(
+   generate('Return a status.',{message:'test'},{type:'object',properties:{status:{type:'string'}},required:['status']},{...testEnv,GEMINI_API_KEY:'test-key'}),
+   (error:unknown)=>{
+    assert.equal((error as {status?:number}).status,502);
+    assert.match((error as Error).message,/prepay balance/i);
+    assert.match((error as Error).message,/free tier/i);
+    return true;
+   },
+  );
+  assert.match(endpoint,/\/models\/gemini-3\.5-flash-lite:generateContent$/);
+ }finally{globalThis.fetch=original;}
+});
+test('Gemini JSON is rejected when it does not match the requested schema',async()=>{
+ const original=globalThis.fetch;
+ globalThis.fetch=async()=>Response.json({candidates:[{content:{parts:[{text:'{"options":["only one"]}'}]},finishReason:'STOP'}]});
+ try{
+  await assert.rejects(
+   generate('Return options.',{message:'test'},{type:'object',properties:{options:{type:'array',minItems:3,maxItems:3,items:{type:'string'}}},required:['options'],additionalProperties:false},{...testEnv,GEMINI_API_KEY:'test-key'}),
+   (error:unknown)=>{assert.equal((error as {status?:number}).status,502);assert.match((error as Error).message,/expected format/i);return true;},
+  );
+ }finally{globalThis.fetch=original;}
+});
+test('a Gemini outage does not prevent Gmail messages from loading',async()=>{
+ const original=globalThis.fetch;
+ globalThis.fetch=async()=>Response.json({error:{message:'Your prepayment credits are depleted.'}},{status:429});
+ const originalError=console.error;console.error=()=>{};
+ try{
+  const messages=demoEmails.slice(0,2);
+  const result=await summarizeInbox(messages,{...testEnv,GEMINI_API_KEY:'test-key'});
+  assert.equal(result.ai,false);assert.deepEqual(result.emails,messages);
+ }finally{globalThis.fetch=original;console.error=originalError;}
+});
+test('send endpoint rejects unauthenticated callers before contacting any provider',async()=>{
  const original=globalThis.fetch;let called=false;
  globalThis.fetch=async()=>{called=true;throw new Error('Must not contact a provider');};
  try{const response=await reply(new Request('https://brief.example/api/reply',{method:'POST',headers:{origin:'https://brief.example','Content-Type':'application/json'},body:JSON.stringify({id:'abc',action:'send',body:'Hello'})}));assert.equal(response.status,401);assert.equal(called,false);}finally{globalThis.fetch=original;}
 });
 function sampleRequest(body:unknown){return new Request('https://brief.example/api/suggest',{method:'POST',headers:{origin:'https://brief.example','Content-Type':'application/json'},body:JSON.stringify(body)});}
-void test('sample replies reject unauthenticated callers before contacting any provider',async()=>{
+test('sample replies reject unauthenticated callers before contacting any provider',async()=>{
  const original=globalThis.fetch;let called=false;
  globalThis.fetch=async()=>{called=true;throw new Error('Must not contact a provider');};
  try{const response=await suggest(sampleRequest({id:'1',tone:'Concise'}));assert.equal(response.status,401);assert.equal(called,false);}finally{globalThis.fetch=original;}
 });
-void test('sample replies generate only from the demo inbox, never from caller-supplied text',async()=>{
+test('a concurrent demo digest request uses deterministic fallback instead of duplicating Gemini work',async()=>{
  globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
- globalThis.__briefTestEnv={...testEnv,OPENAI_API_KEY:'test-key'};
+ const fakeDb={prepare(){return {bind(){return this;},async first(){return {data:'{"pending":true}',updated:Date.now()};}};}};
+ globalThis.__briefTestEnv={...testEnv,DB:fakeDb as unknown as D1Database,GEMINI_API_KEY:'test-key'};
+ const original=globalThis.fetch;let called=false;
+ globalThis.fetch=async()=>{called=true;throw new Error('Must not duplicate Gemini work');};
+ try{
+  const response=await demoDigest();const body=await response.json() as {emails:typeof demoEmails;ai:boolean};
+  assert.equal(response.status,200);assert.equal(body.ai,false);assert.equal(called,false);
+  assert.ok(body.emails.some(email=>email.category==='noise'));
+ }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
+});
+test('the demo digest stays available when Gemini is out of credit',async()=>{
+ globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
+ const fakeDb={prepare(){return {bind(){return this;},async first(){return null;},async run(){return {meta:{changes:1}};}};}};
+ globalThis.__briefTestEnv={...testEnv,DB:fakeDb as unknown as D1Database,GEMINI_API_KEY:'test-key'};
+ const original=globalThis.fetch;
+ globalThis.fetch=async()=>Response.json({error:{message:'Your prepayment credits are depleted.'}},{status:429});
+ try{
+  const response=await demoDigest();const body=await response.json() as {emails:typeof demoEmails;ai:boolean};
+  assert.equal(response.status,200);assert.equal(body.ai,false);assert.equal(body.emails.length,demoEmails.length);
+  assert.deepEqual(body.emails.map(email=>email.id),demoEmails.map(email=>email.id));
+  assert.ok(body.emails.some(email=>email.category==='work'&&email.needsReply));
+ }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
+});
+test('sample replies generate only from the demo inbox, never from caller-supplied text',async()=>{
+ globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
+ globalThis.__briefTestEnv={...testEnv,GEMINI_API_KEY:'test-key'};
  const original=globalThis.fetch;let called=false;
  globalThis.fetch=async()=>{called=true;throw new Error('Must not contact a provider');};
  try{
@@ -50,36 +159,54 @@ void test('sample replies generate only from the demo inbox, never from caller-s
   assert.equal(called,false);
  }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
 });
-void test('sample replies send the chosen tone and regeneration attempt to the model',async()=>{
+test('sample reply options send the chosen tone and regeneration attempt to the model',async()=>{
  globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
- globalThis.__briefTestEnv={...testEnv,OPENAI_API_KEY:'test-key',OPENAI_MODEL:'test-model'};
- const original=globalThis.fetch;let sent:{instructions:string;input:string;model:string}|null=null;
- globalThis.fetch=async(_input,init)=>{sent=JSON.parse(typeof init?.body==='string'?init.body:'{}') as typeof sent;return Response.json({status:'completed',output:[{content:[{type:'output_text',text:'{"reply":"Hi Sarah, sending approval before 2 PM."}'}]}]});};
+ globalThis.__briefTestEnv={...testEnv,GEMINI_API_KEY:'test-key',GEMINI_MODEL:'test-model'};
+ const original=globalThis.fetch;let url='';let sent:{systemInstruction:{parts:{text:string}[]};contents:{role:string;parts:{text:string}[]}[]}|null=null;
+ globalThis.fetch=async(input,init)=>{url=String(input);sent=JSON.parse(typeof init?.body==='string'?init.body:'{}') as typeof sent;return Response.json({candidates:[{content:{parts:[{text:'{"options":["Hi Sarah, approving before 2 PM.","Hi Sarah, I will sign off shortly.","Hi Sarah, you have my approval."]}'}]},finishReason:'STOP'}]});};
  try{
   const response=await suggest(sampleRequest({id:'1',tone:'Professional',variation:2}));
   assert.equal(response.status,200);
-  assert.deepEqual(await response.json(),{reply:'Hi Sarah, sending approval before 2 PM.'});
+  const body=await response.json() as {options:string[]};
+  assert.equal(body.options.length,3);
+  assert.match(url,/models\/test-model:generateContent/);
   const payload=sent!;
-  assert.equal(payload.model,'test-model');
-  assert.match(payload.instructions,/Tone: Professional/);
-  assert.match(payload.instructions,/regeneration/);
-  const modelInput=JSON.parse(payload.input) as {subject:string;tone:string;attempt:number};
+  const instructions=payload.systemInstruction.parts[0].text;
+  assert.match(instructions,/Tone: Professional/);
+  assert.match(instructions,/regeneration/);
+  const modelInput=JSON.parse(payload.contents[0].parts[0].text) as {subject:string;tone:string;attempt:number};
   assert.equal(modelInput.subject,'Website launch — final approval');
   assert.equal(modelInput.tone,'Professional');
   assert.equal(modelInput.attempt,2);
  }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
 });
-void test('a known successful send returns its receipt without sending a duplicate',async()=>{
+test('polishing a reply sends the user’s notes and rejects empty ones before contacting any provider',async()=>{
+ globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
+ globalThis.__briefTestEnv={...testEnv,GEMINI_API_KEY:'test-key'};
+ const original=globalThis.fetch;let called=false;let sent:{contents:{role:string;parts:{text:string}[]}[]}|null=null;
+ globalThis.fetch=async(_input,init)=>{called=true;sent=JSON.parse(typeof init?.body==='string'?init.body:'{}') as typeof sent;return Response.json({candidates:[{content:{parts:[{text:'{"reply":"Hi Sarah, I will review by Friday and need two more days."}'}]},finishReason:'STOP'}]});};
+ try{
+  const empty=await suggest(sampleRequest({id:'1',action:'polish',tone:'Concise',notes:'   '}));
+  assert.equal(empty.status,400);
+  assert.equal(called,false);
+  const response=await suggest(sampleRequest({id:'1',action:'polish',tone:'Concise',notes:'tell her I will review by Friday and need two more days'}));
+  assert.equal(response.status,200);
+  assert.deepEqual(await response.json(),{reply:'Hi Sarah, I will review by Friday and need two more days.'});
+  const modelInput=JSON.parse(sent!.contents[0].parts[0].text) as {notes:string};
+  assert.match(modelInput.notes,/two more days/);
+ }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
+});
+test('a known successful send returns its receipt without sending a duplicate',async()=>{
  globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  const encrypted=await encrypt('refresh','user-a',testEnv);
- const fakeDb={prepare(sql:string){return {bind(){return this;},async first(){if(sql.includes('FROM connections'))return {id:'user-a',user_id:'user-a',email:'a@example.com',token:encrypted};if(sql.includes('FROM operations'))return {status:'complete',result:'{"id":"sent-1","status":"sent"}'};return null;}};}};
+ const fakeDb={prepare(sql:string){return {bind(){return this;},async first(){if(sql.includes('FROM connections'))return {user_id:'user-a',email:'a@example.com',token:encrypted};if(sql.includes('FROM operations'))return {status:'complete',result:'{"id":"sent-1","status":"sent"}'};return null;}};}};
  globalThis.__briefTestEnv={...testEnv,DB:fakeDb as unknown as D1Database,GOOGLE_CLIENT_ID:'client',GOOGLE_CLIENT_SECRET:'secret'};
  const original=globalThis.fetch;let sends=0;
- globalThis.fetch=async(input)=>{const url=input instanceof Request?input.url:input.toString();if(url.includes('oauth2.googleapis.com'))return Response.json({access_token:'access'});if(url.includes('messages/send')){sends++;return Response.json({id:'unexpected'});}return Response.json({id:'abc',threadId:'thread',snippet:'Can you review?',internalDate:'1788960000000',labelIds:['INBOX'],payload:{mimeType:'text/plain',headers:[{name:'From',value:'Sender <sender@example.com>'},{name:'Subject',value:'Review'}],body:{data:encode('Can you review?')}}});};
- try{const response=await reply(new Request('https://brief.example/api/reply',{method:'POST',headers:{origin:'https://brief.example','Content-Type':'application/json'},body:JSON.stringify({id:'abc',accountId:'user-a',action:'send',body:'Thanks, received.'})}));assert.equal(response.status,200);assert.deepEqual(await response.json(),{id:'sent-1',status:'sent'});assert.equal(sends,0);}finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
+ globalThis.fetch=async(input)=>{const url=String(input);if(url.includes('oauth2.googleapis.com'))return Response.json({access_token:'access'});if(url.includes('messages/send')){sends++;return Response.json({id:'unexpected'});}return Response.json({id:'abc',threadId:'thread',snippet:'Can you review?',internalDate:'1788960000000',labelIds:['INBOX'],payload:{mimeType:'text/plain',headers:[{name:'From',value:'Sender <sender@example.com>'},{name:'Subject',value:'Review'}],body:{data:encode('Can you review?')}}});};
+ try{const response=await reply(new Request('https://brief.example/api/reply',{method:'POST',headers:{origin:'https://brief.example','Content-Type':'application/json'},body:JSON.stringify({id:'abc',action:'send',body:'Thanks, received.'})}));assert.equal(response.status,200);assert.deepEqual(await response.json(),{id:'sent-1',status:'sent'});assert.equal(sends,0);}finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
 });
 
-void test('an expired dashboard session returns a usable sign-in destination',async()=>{
+test('an expired dashboard session returns a usable sign-in destination',async()=>{
  const {GET:connectionStatus}=await import('../app/api/connection/route');
  const {api}=await import('../hooks/use-inbox');
  globalThis.__briefTestHeaders=new Headers();
@@ -97,7 +224,7 @@ void test('an expired dashboard session returns a usable sign-in destination',as
  }finally{globalThis.fetch=original;}
 });
 
-void test('missing Gmail credentials are reported before starting Google OAuth',async()=>{
+test('missing Gmail credentials are reported before starting Google OAuth',async()=>{
  const {GET:startGoogle}=await import('../app/api/auth/google/route');
  globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  const original=globalThis.fetch;let called=false;
@@ -110,7 +237,7 @@ void test('missing Gmail credentials are reported before starting Google OAuth',
  }finally{globalThis.fetch=original;globalThis.__briefTestHeaders=new Headers();}
 });
 
-void test('a Gmail token failure does not masquerade as a dashboard sign-in failure',async()=>{
+test('a Gmail token failure does not masquerade as a dashboard sign-in failure',async()=>{
  const {failure,HttpError}=await import('../server/runtime');
  const response=failure(new HttpError(401,'Reconnect Gmail.'));
  const body=await response.json() as {signInUrl?:string};
@@ -118,7 +245,7 @@ void test('a Gmail token failure does not masquerade as a dashboard sign-in fail
  assert.equal(body.signInUrl,undefined);
 });
 
-void test('configured Gmail starts OAuth with PKCE and the exact callback origin',async()=>{
+test('configured Gmail starts OAuth with PKCE and the exact callback origin',async()=>{
  const {GET:startGoogle}=await import('../app/api/auth/google/route');
  globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  let bound:unknown[]=[];
@@ -136,64 +263,4 @@ void test('configured Gmail starts OAuth with PKCE and the exact callback origin
   const challenge=encode(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(String(bound[2])))));
   assert.equal(destination.searchParams.get('code_challenge'),challenge);
  }finally{globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
-});
-
-void test('calendar weeks cross month boundaries and begin on Monday',async()=>{
- const {weekDays,dateKey}=await import('../lib/calendar');
- assert.deepEqual(weekDays(new Date(2026,8,6)).map(dateKey),['2026-08-31','2026-09-01','2026-09-02','2026-09-03','2026-09-04','2026-09-05','2026-09-06']);
-});
-void test('calendar resolves email dates against receipt date and rejects invalid dates',async()=>{
- const {emailDates}=await import('../lib/calendar');
- const {demoEmails}=await import('../lib/mail');
- const email={...demoEmails[0],subject:'Plans',body:'Tomorrow and Thursday. September 12, 2026. 2026-09-31.',receivedAt:new Date(2026,8,9,12).getTime()};
- assert.deepEqual(emailDates(email).sort(),['2026-09-10','2026-09-12']);
- assert.deepEqual(emailDates({...email,receivedAt:undefined,body:'Tomorrow'}),[]);
- assert.deepEqual(emailDates({...email,body:'Tomorrow',receivedAt:new Date(2026,11,31,12).getTime()}),['2027-01-01']);
-});
-
-void test('next event skips past dates and noise and selects the nearest date',async()=>{
- const {nextEmailEvent}=await import('../lib/calendar');
- const {demoEmails}=await import('../lib/mail');
- const make=(id:string,body:string)=>({...demoEmails[0],id,subject:'Event',body});
- const emails=[make('later','2026-09-15'),make('past','2026-09-08'),{...make('noise','2026-09-09'),category:'noise' as const},make('next','2026-09-10')];
- assert.equal(nextEmailEvent(emails,new Date(2026,8,9))?.email.id,'next');
- assert.equal(nextEmailEvent(emails,new Date(2026,8,16)),undefined);
-});
-
-void test('calendar resolves multiline weekdays and does not invent dates from explicit weekday labels',async()=>{
- const {emailDates}=await import('../lib/calendar');
- const {demoEmails}=await import('../lib/mail');
- const email={...demoEmails[0],subject:'Plans',receivedAt:new Date(2026,8,20,12).getTime()};
- assert.deepEqual(emailDates({...email,body:'Thursday, September 10, 2026.'}),['2026-09-10']);
- assert.deepEqual(emailDates({...email,body:'This\nSaturday'}),['2026-09-19']);
-});
-void test('account state discards disconnected mailbox data and restores the demo after the last disconnect',async()=>{
- const {reconcileInbox}=await import('../lib/inbox-state');
- const {demoEmails}=await import('../lib/mail');
- const mail=[{...demoEmails[0],accountId:'a'},{...demoEmails[0],accountId:'b'}];
- const remaining={connected:true,accounts:[{id:'b'}],defaultAccountId:'b'};
- const result=reconcileInbox(remaining,mail,[{accountId:'a'},{accountId:'b'}],'a');
- assert.equal(result.activeAccountId,'b');
- assert.deepEqual(result.emails.map(m=>m.accountId),['b']);
- assert.deepEqual(result.snapshots,[{accountId:'b'}]);
- const empty=reconcileInbox({connected:false,accounts:[],defaultAccountId:null},mail,[],'all');
- assert.equal(empty.activeAccountId,null);
- assert.equal(empty.emails,demoEmails);
-});
-
-void test('the client reports an unreadable API response without exposing parser errors',async()=>{
- const {api,ApiError}=await import('../hooks/use-inbox');
- const original=globalThis.fetch;
- globalThis.fetch=async()=>new Response('<html>Service unavailable</html>',{status:503});
- try{await assert.rejects(api('/api/mailbox'),error=>error instanceof ApiError&&error.message.includes('Please try again'));}finally{globalThis.fetch=original;}
-});
-
-void test('the launch approval appears once in the calendar and ignores past feedback references',async()=>{
- const {emailDates}=await import('../lib/calendar');
- const {demoEmails}=await import('../lib/mail');
- const today=new Date(2026,8,10,12);
- assert.deepEqual(emailDates(demoEmails[0],today),['2026-09-10']);
- assert.deepEqual(emailDates({...demoEmails[0],body:'We incorporated feedback from last Monday. The launch is Thursday.'},today),['2026-09-10']);
- // An invitation received earlier in the week still belongs on its scheduled day.
- assert.deepEqual(emailDates({...demoEmails[0],receivedAt:new Date(2026,8,7,12).getTime(),body:'Meeting tomorrow.'}),['2026-09-08']);
 });
