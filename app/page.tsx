@@ -60,12 +60,8 @@ export default function Dashboard() {
         <footer className="page-footer"><span><span className="small-dot"/> {connected?(lastSync?`Last synced ${lastSync} · Refreshes every 30 minutes while open`:'Gmail connected · Preparing your first brief'):'Sample emails · Connect Gmail to make it yours'}</span><span>Made for a little more headspace.</span></footer>
       </main>
     </div>
-<<<<<<< HEAD
     <ConnectionPanel signInUrl={inbox.signInUrl} open={connect} onOpenChange={setConnect} status={status} onDisconnect={()=>{inbox.setStatus(previous=>previous?{...previous,connected:false,email:null}:null);inbox.setEmails(demoEmails);inbox.setNotice('Gmail disconnected. You’re now viewing the sample inbox.');}}/>
-=======
-    <ConnectionPanel open={connect} onOpenChange={setConnect} status={status} onDisconnect={()=>{inbox.setStatus(previous=>previous?{...previous,connected:false,email:null}:null);inbox.setEmails(demoEmails);inbox.setNotice('Gmail disconnected. You’re now viewing the sample inbox.');}}/>
     <InboxDigest open={digest} onOpenChange={setDigest} emails={emails} ai={inbox.ai} connected={connected} onSelect={setSelected}/>
->>>>>>> 382b446 (Added the ai archetype, just need to add working api with credits)
     <Sheet open={!!selected} onOpenChange={o=>!o&&setSelected(null)}><SheetContent className="email-sheet"><SheetHeader><span className="eyebrow">CONVERSATION</span><SheetTitle>{selected?.subject}</SheetTitle><SheetDescription>{selected?.sender} · {selected?.address}</SheetDescription></SheetHeader><div className="message-body">{selected?.body}</div>{selected&&<ReplyComposer key={selected?.id||'none'} email={selected!} demo={!connected} aiReady={!!status?.aiConfigured} onSent={markReplied}/>}</SheetContent></Sheet>
   </SidebarProvider>;
 }

@@ -40,12 +40,7 @@ export function useInbox(){
     void api<ConnectionStatus>('/api/connection').then(async result=>{
       if(!active)return;setStatus(result);
       if(result.connected){setEmails([]);const data=await api<Snapshot>('/api/mailbox');if(active)apply(data);}
-<<<<<<< HEAD
     }).catch(error=>{if(active){setNotice(error instanceof Error?error.message:'Connection status is unavailable. The sample inbox is still available.');if(error instanceof ApiError&&error.signInUrl)setSignInUrl(error.signInUrl);}});
-=======
-      else{const data=await api<Snapshot>('/api/demo').catch(()=>null);if(active&&data)apply(data);}
-    }).catch(error=>{if(active)setNotice(error instanceof Error?error.message:'Connection status is unavailable. The sample inbox is still available.');});
->>>>>>> 382b446 (Added the ai archetype, just need to add working api with credits)
     return()=>{active=false;};
   },[apply]);
   useEffect(()=>{
