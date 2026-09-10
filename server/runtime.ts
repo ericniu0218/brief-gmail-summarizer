@@ -20,6 +20,12 @@ export function mutation(request: Request) {
   const expected = runtime().APP_URL || new URL(request.url).origin;
   if (!origin || origin !== expected) throw new HttpError(403, 'Please use this action from your dashboard.');
 }
+export async function inputObject(request:Request):Promise<Record<string,unknown>> {
+  let value:unknown;
+  try{value=await request.json();}catch{throw new HttpError(400,'Provide a valid JSON request.');}
+  if(!value||typeof value!=='object'||Array.isArray(value))throw new HttpError(400,'Provide a valid JSON object.');
+  return value as Record<string,unknown>;
+}
 export function json(data: unknown, status=200) {
   return Response.json(data, {status, headers: {'Cache-Control':'private, no-store'}});
 }

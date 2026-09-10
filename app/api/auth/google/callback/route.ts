@@ -18,10 +18,11 @@ export async function GET(request:Request){
     const profile=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile',{headers:{Authorization:`Bearer ${token.access_token}`},signal:AbortSignal.timeout(15000)});
     if(!profile.ok)throw new HttpError(400,'Gmail access could not be verified. Check that the Gmail API is enabled.');
     const {emailAddress}=await profile.json() as {emailAddress:string};
+    const email=emailAddress.toLowerCase();
+    const id=crypto.randomUUID();
     await e.DB.batch([
-      e.DB.prepare('INSERT INTO connections (user_id,email,token,last_sync,sync_lock,error) VALUES (?,?,?,NULL,0,NULL) ON CONFLICT(user_id) DO UPDATE SET email=excluded.email,token=excluded.token,last_sync=NULL,sync_lock=0,error=NULL').bind(user,emailAddress,await encrypt(token.refresh_token,user,e)),
-      e.DB.prepare('DELETE FROM snapshots WHERE user_id = ?').bind(user),
-      e.DB.prepare('DELETE FROM unsubscribed WHERE user_id = ?').bind(user),
+      e.DB.prepare('INSERT INTO connections (id,user_id,email,token,last_sync,sync_lock,error) VALUES (?,?,?,?,NULL,0,NULL) ON CONFLICT(user_id,email) DO UPDATE SET token=excluded.token,last_sync=NULL,error=NULL').bind(id,user,email,await encrypt(token.refresh_token,user,e)),
+      e.DB.prepare('INSERT INTO account_preferences (user_id,default_account_id) SELECT user_id,id FROM connections WHERE user_id=? AND email=? ON CONFLICT(user_id) DO NOTHING').bind(user,email),
     ]);
     return Response.redirect(origin+'/?connected=1',302);
   }catch(error){

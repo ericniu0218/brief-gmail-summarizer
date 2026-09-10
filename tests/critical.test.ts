@@ -10,37 +10,37 @@ const testEnv = {TOKEN_ENCRYPTION_KEY:encode(crypto.getRandomValues(new Uint8Arr
 globalThis.__briefTestEnv=testEnv;
 globalThis.__briefTestHeaders=new Headers();
 
-test('stored refresh tokens are encrypted and bound to the owning user',async()=>{
+void test('stored refresh tokens are encrypted and bound to the owning user',async()=>{
  const encrypted=await encrypt('sample-refresh-token','user-a',testEnv);
  assert.ok(!encrypted.includes('sample-refresh-token'));
  assert.equal(await decrypt(encrypted,'user-a',testEnv),'sample-refresh-token');
  await assert.rejects(decrypt(encrypted,'user-b',testEnv));
 });
-test('rejects external-origin mutations and requests without an origin',()=>{
+void test('rejects external-origin mutations and requests without an origin',()=>{
  assert.throws(()=>mutation(new Request('https://brief.example/api/reply',{method:'POST',headers:{origin:'https://attacker.example'}})));
  assert.throws(()=>mutation(new Request('https://brief.example/api/reply',{method:'POST'})));
  assert.doesNotThrow(()=>mutation(new Request('https://brief.example/api/reply',{method:'POST',headers:{origin:'https://brief.example'}})));
 });
-test('one-click targets require trusted HTTPS domains without credentials or custom ports',()=>{
+void test('one-click targets require trusted HTTPS domains without credentials or custom ports',()=>{
  assert.equal(safeUnsubscribe('https://news.list-manage.com/unsubscribe?id=1',testEnv),true);
  for(const url of ['http://news.list-manage.com/unsubscribe','https://list-manage.com.attacker.example','https://attacker.example','https://127.0.0.1','https://localhost','https://user:pass@list-manage.com','https://list-manage.com:8443'])assert.equal(safeUnsubscribe(url,testEnv),false,url);
 });
-test('newsletter headers cannot promote marketing to an urgent work item',()=>{
+void test('newsletter headers cannot promote marketing to an urgent work item',()=>{
  const parsed=parseMessage({id:'abc',threadId:'thread',snippet:'Newsletter',internalDate:'1788960000000',labelIds:['INBOX','IMPORTANT'],payload:{mimeType:'text/plain',headers:[{name:'From',value:'Daily News <hello@news.example>'},{name:'Subject',value:'Our latest issue'},{name:'List-Unsubscribe',value:'<https://news.list-manage.com/u>'},{name:'List-Unsubscribe-Post',value:'List-Unsubscribe=One-Click'}],body:{data:encode('Hello, reader.')}}});
  assert.equal(parsed.category,'noise');assert.equal(parsed.priority,'normal');assert.equal(parsed.address,'hello@news.example');assert.equal(parsed.body,'Hello, reader.');
 });
-test('send endpoint rejects unauthenticated callers before contacting any provider',async()=>{
+void test('send endpoint rejects unauthenticated callers before contacting any provider',async()=>{
  const original=globalThis.fetch;let called=false;
  globalThis.fetch=async()=>{called=true;throw new Error('Must not contact a provider');};
  try{const response=await reply(new Request('https://brief.example/api/reply',{method:'POST',headers:{origin:'https://brief.example','Content-Type':'application/json'},body:JSON.stringify({id:'abc',action:'send',body:'Hello'})}));assert.equal(response.status,401);assert.equal(called,false);}finally{globalThis.fetch=original;}
 });
 function sampleRequest(body:unknown){return new Request('https://brief.example/api/suggest',{method:'POST',headers:{origin:'https://brief.example','Content-Type':'application/json'},body:JSON.stringify(body)});}
-test('sample replies reject unauthenticated callers before contacting any provider',async()=>{
+void test('sample replies reject unauthenticated callers before contacting any provider',async()=>{
  const original=globalThis.fetch;let called=false;
  globalThis.fetch=async()=>{called=true;throw new Error('Must not contact a provider');};
  try{const response=await suggest(sampleRequest({id:'1',tone:'Concise'}));assert.equal(response.status,401);assert.equal(called,false);}finally{globalThis.fetch=original;}
 });
-test('sample replies generate only from the demo inbox, never from caller-supplied text',async()=>{
+void test('sample replies generate only from the demo inbox, never from caller-supplied text',async()=>{
  globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  globalThis.__briefTestEnv={...testEnv,OPENAI_API_KEY:'test-key'};
  const original=globalThis.fetch;let called=false;
@@ -50,7 +50,7 @@ test('sample replies generate only from the demo inbox, never from caller-suppli
   assert.equal(called,false);
  }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
 });
-test('sample replies send the chosen tone and regeneration attempt to the model',async()=>{
+void test('sample replies send the chosen tone and regeneration attempt to the model',async()=>{
  globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  globalThis.__briefTestEnv={...testEnv,OPENAI_API_KEY:'test-key',OPENAI_MODEL:'test-model'};
  const original=globalThis.fetch;let sent:{instructions:string;input:string;model:string}|null=null;
@@ -69,17 +69,17 @@ test('sample replies send the chosen tone and regeneration attempt to the model'
   assert.equal(modelInput.attempt,2);
  }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
 });
-test('a known successful send returns its receipt without sending a duplicate',async()=>{
+void test('a known successful send returns its receipt without sending a duplicate',async()=>{
  globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  const encrypted=await encrypt('refresh','user-a',testEnv);
- const fakeDb={prepare(sql:string){return {bind(){return this;},async first(){if(sql.includes('FROM connections'))return {user_id:'user-a',email:'a@example.com',token:encrypted};if(sql.includes('FROM operations'))return {status:'complete',result:'{"id":"sent-1","status":"sent"}'};return null;}};}};
+ const fakeDb={prepare(sql:string){return {bind(){return this;},async first(){if(sql.includes('FROM connections'))return {id:'user-a',user_id:'user-a',email:'a@example.com',token:encrypted};if(sql.includes('FROM operations'))return {status:'complete',result:'{"id":"sent-1","status":"sent"}'};return null;}};}};
  globalThis.__briefTestEnv={...testEnv,DB:fakeDb as unknown as D1Database,GOOGLE_CLIENT_ID:'client',GOOGLE_CLIENT_SECRET:'secret'};
  const original=globalThis.fetch;let sends=0;
- globalThis.fetch=async(input)=>{const url=String(input);if(url.includes('oauth2.googleapis.com'))return Response.json({access_token:'access'});if(url.includes('messages/send')){sends++;return Response.json({id:'unexpected'});}return Response.json({id:'abc',threadId:'thread',snippet:'Can you review?',internalDate:'1788960000000',labelIds:['INBOX'],payload:{mimeType:'text/plain',headers:[{name:'From',value:'Sender <sender@example.com>'},{name:'Subject',value:'Review'}],body:{data:encode('Can you review?')}}});};
- try{const response=await reply(new Request('https://brief.example/api/reply',{method:'POST',headers:{origin:'https://brief.example','Content-Type':'application/json'},body:JSON.stringify({id:'abc',action:'send',body:'Thanks, received.'})}));assert.equal(response.status,200);assert.deepEqual(await response.json(),{id:'sent-1',status:'sent'});assert.equal(sends,0);}finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
+ globalThis.fetch=async(input)=>{const url=input instanceof Request?input.url:input.toString();if(url.includes('oauth2.googleapis.com'))return Response.json({access_token:'access'});if(url.includes('messages/send')){sends++;return Response.json({id:'unexpected'});}return Response.json({id:'abc',threadId:'thread',snippet:'Can you review?',internalDate:'1788960000000',labelIds:['INBOX'],payload:{mimeType:'text/plain',headers:[{name:'From',value:'Sender <sender@example.com>'},{name:'Subject',value:'Review'}],body:{data:encode('Can you review?')}}});};
+ try{const response=await reply(new Request('https://brief.example/api/reply',{method:'POST',headers:{origin:'https://brief.example','Content-Type':'application/json'},body:JSON.stringify({id:'abc',accountId:'user-a',action:'send',body:'Thanks, received.'})}));assert.equal(response.status,200);assert.deepEqual(await response.json(),{id:'sent-1',status:'sent'});assert.equal(sends,0);}finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
 });
 
-test('an expired dashboard session returns a usable sign-in destination',async()=>{
+void test('an expired dashboard session returns a usable sign-in destination',async()=>{
  const {GET:connectionStatus}=await import('../app/api/connection/route');
  const {api}=await import('../hooks/use-inbox');
  globalThis.__briefTestHeaders=new Headers();
@@ -97,7 +97,7 @@ test('an expired dashboard session returns a usable sign-in destination',async()
  }finally{globalThis.fetch=original;}
 });
 
-test('missing Gmail credentials are reported before starting Google OAuth',async()=>{
+void test('missing Gmail credentials are reported before starting Google OAuth',async()=>{
  const {GET:startGoogle}=await import('../app/api/auth/google/route');
  globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  const original=globalThis.fetch;let called=false;
@@ -110,7 +110,7 @@ test('missing Gmail credentials are reported before starting Google OAuth',async
  }finally{globalThis.fetch=original;globalThis.__briefTestHeaders=new Headers();}
 });
 
-test('a Gmail token failure does not masquerade as a dashboard sign-in failure',async()=>{
+void test('a Gmail token failure does not masquerade as a dashboard sign-in failure',async()=>{
  const {failure,HttpError}=await import('../server/runtime');
  const response=failure(new HttpError(401,'Reconnect Gmail.'));
  const body=await response.json() as {signInUrl?:string};
@@ -118,7 +118,7 @@ test('a Gmail token failure does not masquerade as a dashboard sign-in failure',
  assert.equal(body.signInUrl,undefined);
 });
 
-test('configured Gmail starts OAuth with PKCE and the exact callback origin',async()=>{
+void test('configured Gmail starts OAuth with PKCE and the exact callback origin',async()=>{
  const {GET:startGoogle}=await import('../app/api/auth/google/route');
  globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  let bound:unknown[]=[];
@@ -136,4 +136,64 @@ test('configured Gmail starts OAuth with PKCE and the exact callback origin',asy
   const challenge=encode(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(String(bound[2])))));
   assert.equal(destination.searchParams.get('code_challenge'),challenge);
  }finally{globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
+});
+
+void test('calendar weeks cross month boundaries and begin on Monday',async()=>{
+ const {weekDays,dateKey}=await import('../lib/calendar');
+ assert.deepEqual(weekDays(new Date(2026,8,6)).map(dateKey),['2026-08-31','2026-09-01','2026-09-02','2026-09-03','2026-09-04','2026-09-05','2026-09-06']);
+});
+void test('calendar resolves email dates against receipt date and rejects invalid dates',async()=>{
+ const {emailDates}=await import('../lib/calendar');
+ const {demoEmails}=await import('../lib/mail');
+ const email={...demoEmails[0],subject:'Plans',body:'Tomorrow and Thursday. September 12, 2026. 2026-09-31.',receivedAt:new Date(2026,8,9,12).getTime()};
+ assert.deepEqual(emailDates(email).sort(),['2026-09-10','2026-09-12']);
+ assert.deepEqual(emailDates({...email,receivedAt:undefined,body:'Tomorrow'}),[]);
+ assert.deepEqual(emailDates({...email,body:'Tomorrow',receivedAt:new Date(2026,11,31,12).getTime()}),['2027-01-01']);
+});
+
+void test('next event skips past dates and noise and selects the nearest date',async()=>{
+ const {nextEmailEvent}=await import('../lib/calendar');
+ const {demoEmails}=await import('../lib/mail');
+ const make=(id:string,body:string)=>({...demoEmails[0],id,subject:'Event',body});
+ const emails=[make('later','2026-09-15'),make('past','2026-09-08'),{...make('noise','2026-09-09'),category:'noise' as const},make('next','2026-09-10')];
+ assert.equal(nextEmailEvent(emails,new Date(2026,8,9))?.email.id,'next');
+ assert.equal(nextEmailEvent(emails,new Date(2026,8,16)),undefined);
+});
+
+void test('calendar resolves multiline weekdays and does not invent dates from explicit weekday labels',async()=>{
+ const {emailDates}=await import('../lib/calendar');
+ const {demoEmails}=await import('../lib/mail');
+ const email={...demoEmails[0],subject:'Plans',receivedAt:new Date(2026,8,20,12).getTime()};
+ assert.deepEqual(emailDates({...email,body:'Thursday, September 10, 2026.'}),['2026-09-10']);
+ assert.deepEqual(emailDates({...email,body:'This\nSaturday'}),['2026-09-19']);
+});
+void test('account state discards disconnected mailbox data and restores the demo after the last disconnect',async()=>{
+ const {reconcileInbox}=await import('../lib/inbox-state');
+ const {demoEmails}=await import('../lib/mail');
+ const mail=[{...demoEmails[0],accountId:'a'},{...demoEmails[0],accountId:'b'}];
+ const remaining={connected:true,accounts:[{id:'b'}],defaultAccountId:'b'};
+ const result=reconcileInbox(remaining,mail,[{accountId:'a'},{accountId:'b'}],'a');
+ assert.equal(result.activeAccountId,'b');
+ assert.deepEqual(result.emails.map(m=>m.accountId),['b']);
+ assert.deepEqual(result.snapshots,[{accountId:'b'}]);
+ const empty=reconcileInbox({connected:false,accounts:[],defaultAccountId:null},mail,[],'all');
+ assert.equal(empty.activeAccountId,null);
+ assert.equal(empty.emails,demoEmails);
+});
+
+void test('the client reports an unreadable API response without exposing parser errors',async()=>{
+ const {api,ApiError}=await import('../hooks/use-inbox');
+ const original=globalThis.fetch;
+ globalThis.fetch=async()=>new Response('<html>Service unavailable</html>',{status:503});
+ try{await assert.rejects(api('/api/mailbox'),error=>error instanceof ApiError&&error.message.includes('Please try again'));}finally{globalThis.fetch=original;}
+});
+
+void test('the launch approval appears once in the calendar and ignores past feedback references',async()=>{
+ const {emailDates}=await import('../lib/calendar');
+ const {demoEmails}=await import('../lib/mail');
+ const today=new Date(2026,8,10,12);
+ assert.deepEqual(emailDates(demoEmails[0],today),['2026-09-10']);
+ assert.deepEqual(emailDates({...demoEmails[0],body:'We incorporated feedback from last Monday. The launch is Thursday.'},today),['2026-09-10']);
+ // An invitation received earlier in the week still belongs on its scheduled day.
+ assert.deepEqual(emailDates({...demoEmails[0],receivedAt:new Date(2026,8,7,12).getTime(),body:'Meeting tomorrow.'}),['2026-09-08']);
 });

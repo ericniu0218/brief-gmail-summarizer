@@ -1,8 +1,8 @@
 export type Email = {
-  id: string; threadId?: string; sender: string; address: string; initials: string;
+  id: string; accountId?: string; accountEmail?: string; threadId?: string; sender: string; address: string; initials: string;
   subject: string; summary: string; body: string; time: string; category: 'work' | 'personal' | 'noise';
   priority: 'high' | 'normal'; needsReply: boolean; unread: boolean; color: string; label?: string;
-  messageId?: string; unsubscribe?: string; oneClick?: boolean;
+  receivedAt?: number; messageId?: string; unsubscribe?: string; oneClick?: boolean;
 };
 export const demoEmails: Email[] = [
   { id:'1', sender:'Sarah Chen', address:'sarah@studio.example', initials:'SC', subject:'Website launch — final approval', summary:'The launch is ready. Sarah needs your sign-off on the final designs by 2 PM.', body:'Hi Alex,\n\nThe final website designs are ready for your review. We’ve incorporated the feedback from yesterday, and the engineering team is all set.\n\nCould you give us your final approval by 2 PM so we can stay on track for Thursday’s launch?\n\nThanks!\nSarah', time:'9:42 AM', category:'work', priority:'high', needsReply:true, unread:true, color:'purple', label:'Due today' },
@@ -22,3 +22,9 @@ export const demoEmails: Email[] = [
     ['14','Travel Notes','TN','A change of scenery','Featured destinations and this month’s deals.','green'],
   ].map(([id,sender,initials,subject,summary,color])=>({id,sender,initials,subject,summary,color,address:sender.toLowerCase().replaceAll(' ','')+'@newsletter.example',body:summary,time:'Today',category:'noise' as const,priority:'normal' as const,needsReply:false,unread:false,oneClick:true}))
 ];
+
+export function emailKey(email: Email): string { return JSON.stringify([email.accountId || 'demo', email.id]); }
+export function senderKey(email: Email): string { return JSON.stringify([email.accountId || 'demo', email.address]); }
+export function gmailLink(email: Email): string {
+  return `https://mail.google.com/mail/u/?authuser=${encodeURIComponent(email.accountEmail || '')}#all/${encodeURIComponent(email.threadId || email.id)}`;
+}

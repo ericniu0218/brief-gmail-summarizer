@@ -8,6 +8,13 @@
       "when": 1788941512323,
       "tag": "0000_warm_patch",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1789022791237,
+      "tag": "0001_multiple_gmail_accounts",
+      "breakpoints": true
     }
   ]
 }

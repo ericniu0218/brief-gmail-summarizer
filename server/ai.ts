@@ -37,10 +37,10 @@ const toneGuide:Record<string,string>={
 };
 export function replySuggestion(email:Email,tone:string,variation=0,e=runtime()) {
   return generate<{reply:string}>(
-    'Draft a complete email reply for the user to review, signed as Alex. Tone: '+tone+'. '+(toneGuide[tone]||toneGuide.Concise)+
+    (email.accountEmail?'Draft a complete email reply for the user to review. Do not invent a sender name or add a signature. Tone: ':'Draft a complete email reply for the user to review, signed as Alex. Tone: ')+tone+'. '+(toneGuide[tone]||toneGuide.Concise)+
     ' Let the tone shape the whole reply, not only the greeting and sign-off: change the sentence structure, length, and word choice to match it.'+
     (variation?' This is a regeneration. Write a genuinely different draft: take a different angle on the reply, reorder the points, and reuse none of the phrasing a previous attempt would have produced.':'')+
     ' Acknowledge the actual request, without inventing approvals, completed work, availability, attachments, or promises. Do not include subject headers. Never send anything.',
-    {sender:email.sender,subject:email.subject,body:email.body.slice(0,7000),tone,attempt:variation,seed:crypto.randomUUID()},
+    {replyFrom:email.accountEmail,sender:email.sender,subject:email.subject,body:email.body.slice(0,7000),tone,attempt:variation,seed:crypto.randomUUID()},
     {type:'object',properties:{reply:{type:'string'}},required:['reply'],additionalProperties:false},e);
 }
