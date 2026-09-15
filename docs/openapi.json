@@ -1,0 +1,1491 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Brief shared workspace interface",
+    "version": "1.0.0",
+    "description": "Durable workspace-owned corpora and results. Timestamps are Unix milliseconds. Hosted human sessions require Sites dispatch authentication and Origin on writes; integration servers use a scoped key and may additionally need a hosting bypass credential. Never send unverified user identity headers to an exposed server. The bearer scheme models server integrations. Human-only endpoints use an existing browser session through Sites dispatch, not an integration key; this external hosting session is not specified by this contract."
+  },
+  "servers": [
+    {
+      "url": "/api/v1"
+    }
+  ],
+  "security": [
+    {
+      "integrationBearer": []
+    }
+  ],
+  "paths": {
+    "/workspaces": {
+      "get": {
+        "operationId": "listWorkspaces",
+        "summary": "listWorkspaces",
+        "description": "Signed-in human; only their memberships.",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Workspace"
+                      }
+                    }
+                  },
+                  "required": ["items"]
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured application error (400, 401, 403, 404, 409, 413, 415, 500). The hosting gate may return an authentication redirect before reaching the application.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createWorkspace",
+        "summary": "createWorkspace",
+        "description": "Signed-in human becomes owner.",
+        "parameters": [],
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workspace"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured application error (400, 401, 403, 404, 409, 413, 415, 500). The hosting gate may return an authentication redirect before reaching the application.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 80
+                  }
+                },
+                "required": ["name"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/join": {
+      "post": {
+        "operationId": "redeemInvite",
+        "summary": "redeemInvite",
+        "description": "Signed-in human; one use, seven-day expiration.",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "workspaceId": {
+                      "type": "string"
+                    }
+                  },
+                  "required": ["workspaceId"]
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured application error (400, 401, 403, 404, 409, 413, 415, 500). The hosting gate may return an authentication redirect before reaching the application.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "token": {
+                    "type": "string"
+                  }
+                },
+                "required": ["token"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workspaces/{workspaceId}/artifacts": {
+      "get": {
+        "operationId": "listArtifacts",
+        "summary": "listArtifacts",
+        "description": "Workspace read permission; metadata only.",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 160
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 100
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 30
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "description": "Pass returned nextCursor unchanged; retain original q and kind."
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ArtifactSummary"
+                      }
+                    },
+                    "nextCursor": {
+                      "type": ["string", "null"]
+                    }
+                  },
+                  "required": ["items", "nextCursor"]
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured application error (400, 401, 403, 404, 409, 413, 415, 500). The hosting gate may return an authentication redirect before reaching the application.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "publishArtifact",
+        "summary": "publishArtifact",
+        "description": "Workspace write permission. Maximum request/envelope size 256 KiB.",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "Stable logical operation key. Reuse for retries. Same key plus different content returns 409."
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Published"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured application error (400, 401, 403, 404, 409, 413, 415, 500). The hosting gate may return an authentication redirect before reaching the application.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Existing artifact returned on identical retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Published"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArtifactInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workspaces/{workspaceId}/artifacts/{artifactId}": {
+      "get": {
+        "operationId": "getArtifact",
+        "summary": "getArtifact",
+        "description": "Workspace read permission.",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "artifactId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Artifact"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured application error (400, 401, 403, 404, 409, 413, 415, 500). The hosting gate may return an authentication redirect before reaching the application.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workspaces/{workspaceId}/artifacts/{artifactId}/fold": {
+      "post": {
+        "operationId": "foldCorpus",
+        "summary": "foldCorpus",
+        "description": "Workspace write permission. Input must be a brief.corpus v1.",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "artifactId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "Stable logical operation key. Reuse for retries. Same key plus different content returns 409."
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Published"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured application error (400, 401, 403, 404, 409, 413, 415, 500). The hosting gate may return an authentication redirect before reaching the application.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Existing artifact returned on identical retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Published"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workspaces/{workspaceId}/preview": {
+      "post": {
+        "operationId": "previewTextCorpus",
+        "summary": "previewTextCorpus",
+        "description": "Workspace write permission. Returns an unsaved lossy extractive corpus.",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactInput"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured application error (400, 401, 403, 404, 409, 413, 415, 500). The hosting gate may return an authentication redirect before reaching the application.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string",
+                    "maxLength": 120000
+                  }
+                },
+                "required": ["title", "text"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workspaces/{workspaceId}/capture": {
+      "post": {
+        "operationId": "captureGmailCorpus",
+        "summary": "captureGmailCorpus",
+        "description": "Human with write permission. Without publish returns preview; publish=true requires previewHash and Idempotency-Key. Changed snapshot returns 409.",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "description": "Required when publish=true."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "preview": {
+                          "$ref": "#/components/schemas/ArtifactInput"
+                        },
+                        "previewHash": {
+                          "type": "string"
+                        }
+                      },
+                      "required": ["preview", "previewHash"]
+                    },
+                    {
+                      "$ref": "#/components/schemas/Published"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured application error (400, 401, 403, 404, 409, 413, 415, 500). The hosting gate may return an authentication redirect before reaching the application.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Published corpus",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Published"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "accountId": {
+                    "const": "default"
+                  },
+                  "messageIds": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 60,
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "publish": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "previewHash": {
+                    "type": "string"
+                  }
+                },
+                "required": ["accountId", "messageIds", "title"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workspaces/{workspaceId}/members": {
+      "get": {
+        "operationId": "listMembers",
+        "summary": "listMembers",
+        "description": "Workspace read permission.",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Member"
+                      }
+                    }
+                  },
+                  "required": ["items"]
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured application error (400, 401, 403, 404, 409, 413, 415, 500). The hosting gate may return an authentication redirect before reaching the application.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workspaces/{workspaceId}/members/{userId}": {
+      "patch": {
+        "operationId": "changeMemberRole",
+        "summary": "changeMemberRole",
+        "description": "Owner only. The permanent owner cannot be demoted.",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ok"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured application error (400, 401, 403, 404, 409, 413, 415, 500). The hosting gate may return an authentication redirect before reaching the application.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "type": "string",
+                    "enum": ["editor", "viewer"]
+                  }
+                },
+                "required": ["role"]
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "removeMember",
+        "summary": "removeMember",
+        "description": "Owner only. Permanent owner cannot be removed. Published results are retained.",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ok"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured application error (400, 401, 403, 404, 409, 413, 415, 500). The hosting gate may return an authentication redirect before reaching the application.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workspaces/{workspaceId}/invites": {
+      "get": {
+        "operationId": "listInvites",
+        "summary": "listInvites",
+        "description": "Owner only; newest 100; raw secrets omitted.",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/InviteMetadata"
+                      }
+                    }
+                  },
+                  "required": ["items"]
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured application error (400, 401, 403, 404, 409, 413, 415, 500). The hosting gate may return an authentication redirect before reaching the application.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createInvite",
+        "summary": "createInvite",
+        "description": "Owner only. Raw token returned once.",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "token": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "type": "string",
+                      "enum": ["editor", "viewer"]
+                    },
+                    "expires": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": ["id", "token", "role", "expires"]
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured application error (400, 401, 403, 404, 409, 413, 415, 500). The hosting gate may return an authentication redirect before reaching the application.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "type": "string",
+                    "enum": ["editor", "viewer"]
+                  }
+                },
+                "required": ["role"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workspaces/{workspaceId}/invites/{inviteId}": {
+      "delete": {
+        "operationId": "revokeInvite",
+        "summary": "revokeInvite",
+        "description": "Owner only.",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "inviteId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ok"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured application error (400, 401, 403, 404, 409, 413, 415, 500). The hosting gate may return an authentication redirect before reaching the application.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workspaces/{workspaceId}/tokens": {
+      "get": {
+        "operationId": "listIntegrationKeys",
+        "summary": "listIntegrationKeys",
+        "description": "Owner only; newest 100; raw secrets omitted.",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TokenMetadata"
+                      }
+                    }
+                  },
+                  "required": ["items"]
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured application error (400, 401, 403, 404, 409, 413, 415, 500). The hosting gate may return an authentication redirect before reaching the application.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createIntegrationKey",
+        "summary": "createIntegrationKey",
+        "description": "Owner only. Raw token returned once.",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "token": {
+                      "type": "string"
+                    },
+                    "scope": {
+                      "type": "string",
+                      "enum": ["read", "write"]
+                    },
+                    "expires": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": ["id", "name", "token", "scope", "expires"]
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured application error (400, 401, 403, 404, 409, 413, 415, 500). The hosting gate may return an authentication redirect before reaching the application.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 80
+                  },
+                  "scope": {
+                    "type": "string",
+                    "enum": ["read", "write"]
+                  },
+                  "days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 90,
+                    "default": 30
+                  }
+                },
+                "required": ["name", "scope"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workspaces/{workspaceId}/tokens/{tokenId}": {
+      "delete": {
+        "operationId": "revokeIntegrationKey",
+        "summary": "revokeIntegrationKey",
+        "description": "Owner only.",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tokenId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ok"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured application error (400, 401, 403, 404, 409, 413, 415, 500). The hosting gate may return an authentication redirect before reaching the application.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workspaces/{workspaceId}/events": {
+      "get": {
+        "operationId": "listEvents",
+        "summary": "listEvents",
+        "description": "Workspace read permission. Consumers omit latest and persist nextAfter after successful processing.",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          },
+          {
+            "name": "latest",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "description": "Descending UI-only window; never use with consumer checkpoints."
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Event"
+                      }
+                    },
+                    "nextAfter": {
+                      "type": "integer"
+                    },
+                    "hasMore": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["items", "nextAfter", "hasMore"]
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Structured application error (400, 401, 403, 404, 409, 413, 415, 500). The hosting gate may return an authentication redirect before reaching the application.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ArtifactInput": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "maxLength": 100,
+            "pattern": "^[a-z][a-z0-9_-]*(\\.[a-z][a-z0-9_-]*)+$"
+          },
+          "schemaVersion": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          },
+          "summary": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "content": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "provenance": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Caller-declared metadata; not an authentication or source-verification claim."
+          },
+          "parentIds": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "title",
+          "summary",
+          "content",
+          "provenance",
+          "parentIds"
+        ]
+      },
+      "ArtifactSummary": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "maxLength": 100,
+            "pattern": "^[a-z][a-z0-9_-]*(\\.[a-z][a-z0-9_-]*)+$"
+          },
+          "schemaVersion": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          },
+          "summary": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "provenance": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Caller-declared metadata; not an authentication or source-verification claim."
+          },
+          "parentIds": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "string"
+            }
+          },
+          "id": {
+            "type": "string"
+          },
+          "workspaceId": {
+            "type": "string"
+          },
+          "createdBy": {
+            "type": "string"
+          },
+          "authorName": {
+            "type": "string"
+          },
+          "checksum": {
+            "type": "string"
+          },
+          "created": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "schemaVersion",
+          "title",
+          "summary",
+          "provenance",
+          "parentIds",
+          "id",
+          "workspaceId",
+          "createdBy",
+          "authorName",
+          "checksum",
+          "created"
+        ]
+      },
+      "Artifact": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ArtifactInput"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "workspaceId": {
+                "type": "string"
+              },
+              "createdBy": {
+                "type": "string"
+              },
+              "authorName": {
+                "type": "string"
+              },
+              "checksum": {
+                "type": "string"
+              },
+              "created": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "id",
+              "workspaceId",
+              "createdBy",
+              "authorName",
+              "checksum",
+              "created"
+            ]
+          }
+        ]
+      },
+      "Published": {
+        "type": "object",
+        "properties": {
+          "artifact": {
+            "$ref": "#/components/schemas/Artifact"
+          },
+          "replayed": {
+            "type": "boolean"
+          }
+        },
+        "required": ["artifact", "replayed"]
+      },
+      "Workspace": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": ["owner", "editor", "viewer"]
+          },
+          "created": {
+            "type": "integer"
+          }
+        },
+        "required": ["id", "name", "role", "created"]
+      },
+      "Member": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": ["owner", "editor", "viewer"]
+          },
+          "joined": {
+            "type": "integer"
+          }
+        },
+        "required": ["userId", "displayName", "role", "joined"]
+      },
+      "Event": {
+        "type": "object",
+        "properties": {
+          "sequence": {
+            "type": "integer"
+          },
+          "type": {
+            "type": "string"
+          },
+          "actorId": {
+            "type": "string"
+          },
+          "subjectId": {
+            "type": "string"
+          },
+          "created": {
+            "type": "integer"
+          }
+        },
+        "required": ["sequence", "type", "actorId", "subjectId", "created"]
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "requestId": {
+            "type": "string"
+          },
+          "signInUrl": {
+            "type": "string"
+          }
+        },
+        "required": ["error", "code", "requestId"]
+      },
+      "Ok": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "const": true
+          }
+        },
+        "required": ["ok"]
+      },
+      "InviteMetadata": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": ["editor", "viewer"]
+          },
+          "expires": {
+            "type": "integer"
+          },
+          "created": {
+            "type": "integer"
+          },
+          "usedBy": {
+            "type": ["string", "null"]
+          },
+          "revoked": {
+            "type": ["integer", "null"]
+          }
+        },
+        "required": ["id", "role", "expires", "created", "usedBy", "revoked"]
+      },
+      "TokenMetadata": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "enum": ["read", "write"]
+          },
+          "expires": {
+            "type": "integer"
+          },
+          "created": {
+            "type": "integer"
+          },
+          "revoked": {
+            "type": ["integer", "null"]
+          }
+        },
+        "required": ["id", "name", "scope", "expires", "created", "revoked"]
+      }
+    },
+    "securitySchemes": {
+      "integrationBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "bwk_<256-bit-secret>",
+        "description": "Scoped workspace integration key. Some hosts additionally require OAI-Sites-Authorization."
+      }
+    }
+  }
+}

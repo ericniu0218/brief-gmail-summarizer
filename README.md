@@ -2,6 +2,14 @@
 
 An Apple-inspired Gmail dashboard with a priority briefing, compact email rows, editable reply suggestions, sender-grouped newsletters, and a server-side inbox agent.
 
+## Shared team workspaces
+
+Open `/team` (or **Team workspace** in the inbox) to create a workspace, invite colleagues, publish a compressed text corpus, read or export the same stored results, and create a fold with links to its source corpus. Owner/editor/viewer roles and expiring, revocable integration keys are enforced on the server. The versioned `/api/v1` interface accepts future namespaced result types.
+
+Start with the [implementation and extension guide](docs/SHARED_WORKSPACES.md), [OpenAPI contract](docs/openapi.json), and [example producer](examples/publish-result.ts). They specify ownership, schemas, endpoint behavior, idempotency, security, migrations, validation, and the next implementation steps for another model or agent.
+
+The current Site’s hosting access is owner-only: grant a colleague Site viewer access before they redeem a workspace invitation. Creating an in-app invitation does not change hosting access. Text compression and folds are deterministic extracts/grouping and need no AI credentials. The Gmail share flow uses explicit selection and a content preview from the connected default account.
+
 ## What works now
 
 The private Site includes an interactive sample workspace. Overview, Inbox, Work, and Noise views, summary collapse, conversation panels, reply tone and text editing, and sample unsubscribe actions work without external credentials. Demo actions are labelled and never change real Gmail.
