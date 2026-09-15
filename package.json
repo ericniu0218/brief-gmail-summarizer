@@ -12,7 +12,8 @@
     "lint": "oxlint",
     "format": "oxfmt",
     "db:generate": "drizzle-kit generate",
-    "test": "node scripts/test.mjs"
+    "test": "node scripts/test.mjs",
+    "workspace:mvp": "bash scripts/package-workspace-mvp.sh"
   },
   "dependencies": {
     "react": "19.2.6",

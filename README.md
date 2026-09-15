@@ -6,7 +6,7 @@ An Apple-inspired Gmail dashboard with a priority briefing, compact email rows, 
 
 Open `/team` (or **Team workspace** in the inbox) to create a workspace, invite colleagues, publish a compressed text corpus, read or export the same stored results, and create a fold with links to its source corpus. Owner/editor/viewer roles and expiring, revocable integration keys are enforced on the server. The versioned `/api/v1` interface accepts future namespaced result types.
 
-Start with the [implementation and extension guide](docs/SHARED_WORKSPACES.md), [OpenAPI contract](docs/openapi.json), and [example producer](examples/publish-result.ts). They specify ownership, schemas, endpoint behavior, idempotency, security, migrations, validation, and the next implementation steps for another model or agent.
+Start with the [portable MVP handoff](docs/SHARED_WORKSPACES.md). It introduces the next model to the design, identifies the exact copy set and seams, and ends with checkable cross-user acceptance tests. Run `npm run workspace:mvp` to package the backend, migration, contract, tests, and example producer for a similar project.
 
 The current Site’s hosting access is owner-only: grant a colleague Site viewer access before they redeem a workspace invitation. Creating an in-app invitation does not change hosting access. Text compression and folds are deterministic extracts/grouping and need no AI credentials. The Gmail share flow uses explicit selection and a content preview from the connected default account.
 
@@ -67,7 +67,7 @@ D1 schema is defined in `db/schema.ts`; generated migrations are in `drizzle/`. 
 
 ## Validation
 
-Production build, TypeScript checking, and affected-file linting pass. Twenty-one focused tests cover encryption ownership, CSRF rejection, the protected scheduler, trusted unsubscribe targets, fallback classification, Gemini billing, schema, demo and sync failures, authenticated model-generated sample replies, duplicate-send prevention, sign-in recovery, and Google OAuth configuration with PKCE. Live Gmail connection still needs Google OAuth credentials before end-to-end testing. An unauthenticated dashboard offers a top-level ChatGPT sign-in action; Gmail-token failures remain separate and do not trigger that action.
+Production build, TypeScript checking, and affected-file linting pass. Thirty-eight focused tests include fourteen shared-workspace tests covering cross-user reads, permissions, lineage, idempotency, integration keys, event cursors, migration behavior, and Gmail-preview isolation. Live Gmail connection still needs Google OAuth credentials before end-to-end testing. An unauthenticated dashboard offers a top-level ChatGPT sign-in action; Gmail-token failures remain separate and do not trigger that action.
 
 ## Provider references
 
