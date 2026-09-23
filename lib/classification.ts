@@ -48,6 +48,8 @@ export type Classification={
   securityEvent:boolean;
   processingStatus:ProcessingStatus;
   reason:string;
+  /** One-line summary of what the message says, distinct from the classification reason. */
+  summary?:string;
   uncertainty?:string;
   version:string;
   /** Set when a manual correction or user rule produced the effective result. */

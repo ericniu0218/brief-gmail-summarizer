@@ -242,7 +242,7 @@ test('missing Gmail credentials are reported before starting Google OAuth',async
  try{
   const response=await startGoogle();
   assert.equal(response.status,503);
-  assert.match((await response.json() as {error:string}).error,/Google app credentials are not configured/);
+  assert.match((await response.json() as {error:string}).error,/not configured yet\. Missing site settings: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET\./);
   assert.equal(called,false);
  }finally{globalThis.fetch=original;globalThis.__briefTestHeaders=new Headers();}
 });
@@ -289,11 +289,12 @@ test('completing Google OAuth stores the connection in the migrated schema',asyn
    const statement=sqlite.prepare(sql);let params:unknown[]=[];
    const bound={bind(...values:unknown[]){params=values;return bound;},
     first(){return statement.get(...params as never[])??null;},
-    run(){return statement.run(...params as never[]);},
+    run(){const info=statement.run(...params as never[]);return {meta:{changes:Number(info.changes)}};},
     all(){return {results:statement.all(...params as never[])};}};
    return bound;
   },
   async batch(statements:{run():unknown}[]){return statements.map(statement=>statement.run());},
+
  };
  globalThis.__briefTestEnv={...testEnv,GOOGLE_CLIENT_ID:'client-id',GOOGLE_CLIENT_SECRET:'client-secret',DB:db as unknown as D1Database};
  globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});

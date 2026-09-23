@@ -2,6 +2,14 @@
 
 An Apple-inspired Gmail dashboard with a priority briefing, compact email rows, editable reply suggestions, sender-grouped newsletters, and a server-side inbox agent.
 
+## Shared team workspaces
+
+Open `/team` (or **Team workspace** in the inbox) to create a workspace, invite colleagues, publish a compressed text corpus, read or export the same stored results, and create a fold with links to its source corpus. Owner/editor/viewer roles and expiring, revocable integration keys are enforced on the server. The versioned `/api/v1` interface accepts future namespaced result types.
+
+Start with the [portable MVP handoff](docs/SHARED_WORKSPACES.md). It introduces the next model to the design, identifies the exact copy set and seams, and ends with checkable cross-user acceptance tests. Run `npm run workspace:mvp` to package the backend, migration, contract, tests, and example producer for a similar project.
+
+The current Site’s hosting access is owner-only: grant a colleague Site viewer access before they redeem a workspace invitation. Creating an in-app invitation does not change hosting access. Text compression and folds are deterministic extracts/grouping and need no AI credentials. The Gmail share flow uses explicit selection and a content preview from the connected default account.
+
 ## What works now
 
 The private Site includes an interactive sample workspace. Overview, Inbox, Work, and Noise views, summary collapse, conversation panels, reply tone and text editing, and sample unsubscribe actions work without external credentials. Demo actions are labelled and never change real Gmail.
@@ -24,7 +32,7 @@ While a connected dashboard is open, it requests a Gmail refresh every 30 minute
 
 1. Create or select a Google Cloud project and enable the Gmail API. Configure the OAuth consent screen and a Web application OAuth client. Add authorized test users if the app is in testing.
 2. Register the exact redirect URI `https://gmail-hub-brief.lukeli1708.chatgpt.site/api/auth/google/callback`.
-3. Add `GOOGLE_CLIENT_ID` and secret `GOOGLE_CLIENT_SECRET` to the Site runtime environment. Create a key at [Google AI Studio](https://aistudio.google.com/apikey), add it as secret `GEMINI_API_KEY`, and set `GEMINI_MODEL=gemini-3.5-flash-lite`. Keep keys out of source control and browser code. Redeploy to apply hosted environment changes. Google Cloud welcome credits do not cover Gemini API usage; use an unbilled free-tier project or add Gemini prepay credit in AI Studio.
+3. Add `GOOGLE_CLIENT_ID`, secret `GOOGLE_CLIENT_SECRET`, `APP_URL` (the Site origin, no trailing path) and secret `TOKEN_ENCRYPTION_KEY` (`openssl rand -base64 32`, never rotated afterwards) to the Site runtime environment. The local `.env` file is not deployed. Settings & connections lists any of these four the running Site is missing. Create a key at [Google AI Studio](https://aistudio.google.com/apikey), add it as secret `GEMINI_API_KEY`, and set `GEMINI_MODEL=gemini-3.5-flash-lite`. Keep keys out of source control and browser code. Redeploy to apply hosted environment changes. Google Cloud welcome credits do not cover Gemini API usage; use an unbilled free-tier project or add Gemini prepay credit in AI Studio.
 4. Generate one strong `AGENT_CRON_SECRET`, add it to the Site runtime and the GitHub repository's Actions secrets, and add the Site bypass token as `SITES_BYPASS_TOKEN` in GitHub. Run the **Refresh Gmail inboxes** workflow once and verify its heartbeat. Scheduled runs then invoke the agent every 30 minutes.
 5. Open Settings & connections and Continue with Google. Each user grants consent once; the app requests offline access and renews access tokens automatically. Google may require verification before an externally distributed app can use restricted Gmail scopes. Testing refresh tokens can expire after seven days.
 
@@ -50,6 +58,7 @@ D1 schema is defined in `db/schema.ts`; generated migrations are in `drizzle/`. 
 
 - Each sync covers the latest 60 inbox messages and indicates when additional mail exists. AI analysis is reused for cached messages, reducing repeated processing. The agent processes up to 20 due accounts per invocation; larger deployments need a queue and pagination.
 - A database lease prevents concurrent refreshes for a user. Gmail failures retain the prior inbox snapshot and record an account-level error. Gemini failures still store current mail with basic Gmail-derived classifications and retry AI analysis on the next refresh.
+- Reconnecting the same Gmail address preserves the cached inbox, unsubscribe history, and send receipts. Changing addresses clears that user's previous mailbox data atomically. If a refresh is active, finish it and retry the connection; expired refreshes cannot overwrite a renewed connection or release a newer refresh's lease.
 - Sending uses a deterministic user/message/action/body fingerprint. Completed retries return the stored receipt. An uncertain send stays pending and asks the user to check Gmail before retrying.
 - Unsubscribing uses the message's original List-Unsubscribe headers and an HTTPS endpoint from a trusted provider domain. Redirects are not followed. Unsupported senders open their conversation in Gmail for manual review. Additional trusted endpoint domains can be configured with `UNSUBSCRIBE_ALLOWED_HOSTS`.
 - Unsubscribing does not delete mail or apply Gmail spam labels. Successfully unsubscribed senders are hidden from the dashboard. Existing mail remains in Gmail.
@@ -59,7 +68,7 @@ D1 schema is defined in `db/schema.ts`; generated migrations are in `drizzle/`. 
 
 ## Validation
 
-Production build, TypeScript checking, and affected-file linting pass. Twenty-one focused tests cover encryption ownership, CSRF rejection, the protected scheduler, trusted unsubscribe targets, fallback classification, Gemini billing, schema, demo and sync failures, authenticated model-generated sample replies, duplicate-send prevention, sign-in recovery, and Google OAuth configuration with PKCE. Live Gmail connection still needs Google OAuth credentials before end-to-end testing. An unauthenticated dashboard offers a top-level ChatGPT sign-in action; Gmail-token failures remain separate and do not trigger that action.
+Production build, TypeScript checking, and affected-file linting pass. The focused tests include migration-backed Gmail OAuth, token renewal, mailbox loading, reconnect isolation, cleanup rollback, and expired-refresh races, plus fourteen shared-workspace tests covering cross-user reads, permissions, lineage, idempotency, integration keys, event cursors, migration behavior, and Gmail-preview isolation. Google responses are mocked in automated tests; a live Gmail connection still requires hosted runtime configuration, the registered callback URL, and a real user's Google consent before end-to-end verification. An unauthenticated dashboard offers a top-level ChatGPT sign-in action; Gmail-token failures remain separate and do not trigger that action.
 
 ## Provider references
 
