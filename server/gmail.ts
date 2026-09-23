@@ -1,6 +1,8 @@
 import type { Email } from '@/lib/mail';
-import { hasImportantSignal } from '@/lib/inbox-priority';
-import { decode, decrypt, HttpError, runtime, type Runtime } from './runtime';
+import { deterministicClassify } from '@/lib/deterministic';
+import { derivePriority, effectiveCategories, type Classification } from '@/lib/classification';
+import { normalizeMessage, type GmailMessage, type NormalizedMessage } from './message';
+import { decrypt, HttpError, runtime, type Runtime } from './runtime';
 export type Connection = { user_id:string; email:string; token:string; last_sync:number|null; sync_lock:number; error:string|null };
 export async function connection(user:string,e=runtime()) {
   const c=await e.DB.prepare('SELECT * FROM connections WHERE user_id = ?').bind(user).first<Connection>();
@@ -20,23 +22,41 @@ export async function gmail<T>(path:string, token:string, init:RequestInit={}) {
   if(!result.ok) throw new HttpError(result.status===429?429:502,result.status===429?'Gmail is busy. Please try again in a minute.':'Gmail could not complete that request. Please try again.');
   return await result.json() as T;
 }
-type Part={mimeType?:string;body?:{data?:string};parts?:Part[];headers?:{name:string;value:string}[]};
-export type GmailMessage={id:string;threadId:string;snippet:string;internalDate:string;labelIds:string[];payload:Part};
-function plainText(p:Part):string {
-  if(p.mimeType==='text/plain' && p.body?.data) return new TextDecoder().decode(decode(p.body.data));
-  return (p.parts||[]).map(plainText).filter(Boolean).join('\n');
-}
-export function parseMessage(m:GmailMessage):Email {
-  const header=(name:string)=>m.payload.headers?.find(h=>h.name.toLowerCase()===name.toLowerCase())?.value||'';
-  const from=header('From'); const address=(from.match(/<([^>]+)>/)?.[1]||from).trim();
-  const sender=(from.includes('<')?from.split('<')[0].replaceAll('"','').trim():address.split('@')[0])||'Unknown sender';
-  const subject=header('Subject')||'(No subject)';
-  const body=(plainText(m.payload)||m.snippet).slice(0,20000);
-  const list=header('List-Unsubscribe');
+export type { GmailMessage } from './message';
+
+/**
+ * Build the dashboard's email shape from a normalized message and its classification.
+ * Category, tags and priority all come from the one policy in lib/classification.
+ */
+export function emailFrom(n:NormalizedMessage,classification:Classification,now=Date.now()):Email {
+  const {category,tags}=effectiveCategories(classification);
+  const priority=derivePriority(classification,now);
+  const sender=n.from.name||n.from.address.split('@')[0]||'Unknown sender';
+  const list=n.headers['list-unsubscribe']||'';
   const unsubscribe=list.match(/<(https:\/\/[^>]+)>/i)?.[1];
-  const noise=m.labelIds.some(l=>['CATEGORY_PROMOTIONS','SPAM'].includes(l)) || !!list;
-  const priority=!noise&&(m.labelIds.includes('IMPORTANT')||hasImportantSignal(subject,body));
-  return {id:m.id,threadId:m.threadId,sender,address,initials:sender.split(/\s+/).slice(0,2).map(n=>n[0]).join('').toUpperCase(),subject,summary:m.snippet,body,time:new Date(Number(m.internalDate)).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}),category:noise?'noise':'personal',priority:priority?'high':'normal',needsReply:false,unread:m.labelIds.includes('UNREAD'),color:['purple','blue','rose','green'][sender.length%4],label:noise?'Newsletter':priority?'Important':'Mail',messageId:header('Message-ID'),unsubscribe,oneClick:header('List-Unsubscribe-Post').toLowerCase().includes('list-unsubscribe=one-click')};
+  return {
+    id:n.id,threadId:n.threadId,sender,address:n.from.address,
+    initials:sender.split(/\s+/).slice(0,2).map(part=>part[0]).join('').toUpperCase(),
+    subject:n.subject,
+    summary:n.text.replace(/\s+/g,' ').trim().slice(0,140),
+    body:n.text,quoted:n.quoted,
+    time:new Date(n.receivedAt).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}),
+    receivedAt:n.receivedAt,
+    category,tags,priority,
+    needsReply:classification.replyRequired,
+    unread:n.labels.includes('UNREAD'),
+    color:['purple','blue','rose','green'][sender.length%4],
+    label:priority==='high'?'Important':category==='noise'?'Junk':category==='work'?'Work':'Personal',
+    classification,
+    contentComplete:n.contentComplete,incompleteReasons:n.incompleteReasons,
+    messageId:n.messageId,unsubscribe,
+    oneClick:(n.headers['list-unsubscribe-post']||'').toLowerCase().includes('list-unsubscribe=one-click'),
+  };
+}
+
+export function parseMessage(m:GmailMessage,userAddress=''):Email {
+  const normalized=normalizeMessage(m);
+  return emailFrom(normalized,deterministicClassify(normalized,userAddress));
 }
 export function safeUnsubscribe(url:string,e:Runtime) {
   let target:URL; try{target=new URL(url);}catch{return false;}

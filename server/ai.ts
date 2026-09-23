@@ -1,7 +1,8 @@
 import { HttpError, runtime, type Runtime } from './runtime';
 import type { Email } from '@/lib/mail';
+import type { Tag } from '@/lib/categories';
 const DEFAULT_GEMINI_MODEL='gemini-3.5-flash-lite';
-const PROMPT_VERSION='2026-09-10-2';
+const PROMPT_VERSION='2026-09-21-categories';
 function geminiModel(e:Runtime){return (e.GEMINI_MODEL||DEFAULT_GEMINI_MODEL).replace(/^models\//,'');}
 export function analysisVersion(e:Runtime){return `gemini:${geminiModel(e)}:${PROMPT_VERSION}`;}
 type JsonSchema={type?:string;enum?:unknown[];properties?:Record<string,JsonSchema>;required?:string[];additionalProperties?:boolean;items?:JsonSchema;minItems?:number;maxItems?:number;minimum?:number;maximum?:number};
@@ -50,6 +51,17 @@ async function callGemini(instructions:string,input:unknown,schema:object,e:Runt
   return result;
 }
 export async function generate<T>(instructions:string,input:unknown,schema:object,e:Runtime=runtime()):Promise<T> {
+  const parsed=await generateRaw(instructions,input,schema,e);
+  if(!matchesSchema(parsed,schema as JsonSchema))throw new HttpError(502,'The AI response did not match the expected format. Please try again.');
+  return parsed as T;
+}
+
+/**
+ * Same request and error handling as `generate`, but the response is returned without
+ * whole-payload schema validation so a caller can validate each item independently and
+ * keep the valid ones when a single item is malformed.
+ */
+export async function generateRaw(instructions:string,input:unknown,schema:object,e:Runtime=runtime()):Promise<unknown> {
   if(!e.GEMINI_API_KEY) throw new HttpError(503,'Connect the AI service in settings to generate replies and summaries.');
   const result=await callGemini(instructions,input,schema,e);
   if(!result.ok){
@@ -70,23 +82,27 @@ export async function generate<T>(instructions:string,input:unknown,schema:objec
   if(!candidate||(candidate.finishReason&&candidate.finishReason!=='STOP'))throw new HttpError(502,'The AI response was incomplete. Please try again.');
   const text=(candidate.content?.parts||[]).map(p=>p.text||'').join('');
   if(!text)throw new HttpError(502,'The AI response was incomplete. Please try again.');
-  let parsed:unknown;
-  try{parsed=JSON.parse(text);}catch{throw new HttpError(502,'The AI response was not valid. Please try again.');}
-  if(!matchesSchema(parsed,schema as JsonSchema))throw new HttpError(502,'The AI response did not match the expected format. Please try again.');
-  return parsed as T;
+  try{return JSON.parse(text) as unknown;}catch{throw new HttpError(502,'The AI response was not valid. Please try again.');}
 }
 export async function summarize(emails:Email[],e:Runtime) {
   if(!e.GEMINI_API_KEY)return {emails,ai:false};
   const enriched:Email[]=[];
   for(let start=0;start<emails.length;start+=10){
     const group=emails.slice(start,start+10);
-    const result=await generate<{items:{id:string;summary:string;category:Email['category'];priority:Email['priority'];needsReply:boolean;label:string}[]}>(
-      'Summarize each email in one short sentence. Highlight decisions, requests, security events, account access, and explicit deadlines. Classify work, personal, or noise. Marketing and newsletters are noise; do not classify ordinary mail as spam. High priority means the user must act, the user is directly asked to respond, there is a time-sensitive deadline, or the message contains a security or account-access event such as a verification code, password reset, or new sign-in. Routine product updates and optional setup tips are normal priority. needsReply means the sender directly asks the user to answer; automated codes and alerts do not need a reply unless they explicitly ask for one. Use only facts in the messages. Give a short label; use Important for every high-priority message and never invent a deadline.',
+    const result=await generate<{items:{id:string;summary:string;category:Email['category'];tags:Tag[];priority:Email['priority'];needsReply:boolean;label:string}[]}>(
+      'Summarize each email in one short sentence. Highlight decisions, requests, security events, account access, and explicit deadlines.'+
+      ' Give each message exactly one primary section: work, personal, or noise.'+
+      ' Then add every applicable subcategory tag. deadlines: an explicit due date for a task, submission, payment, or decision. meetings: invitations, scheduling, rescheduling, cancellations, or meeting details. requests: consequential requests for a decision, approval, signature, or response. actions: a concrete task the recipient must perform. research: papers, experiments, datasets, academic review, grants, or research collaboration. low-priority: nonurgent informational or casual correspondence. junk: spam, irrelevant bulk mail, unwanted promotions, or unsolicited outreach.'+
+      ' Tags may overlap, for example a research meeting that also has a submission deadline. Use deadlines, meetings, requests, actions, and research only with the work section, low-priority only with personal, and junk only with noise. Routine work mail stays in work even when no subcategory applies, and may have no tags.'+
+      ' An unsubscribe link, a newsletter layout, or promotional wording is not on its own proof of junk: a research newsletter is work with the research tag. Personal mail can be urgent. Never mark a message junk merely because you are unsure.'+
+      ' High priority means the user must act, the user is directly asked to respond, there is a time-sensitive deadline, or the message contains a security or account-access event such as a verification code, password reset, or new sign-in. Routine product updates and optional setup tips are normal priority. needsReply means the sender directly asks the user to answer; automated codes and alerts do not need a reply unless they explicitly ask for one. Use only facts in the messages. Give a short label; use Important for every high-priority message and never invent a deadline.',
       group.map(({id,subject,body,sender,category})=>({id,subject,body:body.slice(0,7000),sender,category})),
-      {type:'object',properties:{items:{type:'array',items:{type:'object',properties:{id:{type:'string'},summary:{type:'string'},category:{type:'string',enum:['work','personal','noise']},priority:{type:'string',enum:['high','normal']},needsReply:{type:'boolean'},label:{type:'string'}},required:['id','summary','category','priority','needsReply','label'],additionalProperties:false}}},required:['items'],additionalProperties:false},e);
+      {type:'object',properties:{items:{type:'array',items:{type:'object',properties:{id:{type:'string'},summary:{type:'string'},category:{type:'string',enum:['work','personal','noise']},tags:{type:'array',items:{type:'string',enum:['deadlines','meetings','requests','actions','research','low-priority','junk']}},priority:{type:'string',enum:['high','normal']},needsReply:{type:'boolean'},label:{type:'string'}},required:['id','summary','category','tags','priority','needsReply','label'],additionalProperties:false}}},required:['items'],additionalProperties:false},e);
     const expectedIds=new Set(group.map(m=>m.id));
     const byId=new Map(result.items.filter(i=>expectedIds.has(i.id)).map(i=>[i.id,i]));
-    enriched.push(...group.map(m=>({...m,...byId.get(m.id),...(m.category==='noise'?{category:'noise' as const,priority:'normal' as const,needsReply:false}: {})})));
+    // No category is locked: AI reclassification is allowed in both directions, including
+    // moving a message out of noise that only looked promotional.
+    enriched.push(...group.map(m=>({...m,...byId.get(m.id)})));
   }
   return {emails:enriched,ai:true};
 }

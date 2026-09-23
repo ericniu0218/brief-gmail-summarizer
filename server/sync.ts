@@ -1,9 +1,15 @@
-import { accessToken, gmail, parseMessage, safeUnsubscribe, type GmailMessage } from './gmail';
+import { accessToken, connection, emailFrom, gmail, safeUnsubscribe } from './gmail';
+import { normalizeMessage, type GmailMessage, type NormalizedMessage } from './message';
+import { classifyMessages } from './classify';
+import { applyOverride, contentFingerprint, loadOverrides } from './overrides';
+import { deterministicClassify } from '@/lib/deterministic';
 import { analysisVersion, summarize } from './ai';
 import { HttpError, type Runtime } from './runtime';
 import type { Email } from '@/lib/mail';
-import { isImportantEmail } from '@/lib/inbox-priority';
-export type Snapshot={emails:Email[];ai:boolean;analysisVersion:string;updated:number;limit:number;hasMore:boolean};
+
+/** Cached messages carry the fingerprint and classifier version their result came from. */
+export type StoredEmail=Email&{fingerprint?:string;analysisVersion?:string};
+export type Snapshot={emails:StoredEmail[];ai:boolean;pending:number;analysisVersion:string;updated:number;limit:number;hasMore:boolean};
 export async function summarizeInbox(emails:Email[],e:Runtime){
   try{return await summarize(emails,e);}
   catch{
@@ -17,28 +23,48 @@ export async function syncInbox(user:string,e:Runtime) {
   if(!lock.meta.changes)throw new HttpError(409,'Your inbox is already being refreshed.');
   try{
     const token=await accessToken(user,e);
+    const account=(await connection(user,e)).email;
     const list=await gmail<{messages?:{id:string}[];nextPageToken?:string}>('messages?labelIds=INBOX&maxResults=60',token);
     const previous=await e.DB.prepare('SELECT data FROM snapshots WHERE user_id = ?').bind(user).first<{data:string}>();
     const old=previous?JSON.parse(previous.data) as Snapshot:null;
     const currentAnalysisVersion=analysisVersion(e);
     const cached=new Map((old?.emails||[]).map(m=>[m.id,m]));
-    const messages:Email[]=[];
+    const normalized:NormalizedMessage[]=[];
     const refs=list.messages||[];
     for(let i=0;i<refs.length;i+=6){
-      messages.push(...await Promise.all(refs.slice(i,i+6).map(async ({id})=>parseMessage(await gmail<GmailMessage>('messages/'+encodeURIComponent(id)+'?format=full',token)))));
+      normalized.push(...await Promise.all(refs.slice(i,i+6).map(async ({id})=>normalizeMessage(await gmail<GmailMessage>('messages/'+encodeURIComponent(id)+'?format=full',token)))));
     }
-    const fresh=messages.filter(m=>!cached.has(m.id)||!old?.ai||old.analysisVersion!==currentAnalysisVersion);
-    const analysis=await summarizeInbox(fresh,e);
-    const analyzed=new Map(analysis.emails.map(m=>[m.id,m]));
+    const overrides=await loadOverrides(user,e);
+    // Reuse a stored classification only when the content and the classifier version
+    // both still match. Reading or refreshing never triggers reclassification.
+    const reusable=(message:NormalizedMessage)=>{
+      const hit=cached.get(message.id);
+      if(!hit?.classification||hit.classification.processingStatus==='failed')return undefined;
+      if(hit.fingerprint!==contentFingerprint(message))return undefined;
+      return hit.analysisVersion===currentAnalysisVersion?hit.classification:undefined;
+    };
+    const fresh=normalized.filter(message=>!reusable(message));
+    const {results,failures}=await classifyMessages(fresh,account,e);
     const removed=await e.DB.prepare('SELECT address FROM unsubscribed WHERE user_id = ?').bind(user).all<{address:string}>();
     const muted=new Set(removed.results.map(r=>r.address));
-    const emails=messages.map(m=>{
-      const enriched=analyzed.get(m.id)||cached.get(m.id);
-      const combined={...m,...(enriched?{summary:enriched.summary,category:enriched.category,priority:enriched.priority,needsReply:enriched.needsReply,label:enriched.label}:{}),oneClick:!!(m.oneClick&&m.unsubscribe&&safeUnsubscribe(m.unsubscribe,e))};
-      const important=isImportantEmail(m)||isImportantEmail(combined);
-      return important?{...combined,category:combined.category==='noise'?m.category:combined.category,priority:'high' as const,label:'Important'}:combined;
+    let pending=0;
+    const emails=normalized.map(message=>{
+      const stored=reusable(message);
+      // Precedence: a fresh validated result, then a still-valid stored result, then the
+      // deterministic fallback. A failure never replaces an earlier valid classification.
+      let classification=results.get(message.id)||stored;
+      if(!classification){
+        classification={...deterministicClassify(message,account),processingStatus:failures.has(message.id)?'needs_review':'classified',
+          uncertainty:failures.get(message.id)||undefined};
+        if(failures.has(message.id))pending++;
+      }
+      const email=emailFrom(message,applyOverride(classification,overrides.get(message.id)));
+      return {...email,
+        fingerprint:contentFingerprint(message),
+        analysisVersion:results.has(message.id)?currentAnalysisVersion:stored?cached.get(message.id)!.analysisVersion:'',
+        oneClick:!!(email.oneClick&&email.unsubscribe&&safeUnsubscribe(email.unsubscribe,e))};
     }).filter(m=>!muted.has(m.address));
-    const snapshot:Snapshot={emails,ai:analysis.ai,analysisVersion:currentAnalysisVersion,updated:Date.now(),limit:60,hasMore:!!list.nextPageToken};
+    const snapshot:Snapshot={emails,ai:pending===0&&!!e.GEMINI_API_KEY,pending,analysisVersion:currentAnalysisVersion,updated:Date.now(),limit:60,hasMore:!!list.nextPageToken};
     await e.DB.batch([
       e.DB.prepare('INSERT INTO snapshots (user_id, data, updated) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET data=excluded.data, updated=excluded.updated').bind(user,JSON.stringify(snapshot),snapshot.updated),
       e.DB.prepare('UPDATE connections SET last_sync = ?, sync_lock = 0, error = NULL WHERE user_id = ?').bind(snapshot.updated,user),

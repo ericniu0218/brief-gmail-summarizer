@@ -15,6 +15,13 @@
       "when": 1789011313513,
       "tag": "0001_warm_adam_warlock",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1790144098107,
+      "tag": "0002_abnormal_miek",
+      "breakpoints": true
     }
   ]
 }

@@ -1,22 +1,42 @@
+import type { Section, Tag } from './categories';
+import type { Classification } from './classification';
+
 export type Email = {
   id: string; accountId?: string; accountEmail?: string; threadId?: string; sender: string; address: string; initials: string;
-  subject: string; summary: string; body: string; time: string; category: 'work' | 'personal' | 'noise';
+  subject: string; summary: string; body: string; time: string; category: Section;
   priority: 'high' | 'normal'; needsReply: boolean; unread: boolean; color: string; label?: string;
+  tags?: Tag[];
+  /** Quoted history, kept separate so old requests are not read as new tasks. */
+  quoted?: string;
+  contentComplete?: boolean;
+  incompleteReasons?: string[];
+  classification?: Classification;
   receivedAt?: number; messageId?: string; unsubscribe?: string; oneClick?: boolean;
 };
 // These deterministic classifications keep the demo useful when Gemini is unavailable.
 // AI replaces them with richer summaries and labels when `/api/demo` succeeds.
-type Seed = {id:string;sender:string;address:string;subject:string;body:string;time:string;color:string;unread:boolean;unsubscribe?:string;oneClick?:boolean};
-const workIds=new Set(['1','2','3','4','5','15','16','17','18','19','20','21','22']);
-const highPriorityIds=new Set(['1','2','15','16','17','20','40','41']);
-const replyIds=new Set(['1','2','3','5','6','17','20','21','23','25']);
+type Seed = {id:string;sender:string;address:string;subject:string;body:string;time:string;color:string;unread:boolean;unsubscribe?:string;oneClick?:boolean;category?:Section;tags?:Tag[]};
+const workIds=new Set(['1','2','3','4','5','15','16','17','18','19','20','21','22','50','52','53']);
+const highPriorityIds=new Set(['1','2','15','16','17','20','40','41','50','54']);
+const replyIds=new Set(['1','2','3','5','6','17','20','21','23','25','50','52']);
+// Demo tags are explicit so the sample workspace exercises every subcategory and the
+// overlapping cases (a research meeting that also carries a submission deadline).
+const demoTags:Record<string,Tag[]>={
+  '1':['requests','deadlines'],'2':['requests','deadlines'],'3':['meetings'],'4':[],'5':['requests'],
+  '6':['meetings'],'15':['deadlines','actions'],'16':['actions','deadlines'],'17':['requests','deadlines'],
+  '18':[],'19':['deadlines','actions'],'20':['meetings','requests'],'21':['requests','deadlines'],'22':[],
+  '23':['meetings'],'24':['low-priority'],'25':['meetings'],'40':['actions'],'41':['actions'],
+  '50':['research','meetings','deadlines'],'51':['research'],'52':['research','requests'],
+  '53':['research','deadlines'],'54':['meetings'],'55':['low-priority'],
+};
 function seed(s:Seed):Email {
-  const category:Email['category']=s.oneClick?'noise':workIds.has(s.id)?'work':'personal';
+  const category:Section=s.category||(s.oneClick?'noise':workIds.has(s.id)?'work':'personal');
   const priority:Email['priority']=highPriorityIds.has(s.id)?'high':'normal';
+  const tags:Tag[]=s.tags||demoTags[s.id]||(category==='noise'?['junk']:[]);
   return {id:s.id,sender:s.sender,address:s.address,initials:s.sender.split(/\s+/).slice(0,2).map(n=>n[0]).join('').toUpperCase(),
     subject:s.subject,summary:s.body.replace(/\s+/g,' ').trim().slice(0,140),body:s.body,time:s.time,
     category,priority,needsReply:replyIds.has(s.id),unread:s.unread,color:s.color,label:category==='noise'?'Newsletter':priority==='high'?'Important':category==='work'?'Work':'Personal',
-    unsubscribe:s.unsubscribe,oneClick:s.oneClick};
+    tags,unsubscribe:s.unsubscribe,oneClick:s.oneClick};
 }
 export const demoEmails: Email[] = [
   seed({id:'1',sender:'Sarah Chen',address:'sarah@studio.example',subject:'Website launch — final approval',body:'Hi Alex,\n\nThe final website designs are ready for your review. We’ve incorporated the feedback from yesterday, and the engineering team is all set.\n\nCould you give us your final approval by 2 PM so we can stay on track for Thursday’s launch?\n\nThanks!\nSarah',time:'9:42 AM',color:'purple',unread:true}),
@@ -38,6 +58,12 @@ export const demoEmails: Email[] = [
   seed({id:'25',sender:'Jordan Reyes',address:'jordan@personal.example',subject:'Still on for 6 AM tomorrow?',body:'Hey, still good for the gym at 6 tomorrow? Let me know if you need to push it — no worries either way.\n\nJordan',time:'4 days ago',color:'green',unread:true}),
   seed({id:'40',sender:'GitHub',address:'noreply@github.com',subject:'Your GitHub verification code',body:'Use verification code 482917 to finish signing in. If you did not request this code, secure your account.',time:'Today',color:'gray',unread:true}),
   seed({id:'41',sender:'GitHub Security',address:'security@github.com',subject:'Complete your two-factor authentication setup',body:'Your account setup is incomplete. Complete two-factor authentication to keep repository access secure.',time:'Today',color:'gray',unread:true}),
+  seed({id:'50',sender:'Dr. Helena Voss',address:'h.voss@lab.example.edu',subject:'Rebuttal meeting Thursday — camera-ready manuscript due Friday',body:'Hi Alex,\n\nCan we meet Thursday at 3 PM to go over the reviewer rebuttal? The camera-ready manuscript is due Friday at 5 PM, so this is our last chance to fold in the new experiment results.\n\nPlease confirm Thursday works.\n\nHelena',time:'8:05 AM',color:'purple',unread:true}),
+  seed({id:'51',sender:'Nature Briefing',address:'briefing@nature-newsletter.example',subject:'This week in genomics: three preprints worth reading',body:'Your weekly research digest. This week: a large-scale dataset release on variant calling, a preprint on reproducible sequencing pipelines, and commentary on peer review reform.',time:'7:40 AM',color:'green',unread:false,unsubscribe:'https://list-manage.com/unsubscribe?id=nature',oneClick:true,category:'work'}),
+  seed({id:'52',sender:'Journal of Applied Systems',address:'reviews@jas-journal.example.org',subject:'Peer review request: manuscript JAS-2291',body:'Dear Dr. Alex,\n\nWe would value your review of manuscript JAS-2291, “Reproducibility in distributed experiment pipelines.” Could you let us know whether you are able to review it?\n\nEditorial Office',time:'Yesterday',color:'blue',unread:true}),
+  seed({id:'53',sender:'Research Grants Office',address:'grants@university.example.edu',subject:'NSF grant proposal deadline moved to March 14',body:'A reminder that the NSF funding call proposal deadline has moved to March 14. Budget justification and the data management plan must be submitted by that date.',time:'Yesterday',color:'amber',unread:false}),
+  seed({id:'54',sender:'David Chen',address:'david@family.example',subject:'Dad’s surgery moved to tomorrow — can you call tonight?',body:'Hey,\n\nThe hospital moved Dad’s surgery up to tomorrow morning. Can you call me tonight so we can sort out who’s driving him? It’s pretty urgent.\n\nDavid',time:'Today',color:'rose',unread:true}),
+  seed({id:'55',sender:'Book Club',address:'hello@bookclub.example',subject:'Next month we’re reading Piranesi',body:'No rush on this one — we picked Piranesi for next month. Meeting details will come later.',time:'5 days ago',color:'gray',unread:false,category:'personal'}),
   ...[
     ['26','The Daily Edit','Your daily dose of inspiration','A roundup of design inspiration and this week’s stories.','purple'],
     ['27','The Daily Edit','Five things worth a look','Five links from around the web.','purple'],
