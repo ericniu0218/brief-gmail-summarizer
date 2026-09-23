@@ -232,7 +232,7 @@ test('missing Gmail credentials are reported before starting Google OAuth',async
  try{
   const response=await startGoogle();
   assert.equal(response.status,503);
-  assert.match((await response.json() as {error:string}).error,/Google app credentials are not configured/);
+  assert.match((await response.json() as {error:string}).error,/not configured yet\. Missing site settings: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET\./);
   assert.equal(called,false);
  }finally{globalThis.fetch=original;globalThis.__briefTestHeaders=new Headers();}
 });

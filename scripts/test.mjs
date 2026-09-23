@@ -12,10 +12,20 @@ await build({
   platform: 'node',
   format: 'esm',
   bundle: true,
+  packages: 'external',
   plugins: [
     {
       name: 'test-runtime',
       setup(build) {
+        build.onResolve({ filter: /^next\/link$/ }, () => ({
+          path: 'link',
+          namespace: 'test-link',
+        }));
+        build.onLoad({ filter: /.*/, namespace: 'test-link' }, () => ({
+          contents:
+            'import { createElement } from "react"; export default function Link(props) { return createElement("a", props); }',
+          resolveDir: process.cwd(),
+        }));
         build.onResolve({ filter: /^cloudflare:workers$/ }, () => ({
           path: 'runtime',
           namespace: 'test-runtime',

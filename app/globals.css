@@ -20,6 +20,10 @@
 @media(max-width:767px){.sender-group-row{padding:18px 12px;gap:8px}.sender-group-row .avatar{width:30px;height:30px;font-size:10px}.group-name strong{font-size:13px}.group-name span{font-size:11px}.unsubscribe-button{font-size:10px;padding:7px}.unsubscribe-button>svg{display:none}.group-emails{padding-left:52px}.reply-controls{gap:10px}.reply-footer .button{font-size:12px}.brief-points p{font-size:14px}.email-text p{font-size:12px}.sender-line strong{font-size:13px}.agent-card>p,.noise-card>p{font-size:12px}.agent-schedule{font-size:12px}.noise-footnote{font-size:11px}}
 
 /* Stack inbox statistics beside the main inbox, above Quiet corner. */
+.inbox-primary-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.inbox-primary-actions .button{font-size:14px;min-height:42px;white-space:nowrap}
+.gmail-connect-hint{font-size:14px;line-height:1.6;color:#657793;margin:-10px 0 22px}
+@media(max-width:767px){.heading-row{flex-wrap:wrap;gap:14px}.inbox-primary-actions{width:100%}.gmail-connect-hint{margin-top:0}}
 .secondary-column .stats-grid {
   grid-template-columns: minmax(0, 1fr);
   padding: 0 20px;
@@ -61,6 +65,7 @@
   font-size: 15px;
 }
 .briefing-card .brief-intro {
+  display: block;
   margin: 8px 18px;
   font-size: 13px;
 }
