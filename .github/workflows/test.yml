@@ -1,0 +1,50 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: typecheck, lint, tests, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # package.json requires Node >=22.13.0.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      # Scoped to hand-written code on purpose. A repo-wide `npm run lint`
+      # currently reports errors in components/ui/** (generated shadcn
+      # components) and tests/critical.test.ts, which is why the README only
+      # claims "affected-file linting" passes. Widen this list — ideally to
+      # plain `npm run lint` — once that backlog is cleared.
+      - name: Lint
+        run: npx oxlint app server lib db worker.ts
+
+      - name: Run tests
+        run: node scripts/test.mjs
+
+      # Catches breakage that typechecking alone misses, e.g. a route that
+      # fails to compile under the Cloudflare/vinext build.
+      - name: Production build
+        run: npm run build
