@@ -13,8 +13,9 @@ export async function summarizeInbox(emails:Email[],e:Runtime){
 }
 export async function syncInbox(user:string,e:Runtime) {
   const now=Date.now();
-  const lock=await e.DB.prepare('UPDATE connections SET sync_lock = ? WHERE user_id = ? AND sync_lock < ?').bind(now+600000,user,now).run();
-  if(!lock.meta.changes)throw new HttpError(409,'Your inbox is already being refreshed.');
+  const leaseUntil=now+600000;
+  const lock=await e.DB.prepare('UPDATE connections SET sync_lock = ? WHERE user_id = ? AND sync_lock < ? RETURNING token').bind(leaseUntil,user,now).first<{token:string}>();
+  if(!lock)throw new HttpError(409,'Your inbox is already being refreshed.');
   try{
     const token=await accessToken(user,e);
     const list=await gmail<{messages?:{id:string}[];nextPageToken?:string}>('messages?labelIds=INBOX&maxResults=60',token);
@@ -39,13 +40,16 @@ export async function syncInbox(user:string,e:Runtime) {
       return important?{...combined,category:combined.category==='noise'?m.category:combined.category,priority:'high' as const,label:'Important'}:combined;
     }).filter(m=>!muted.has(m.address));
     const snapshot:Snapshot={emails,ai:analysis.ai,analysisVersion:currentAnalysisVersion,updated:Date.now(),limit:60,hasMore:!!list.nextPageToken};
-    await e.DB.batch([
-      e.DB.prepare('INSERT INTO snapshots (user_id, data, updated) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET data=excluded.data, updated=excluded.updated').bind(user,JSON.stringify(snapshot),snapshot.updated),
-      e.DB.prepare('UPDATE connections SET last_sync = ?, sync_lock = 0, error = NULL WHERE user_id = ?').bind(snapshot.updated,user),
+    // Both the lease and the encrypted credential identify this refresh's owner.
+    // A reconnect changes the credential even if it renews the same mailbox.
+    const results=await e.DB.batch([
+      e.DB.prepare('INSERT INTO snapshots (user_id, data, updated) SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM connections WHERE user_id = ? AND token = ? AND sync_lock = ? AND sync_lock > ?) ON CONFLICT(user_id) DO UPDATE SET data=excluded.data, updated=excluded.updated').bind(user,JSON.stringify(snapshot),snapshot.updated,user,lock.token,leaseUntil,snapshot.updated),
+      e.DB.prepare('UPDATE connections SET last_sync = ?, sync_lock = 0, error = NULL WHERE user_id = ? AND token = ? AND sync_lock = ? AND sync_lock > ?').bind(snapshot.updated,user,lock.token,leaseUntil,snapshot.updated),
     ]);
+    if(!results[0].meta.changes)throw new HttpError(409,'Your Gmail connection or refresh changed. Please refresh your inbox again.');
     return snapshot;
   }catch(error){
-    await e.DB.prepare('UPDATE connections SET sync_lock = 0, error = ? WHERE user_id = ?').bind(error instanceof HttpError?error.message:'Inbox refresh failed. Please try again.',user).run();
+    await e.DB.prepare('UPDATE connections SET sync_lock = 0, error = ? WHERE user_id = ? AND token = ? AND sync_lock = ?').bind(error instanceof HttpError?error.message:'Inbox refresh failed. Please try again.',user,lock.token,leaseUntil).run();
     throw error;
   }
 }

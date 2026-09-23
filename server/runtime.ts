@@ -17,7 +17,7 @@ export async function userId() {
 }
 export function mutation(request: Request) {
   const origin = request.headers.get('origin');
-  const expected = runtime().APP_URL || new URL(request.url).origin;
+  const expected = appUrl() || new URL(request.url).origin;
   if (!origin || origin !== expected) throw new HttpError(403, 'Please use this action from your dashboard.');
 }
 export async function inputObject(request:Request):Promise<Record<string,unknown>> {
@@ -32,7 +32,31 @@ export function json(data: unknown, status=200) {
 export function failure(error: unknown) {
   return json({error: error instanceof HttpError ? error.message : 'Something went wrong. Please try again.', ...(error instanceof SignInRequiredError ? {signInUrl: chatGPTSignInPath('/')} : {})}, error instanceof HttpError ? error.status : 500);
 }
-export function configured(e=runtime()) { return !!(e.GOOGLE_CLIENT_ID && e.GOOGLE_CLIENT_SECRET && e.TOKEN_ENCRYPTION_KEY && e.APP_URL); }
+/** The site's public origin. Hosting settings often carry a trailing slash, which Google treats as a different redirect URI. */
+export function appUrl(e=runtime()) {
+  const value=e.APP_URL?.trim().replace(/\/+$/,'');
+  if(!value)return undefined;
+  try{const url=new URL(value);return (url.protocol==='https:'||url.protocol==='http:')&&url.origin===value?value:undefined;}catch{return undefined;}
+}
+export function googleCallbackUrl(e=runtime()) { const url=appUrl(e); return url?url+'/api/auth/google/callback':null; }
+/** Pasted credentials often carry whitespace, which Google rejects as invalid_client. */
+export function googleClient(e=runtime()) { return {client_id:e.GOOGLE_CLIENT_ID?.trim()||'',client_secret:e.GOOGLE_CLIENT_SECRET?.trim()||''}; }
+function validKey(value:string) {
+  try{return [16,24,32].includes(decode(value.trim()).length);}catch{return false;}
+}
+/** Names (never values) of the settings that block Gmail OAuth, in display order. */
+export function missingSettings(e=runtime()) {
+  const missing:string[]=[];
+  if(!e.GOOGLE_CLIENT_ID?.trim())missing.push('GOOGLE_CLIENT_ID');
+  if(!e.GOOGLE_CLIENT_SECRET?.trim())missing.push('GOOGLE_CLIENT_SECRET');
+  if(!e.TOKEN_ENCRYPTION_KEY||!validKey(e.TOKEN_ENCRYPTION_KEY))missing.push('TOKEN_ENCRYPTION_KEY');
+  if(!appUrl(e))missing.push('APP_URL');
+  return missing;
+}
+export function configured(e=runtime()) { return missingSettings(e).length===0; }
+export function notConfigured(e=runtime()) {
+  return new HttpError(503,`Gmail connection is not configured yet. Missing site settings: ${missingSettings(e).join(', ')}.`);
+}
 export function encode(input: string | Uint8Array) {
   const bytes = typeof input === 'string' ? new TextEncoder().encode(input) : input;
   return btoa(Array.from(bytes, b=>String.fromCharCode(b)).join('')).replaceAll('+','-').replaceAll('/','_').replaceAll('=','');
@@ -40,7 +64,7 @@ export function encode(input: string | Uint8Array) {
 export function decode(input: string) { return Uint8Array.from(atob(input.replaceAll('-','+').replaceAll('_','/')), c=>c.charCodeAt(0)); }
 async function key(e: Runtime) {
   if (!e.TOKEN_ENCRYPTION_KEY) throw new HttpError(503,'The Gmail connection is not configured yet.');
-  return crypto.subtle.importKey('raw', decode(e.TOKEN_ENCRYPTION_KEY), 'AES-GCM', false, ['encrypt','decrypt']);
+  return crypto.subtle.importKey('raw', decode(e.TOKEN_ENCRYPTION_KEY.trim()), 'AES-GCM', false, ['encrypt','decrypt']);
 }
 export async function encrypt(value:string,user:string,e=runtime()) {
   const iv=crypto.getRandomValues(new Uint8Array(12));

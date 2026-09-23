@@ -1,6 +1,6 @@
 import type { Email } from '@/lib/mail';
 import { hasImportantSignal } from '@/lib/inbox-priority';
-import { decode, decrypt, HttpError, runtime, type Runtime } from './runtime';
+import { decode, decrypt, googleClient, HttpError, runtime, type Runtime } from './runtime';
 export type Connection = { user_id:string; email:string; token:string; last_sync:number|null; sync_lock:number; error:string|null };
 export async function connection(user:string,e=runtime()) {
   const c=await e.DB.prepare('SELECT * FROM connections WHERE user_id = ?').bind(user).first<Connection>();
@@ -10,7 +10,7 @@ export async function connection(user:string,e=runtime()) {
 export async function accessToken(user:string,e=runtime()) {
   const c=await connection(user,e);
   const refresh=await decrypt(c.token,user,e);
-  const result=await fetch('https://oauth2.googleapis.com/token',{method:'POST',body:new URLSearchParams({grant_type:'refresh_token',refresh_token:refresh,client_id:e.GOOGLE_CLIENT_ID!,client_secret:e.GOOGLE_CLIENT_SECRET!}),signal:AbortSignal.timeout(15000)});
+  const result=await fetch('https://oauth2.googleapis.com/token',{method:'POST',body:new URLSearchParams({grant_type:'refresh_token',refresh_token:refresh,...googleClient(e)}),signal:AbortSignal.timeout(15000)});
   if(!result.ok) throw new HttpError(401,'Your Gmail connection needs to be renewed. Reconnect in settings.');
   const data=await result.json() as {access_token:string};
   return data.access_token;

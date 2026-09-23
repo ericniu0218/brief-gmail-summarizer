@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DatabaseSync } from 'node:sqlite';
-import { readFileSync, readdirSync } from 'node:fs';
+import { database } from './database';
 import {
   WorkspaceStore,
   integrationPrincipal,
@@ -14,65 +13,6 @@ import { GET, POST, DELETE } from '../app/api/v1/[...path]/route';
 import type { Runtime } from '../server/runtime';
 import { WorkspaceClient, WorkspaceApiError } from '../lib/workspaces/client';
 
-/** SQL-backed D1 adapter: executes real generated migrations, constraints, queries, and atomic batches. */
-function database() {
-  const sql = new DatabaseSync(':memory:');
-  sql.exec('PRAGMA foreign_keys = ON');
-  for (const name of readdirSync('drizzle')
-    .filter((n) => n.endsWith('.sql'))
-    .sort())
-    sql.exec(readFileSync(`drizzle/${name}`, 'utf8'));
-  class Statement {
-    values: (string | number | null)[] = [];
-    constructor(readonly query: string) {}
-    bind(...values: (string | number | null)[]) {
-      this.values = values;
-      return this;
-    }
-    execute() {
-      const statement = sql.prepare(this.query);
-      const results = statement.columns().length
-        ? statement.all(...this.values)
-        : [];
-      const change = statement.columns().length
-        ? { changes: 0, lastInsertRowid: 0 }
-        : statement.run(...this.values);
-      return {
-        results,
-        success: true,
-        meta: {
-          changes: Number(change.changes),
-          last_row_id: Number(change.lastInsertRowid),
-          duration: 0,
-        },
-      };
-    }
-    async first() {
-      return this.execute().results[0] ?? null;
-    }
-    async all() {
-      return this.execute();
-    }
-    async run() {
-      return this.execute();
-    }
-  }
-  const db = {
-    prepare: (q: string) => new Statement(q),
-    async batch(statements: Statement[]) {
-      sql.exec('BEGIN');
-      try {
-        const result = statements.map((s) => s.execute());
-        sql.exec('COMMIT');
-        return result;
-      } catch (error) {
-        sql.exec('ROLLBACK');
-        throw error;
-      }
-    },
-  } as unknown as D1Database;
-  return { db, sql };
-}
 const person = (id: string): Principal => ({
   type: 'user',
   id,

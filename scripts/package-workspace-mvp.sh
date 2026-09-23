@@ -18,6 +18,7 @@ files=(
   "server/workspaces/validation.ts"
   "app/api/v1/[...path]/route.ts"
   "tests/workspaces.test.ts"
+  "tests/database.ts"
 )
 
 tar -czf "$output" -C "$project_dir" "${files[@]}"
