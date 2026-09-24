@@ -1,6 +1,11 @@
 import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 
+/**
+ * Authentication adapter for the trusted OpenAI Sites dispatcher. Identity comes only
+ * from dispatcher-injected headers; browser request bodies never choose the current user.
+ */
+
 export type ChatGPTUser = {
   userId: string;
   displayName: string;
@@ -19,6 +24,7 @@ const SIGN_OUT_PATH = '/signout-with-chatgpt';
 const CALLBACK_PATH = '/callback';
 
 export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
+  // Missing either stable identifier means the request is anonymous.
   const requestHeaders = await headers();
   const userId = requestHeaders.get(USER_ID_HEADER);
   const email = requestHeaders.get(USER_EMAIL_HEADER);
@@ -59,6 +65,8 @@ export function chatGPTSignOutPath(returnTo = '/'): string {
 }
 
 function safeRelativeReturnPath(value: string): string {
+  // Return paths must stay inside this site. This prevents sign-in and sign-out links from
+  // becoming open redirects to attacker-controlled domains.
   if (!value.startsWith('/') || value.startsWith('//')) return '/';
 
   let url: URL;

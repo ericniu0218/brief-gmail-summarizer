@@ -7,6 +7,14 @@ import {
   type CorpusDocument,
   type Json,
 } from '@/lib/workspaces/contracts';
+
+/**
+ * Validation boundary for workspace APIs. Requests are kept within size and nesting
+ * limits, built-in artifact shapes are checked explicitly, and canonical JSON provides
+ * stable input for hashes and identifiers.
+ */
+
+// Primitive validators shared by every workspace artifact contract.
 export function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new HttpError(400, 'Expected a JSON object.');
@@ -43,6 +51,9 @@ export function integer(
     throw new HttpError(400, `Invalid ${label}.`);
   return Number(value);
 }
+
+// Deterministic serialization and cryptographic helpers used for content identity and
+// opaque credentials. Sorting object keys makes equivalent JSON hash the same way.
 export function canonical(value: unknown): string {
   if (value === null || typeof value === 'boolean' || typeof value === 'string')
     return JSON.stringify(value);
@@ -76,6 +87,9 @@ function jsonDepth(value: unknown, depth = 0): void {
   if (value && typeof value === 'object')
     for (const entry of Object.values(value)) jsonDepth(entry, depth + 1);
 }
+
+// Built-in artifact contracts receive deeper validation than third-party namespaced
+// kinds, whose application-specific content remains opaque JSON.
 export function corpusDocuments(value: unknown): CorpusDocument[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > 200)
     throw new HttpError(400, 'A corpus needs 1–200 documents.');
@@ -156,6 +170,9 @@ export function artifactInput(value: unknown): ArtifactInput {
     throw new HttpError(413, 'Result exceeds the 256 KiB MVP limit.');
   return result;
 }
+
+// Enforce the byte limit while streaming so an oversized body is rejected before the
+// server allocates and parses the complete request.
 export async function readBody(request: Request) {
   if (
     !request.headers

@@ -3,6 +3,8 @@ import { Dialog, DialogContent, DialogTitle, DialogDescription } from '@/compone
 import { ArrowUpRight, MessageSquareText, Info, ShieldCheck } from 'lucide-react';
 import type { Email } from '@/lib/mail';
 import { isImportantEmail, sortInboxEmails } from '@/lib/inbox-priority';
+
+/** Read-only summary that places reply-required mail before other important messages. */
 export function InboxDigest({open,onOpenChange,emails,ai,connected,onSelect}:{open:boolean;onOpenChange:(open:boolean)=>void;emails:Email[];ai:boolean;connected:boolean;onSelect:(email:Email)=>void}){
   const important=sortInboxEmails(emails.filter(isImportantEmail));
   const needsReply=important.filter(m=>m.needsReply);

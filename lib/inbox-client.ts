@@ -1,10 +1,14 @@
 import type { Email } from './mail';
 
+/** Browser-side transport shared by inbox hooks and controls. */
+
 export type InboxSnapshot = {
   emails: Email[];
   updated: number | null;
   ai: boolean;
   hasMore?: boolean;
+  /** Messages Gmail returned but this refresh could not safely read. */
+  skipped?: number;
 };
 export class ApiError extends Error {
   constructor(
@@ -19,6 +23,7 @@ export async function api<T>(
   body?: unknown,
   signal?: AbortSignal,
 ): Promise<T> {
+  // The presence of a body determines whether this small client sends GET or POST.
   const response = await fetch(path, {
     method: body === undefined ? 'GET' : 'POST',
     headers:

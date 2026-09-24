@@ -1,0 +1,105 @@
+import type { Runtime } from './runtime';
+import type { Section, Tag } from '@/lib/categories';
+import type { Classification, ObligationState } from '@/lib/classification';
+import type { NormalizedMessage } from './message';
+
+export type Override={
+  messageId:string;
+  /** Forced primary section, or undefined to leave the classifier's choice. */
+  category?:Section;
+  addTags:Tag[];
+  removeTags:Tag[];
+  notJunk:boolean;
+  obligationState?:ObligationState;
+  source:'message'|'rule';
+  createdAt:number;
+};
+
+type Row={message_id:string;category:string|null;add_tags:string;remove_tags:string;not_junk:number;obligation_state:string|null;source:string;created:number};
+
+const SECTIONS:Section[]=['work','personal','noise'];
+const TAGS:Tag[]=['deadlines','meetings','requests','actions','research','low-priority','junk'];
+const STATES:ObligationState[]=['open','completed','cancelled','superseded','unknown'];
+
+function parsedTags(value:string):Tag[]{
+  try{
+    const parsed:unknown=JSON.parse(value);
+    return Array.isArray(parsed)?parsed.filter((tag):tag is Tag=>TAGS.includes(tag as Tag)):[];
+  }catch{return [];}
+}
+
+function toOverride(row:Row):Override{
+  return {
+    messageId:row.message_id,
+    category:SECTIONS.includes(row.category as Section)?row.category as Section:undefined,
+    addTags:parsedTags(row.add_tags),
+    removeTags:parsedTags(row.remove_tags),
+    notJunk:!!row.not_junk,
+    obligationState:STATES.includes(row.obligation_state as ObligationState)?row.obligation_state as ObligationState:undefined,
+    source:row.source==='rule'?'rule':'message',
+    createdAt:row.created,
+  };
+}
+
+export async function loadOverrides(user:string,e:Runtime){
+  const rows=await e.DB.prepare('SELECT message_id, category, add_tags, remove_tags, not_junk, obligation_state, source, created FROM overrides WHERE user_id = ?').bind(user).all<Row>();
+  return new Map((rows.results||[]).map(row=>[row.message_id,toOverride(row)]));
+}
+
+export async function saveOverride(user:string,override:Override,e:Runtime){
+  await e.DB.prepare(
+    'INSERT INTO overrides (user_id,message_id,category,add_tags,remove_tags,not_junk,obligation_state,source,created) VALUES (?,?,?,?,?,?,?,?,?) '+
+    'ON CONFLICT(user_id,message_id) DO UPDATE SET category=excluded.category,add_tags=excluded.add_tags,remove_tags=excluded.remove_tags,not_junk=excluded.not_junk,obligation_state=excluded.obligation_state,source=excluded.source,created=excluded.created',
+  ).bind(user,override.messageId,override.category||null,JSON.stringify(override.addTags),JSON.stringify(override.removeTags),override.notJunk?1:0,override.obligationState||null,override.source,override.createdAt).run();
+}
+
+/** Returning a message to automatic classification removes its correction entirely. */
+export async function clearOverride(user:string,messageId:string,e:Runtime){
+  await e.DB.prepare('DELETE FROM overrides WHERE user_id = ? AND message_id = ?').bind(user,messageId).run();
+}
+
+/**
+ * Precedence: an explicit message-level correction wins, then a deliberate user rule,
+ * then the validated classifier result. Overrides live in their own table, so syncs,
+ * retries and model upgrades never erase them.
+ */
+export function applyOverride(classification:Classification,override?:Override):Classification{
+  if(!override)return classification;
+  // Corrections apply to what the classifier actually proposed, not to a protective
+  // state the conflict policy added, so re-running a sync cannot compound the two.
+  const proposed=classification.proposedDisposition;
+  const base:Classification=proposed
+    ?{...classification,disposition:proposed,proposedDisposition:undefined,reviewReason:undefined}
+    :classification;
+
+  const next:Classification={...base,override:{source:override.source,category:override.category,addTags:override.addTags,removeTags:override.removeTags}};
+  // Removing Junk is a disposition correction, not a request for a tagless Noise item.
+  const removesJunk=override.removeTags.includes('junk');
+  if((override.notJunk||removesJunk)&&next.disposition==='junk')next.disposition='useful';
+  if(override.category==='noise')next.disposition='junk';
+  else if(override.category){
+    next.context=override.category;
+    if(next.disposition==='junk')next.disposition='useful';
+  }
+  if(override.obligationState)next.obligations=(Array.isArray(next.obligations)?next.obligations:[]).map(o=>({...o,state:override.obligationState!}));
+  next.reason=override.source==='rule'?'Set by one of your rules.':'You corrected this message.';
+  // Only a correction that speaks to the disposition settles the message. Adding an
+  // unrelated tag must not be read as permission to resolve a Junk conflict.
+  if(override.category||override.notJunk||removesJunk||override.obligationState)next.processingStatus='classified';
+  return next;
+}
+
+/**
+ * Identifies the content a classification was derived from. A changed fingerprint means
+ * the stored result no longer applies; an unchanged one means reading or refreshing the
+ * message must not trigger reclassification.
+ */
+export function contentFingerprint(message:Pick<NormalizedMessage,'subject'|'text'|'quoted'|'calendar'>){
+  const source=`${message.subject}\u0000${message.text}\u0000${message.quoted}\u0000${message.calendar?.start||''}${message.calendar?.status||''}`;
+  let hash=0x811c9dc5;
+  for(let i=0;i<source.length;i++){
+    hash^=source.charCodeAt(i);
+    hash=Math.imul(hash,0x01000193)>>>0;
+  }
+  return `${source.length.toString(36)}-${hash.toString(36)}`;
+}

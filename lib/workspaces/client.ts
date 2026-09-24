@@ -5,6 +5,9 @@ import type {
   Page,
   WorkspaceEvent,
 } from './contracts';
+
+/** Small browser/server client for the versioned shared-workspace API. */
+
 export class WorkspaceApiError extends Error {
   constructor(
     public status: number,
@@ -26,6 +29,7 @@ export class WorkspaceClient {
     } = {},
   ) {}
   async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    // Add authentication only when this client was created for a trusted integration.
     const headers = new Headers(init.headers);
     if (init.body) headers.set('Content-Type', 'application/json');
     if (this.options.token)
@@ -35,6 +39,7 @@ export class WorkspaceClient {
         'OAI-Sites-Authorization',
         `Bearer ${this.options.sitesAuthorization}`,
       );
+    // Every caller uses the same versioned URL, no-cache policy, and redirect handling.
     const response = await (this.options.fetch ?? fetch)(
       `${this.options.baseUrl?.replace(/\/$/, '') ?? ''}/api/v1/${path}`,
       { ...init, headers, cache: 'no-store', redirect: 'error' },
@@ -44,6 +49,7 @@ export class WorkspaceClient {
         response.status,
         'The host requires sign-in or has not published the workspace API yet.',
       );
+    // Preserve the request ID on errors so a user report can be matched to server logs.
     const value = (await response.json()) as {
       error?: string;
       requestId?: string;

@@ -5,6 +5,7 @@ import { ArrowUpRight, CalendarDays } from 'lucide-react';
 import { emailKey, type Email } from '@/lib/mail';
 import { dateKey, emailDates, weekDays } from '@/lib/calendar';
 
+/** Seven-day email agenda derived from date phrases; it never writes to a calendar. */
 export function WeekCalendar({ emails, demo, onSelect }: { emails: Email[]; demo: boolean; onSelect: (email: Email) => void }) {
   const [today, setToday] = useState<Date | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -18,6 +19,7 @@ export function WeekCalendar({ emails, demo, onSelect }: { emails: Email[]; demo
   const days = weekDays(today);
   const active = days.find(day => dateKey(day) === selected) || today;
   const activeKey = dateKey(active);
+  // Parse each visible message once, then reuse those dates for day counts and the agenda.
   const dated = emails.filter(email => email.category !== 'noise').map(email => ({ email, dates: emailDates(email, demo ? today : undefined) }));
   const matches = (day: Date) => dated.filter(item => item.dates.includes(dateKey(day)));
   const items = matches(active);

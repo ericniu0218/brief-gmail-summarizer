@@ -3,6 +3,7 @@ import { Check, ChevronDown, Inbox, Mail, Plus, Settings2 } from 'lucide-react';
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator } from '@/components/ui/dropdown-menu';
 import type { GmailAccount } from '@/hooks/use-inbox';
 
+/** Account picker that keeps mailbox switching and connection management in one menu. */
 export function AccountSwitcher({accounts,activeAccountId,defaultAccountId,onSelect,onSettings}:{accounts:GmailAccount[];activeAccountId?:string|null;defaultAccountId?:string|null;onSelect:(id:string)=>void;onSettings:()=>void}) {
   const active=accounts.find(a=>a.id===activeAccountId);
   return <DropdownMenu>

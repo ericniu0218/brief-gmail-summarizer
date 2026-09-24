@@ -2,6 +2,7 @@ import { env } from 'cloudflare:workers';
 import { drizzle } from 'drizzle-orm/d1';
 import * as schema from './schema';
 
+/** Creates the typed Drizzle client around the required Cloudflare D1 binding. */
 export function getDb() {
   if (!env.DB) {
     throw new Error(

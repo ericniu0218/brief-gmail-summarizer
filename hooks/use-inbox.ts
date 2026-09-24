@@ -5,7 +5,15 @@ import { api, ApiError, loadConnectedInbox, type InboxSnapshot as Snapshot } fro
 export { api, ApiError } from '@/lib/inbox-client';
 export type GmailAccount={id:string;email:string;lastSync:number|null;error:string|null;reconnectRequired?:boolean};
 export type ConnectionStatus={accounts:GmailAccount[];defaultAccountId:string|null;connected:boolean;configured:boolean;missingSettings?:string[];callbackUrl?:string|null;aiConfigured:boolean;email:string|null;lastSync:number|null;error:string|null;schedulerActive:boolean;intervalMinutes:number};
+
+/**
+ * Owns the client-side mailbox lifecycle. The hook starts with demo data, discovers the
+ * Gmail connection, loads cached and refreshed snapshots, and rejects stale async results
+ * when the account state changes while a request is running.
+ */
 export function useInbox(){
+  // Data displayed by the inbox and the small set of connection/sync status values the
+  // surrounding UI needs. Demo messages provide a useful first render before boot finishes.
   const [emails,setEmails]=useState(demoEmails);
   const [status,setStatus]=useState<ConnectionStatus|null>(null);
   const [busy,setBusy]=useState(false);
@@ -14,14 +22,18 @@ export function useInbox(){
   const [updated,setUpdated]=useState<number|null>(null);
   const [ai,setAi]=useState(false);
   const [hasMore,setHasMore]=useState(false);
+  const [skipped,setSkipped]=useState(0);
   const connected=!!status?.connected;
   const accounts=status?.accounts|| (status?.email?[{id:'default',email:status.email,lastSync:status.lastSync,error:status.error}]:[]);
   const activeAccountId='default';
   const activeAccount=accounts[0];
   const inFlight=useRef(false);
+  // Incrementing this value invalidates callbacks started by an older mailbox lifecycle.
   const generation=useRef(0);
-  const apply=useCallback((data:Snapshot)=>{setEmails(data.emails);setUpdated(data.updated);setAi(data.ai);setHasMore(!!data.hasMore);},[]);
+  const apply=useCallback((data:Snapshot)=>{setEmails(data.emails);setUpdated(data.updated);setAi(data.ai);setHasMore(!!data.hasMore);setSkipped(data.skipped||0);},[]);
   const resetToDemo=useCallback(()=>{
+    // Invalidate connected-account work first, then replace it with the server's current
+    // demo snapshot if that request still belongs to this generation.
     const request=++generation.current;
     inFlight.current=false;setBusy(false);
     setStatus(previous=>previous?{...previous,connected:false,email:null,accounts:[],defaultAccountId:null,lastSync:null,error:null}:null);
@@ -29,6 +41,8 @@ export function useInbox(){
     void api<Snapshot>('/api/demo').then(data=>{if(generation.current===request)apply(data);}).catch(()=>{});
   },[apply]);
   const refresh=useCallback(async(silent=false)=>{
+    // Only one explicit sync may run at a time. Each response checks its generation before
+    // changing state, which prevents a late sync from repopulating a disconnected inbox.
     if(inFlight.current)return;
     if(!connected){if(!silent)setNotice('Sample inbox refreshed. Connect Gmail to receive your own email updates.');return;}
     inFlight.current=true;setBusy(true);
@@ -46,6 +60,8 @@ export function useInbox(){
     finally{if(generation.current===request){inFlight.current=false;setBusy(false);}}
   },[connected,apply]);
   useEffect(()=>{
+    // Initial boot resolves connection state once. Connected accounts stream cached data
+    // followed by a refreshed snapshot; disconnected sessions load the shared demo inbox.
     let active=true;
     const request=++generation.current;
     const controller=new AbortController();
@@ -69,6 +85,8 @@ export function useInbox(){
     return()=>{active=false;controller.abort();if(noticeTimer!==null)window.clearTimeout(noticeTimer);};
   },[apply]);
   useEffect(()=>{
+    // While connected, refresh periodically and after returning to the tab. The lighter
+    // mailbox poll picks up scheduler-written snapshots without starting another sync.
     if(!connected)return;
     const syncTimer=window.setInterval(()=>void refresh(true),30*60*1000);
     const pollTimer=window.setInterval(()=>{
@@ -79,5 +97,5 @@ export function useInbox(){
     document.addEventListener('visibilitychange',visible);
     return()=>{clearInterval(syncTimer);clearInterval(pollTimer);document.removeEventListener('visibilitychange',visible);};
   },[connected,refresh,apply]);
-  return {emails,setEmails,status,setStatus,accounts,activeAccount,activeAccountId,setActiveAccountId:(_id:string)=>{},defaultAccountId:status?.defaultAccountId||accounts[0]?.id||null,connected,busy,notice,setNotice,signInUrl,updated,ai,hasMore,refresh,resetToDemo,reload:async()=>{await refresh(true)},setDefaultAccount:async(_id:string)=>{},disconnectAccount:async()=>{await api('/api/disconnect',{});resetToDemo();return {revoked:false}}};
+  return {emails,setEmails,status,setStatus,accounts,activeAccount,activeAccountId,setActiveAccountId:(_id:string)=>{},defaultAccountId:status?.defaultAccountId||accounts[0]?.id||null,connected,busy,notice,setNotice,signInUrl,updated,ai,hasMore,skipped,refresh,resetToDemo,reload:async()=>{await refresh(true)},setDefaultAccount:async(_id:string)=>{},disconnectAccount:async()=>{await api('/api/disconnect',{});resetToDemo();return {revoked:false}}};
 }

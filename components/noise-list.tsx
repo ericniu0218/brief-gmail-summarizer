@@ -3,11 +3,18 @@ import { useState } from 'react';
 import { ArrowUpRight, Check, ChevronDown, Layers3, MailMinus, Sparkles } from 'lucide-react';
 import { api } from '@/hooks/use-inbox';
 import { emailKey, senderKey, gmailLink, type Email } from '@/lib/mail';
+
+/**
+ * Groups Noise by sender and offers safe unsubscribe paths. Supported one-click senders
+ * use the server route; every other sender opens the original conversation in Gmail.
+ */
 export function NoiseList({emails,demo,onRemoved,onSelect}:{emails:Email[];demo:boolean;onRemoved:(email:Email)=>void;onSelect:(email:Email)=>void}){
   const [manualEmail,setManualEmail]=useState<Email|null>(null);
   const [expanded,setExpanded]=useState<string|null>(null);const [busy,setBusy]=useState('');const [message,setMessage]=useState('');
+  // Grouping prevents a frequent newsletter from taking over the page with repeated rows.
   const groups=Array.from(emails.reduce((map,m)=>{map.set(senderKey(m),[...(map.get(senderKey(m))||[]),m]);return map;},new Map<string,Email[]>()));
   async function unsubscribe(email:Email){
+    // Removing a sender updates this snapshot only after the server confirms the request.
     setBusy(senderKey(email));setMessage('');setManualEmail(null);
     try{
       if(demo){onRemoved(email);setMessage(`Demo: ${email.sender} is unsubscribed. Your real subscriptions are unchanged.`);}

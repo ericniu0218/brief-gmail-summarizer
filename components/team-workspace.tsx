@@ -60,7 +60,13 @@ const kindName = (kind: string) =>
       ? 'Fold result'
       : kind;
 
+/**
+ * Complete team workspace screen: choose or join a workspace, browse immutable results,
+ * publish new corpora, inspect activity, and let owners manage people and integrations.
+ */
 export function TeamWorkspace() {
+  // Workspace selection, result browsing, and administration share this page but remain
+  // separate state groups so changing one tab does not discard unrelated work.
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspaceId, setWorkspaceId] = useState('');
   const [loading, setLoading] = useState(true);
@@ -101,6 +107,7 @@ export function TeamWorkspace() {
       setSignIn(error.signInUrl);
   }, []);
   async function act(fn: () => Promise<void>) {
+    // All button actions use the same busy and error lifecycle.
     setBusy(true);
     setNotice('');
     try {
@@ -112,6 +119,7 @@ export function TeamWorkspace() {
     }
   }
   const selectWorkspace = useCallback((id: string) => {
+    // Clear records owned by the previous workspace before updating the deep link.
     selection.current = id;
     setWorkspaceId(id);
     setItems([]);
@@ -149,6 +157,8 @@ export function TeamWorkspace() {
     );
   }
   useEffect(() => {
+    // Initial load also consumes an invite from the URL fragment. Fragments are never sent
+    // to the server and are removed immediately so the secret is not left in browser history.
     const params = new URLSearchParams(location.search);
     const token = new URLSearchParams(location.hash.slice(1)).get('invite');
     if (token)
@@ -175,6 +185,8 @@ export function TeamWorkspace() {
   }, [applyWorkspaces, fail]);
   useEffect(() => {
     if (!workspaceId) return;
+    // Search results, members, and recent activity refresh together. Abort and selection
+    // checks keep a slow response from an old workspace out of the current one.
     const controller = new AbortController();
     let running = false;
     const refresh = async () => {
@@ -223,6 +235,7 @@ export function TeamWorkspace() {
     };
   }, [workspaceId, base, query, kind, fail]);
   useEffect(() => {
+    // Owner-only secrets are loaded only while an administrative tab is open.
     if (!owner || !workspaceId || (tab !== 'people' && tab !== 'integrations'))
       return;
     let cancelled = false;

@@ -2,6 +2,7 @@ import * as React from 'react';
 
 const MOBILE_BREAKPOINT = 768;
 
+/** Reactive match for the layout breakpoint used by responsive navigation components. */
 export function useIsMobile() {
   const [isMobile, setIsMobile] = React.useState<boolean | undefined>(
     undefined,

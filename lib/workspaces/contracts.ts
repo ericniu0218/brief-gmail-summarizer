@@ -1,4 +1,10 @@
 /** Public v1 wire contract. JSON only; timestamps are Unix milliseconds. */
+/**
+ * Portable public contract for team workspaces. Browser code, API routes, integrations,
+ * and storage all exchange these shapes, so changes here affect every producer and reader.
+ */
+
+/** JSON-compatible values are the only data allowed inside an artifact. */
 export type Json =
   | null
   | boolean
@@ -20,6 +26,7 @@ export type Member = {
   joined: number;
 };
 export type ArtifactInput = {
+  // `kind` and `schemaVersion` tell readers how to interpret immutable content.
   kind: string;
   schemaVersion: number;
   title: string;
@@ -30,6 +37,7 @@ export type ArtifactInput = {
   parentIds: string[];
 };
 export type Artifact = ArtifactInput & {
+  // These fields are stamped by the server and cannot be chosen by a publisher.
   id: string;
   workspaceId: string;
   createdBy: string;
@@ -60,4 +68,5 @@ export type CorpusContent = {
 };
 export const CORPUS_KIND = 'brief.corpus';
 export const FOLD_KIND = 'brief.fold';
+// D1 stores artifact JSON directly; this cap prevents unexpectedly large records.
 export const MAX_REQUEST_BYTES = 262144;

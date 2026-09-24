@@ -8,6 +8,13 @@ import {
   check,
 } from 'drizzle-orm/sqlite-core';
 import { sql } from 'drizzle-orm';
+
+/**
+ * Database map for private Gmail state and shared workspace artifacts. It mirrors the
+ * migration files; request handlers never create or alter tables.
+ */
+
+// Private mailbox tables are keyed by the authenticated user.
 export const connections = sqliteTable('connections', {
   userId: text('user_id').primaryKey(),
   email: text('email').notNull(),
@@ -39,6 +46,13 @@ export const unsubscribed = sqliteTable('unsubscribed', {
   address: text('address').notNull(),
   created: integer('created').notNull(),
 });
+export const overrides = sqliteTable('overrides', {
+  // One row holds the effective manual correction for one message.
+  userId: text('user_id').notNull(), messageId: text('message_id').notNull(),
+  category: text('category'), addTags: text('add_tags').notNull(), removeTags: text('remove_tags').notNull(),
+  notJunk: integer('not_junk').notNull().default(0), obligationState: text('obligation_state'),
+  source: text('source').notNull(), created: integer('created').notNull(),
+}, table => [primaryKey({columns: [table.userId, table.messageId]})]);
 export const agentStatus = sqliteTable('agent_status', {
   id: text('id').primaryKey(),
   lastRun: integer('last_run').notNull(),
@@ -135,6 +149,7 @@ export const workspaceArtifacts = sqliteTable(
     requestHash: text('request_hash').notNull(),
   },
   (t) => [
+    // Retrying one logical publish operation returns the same artifact.
     uniqueIndex('artifacts_idempotency').on(
       t.workspaceId,
       t.createdBy,

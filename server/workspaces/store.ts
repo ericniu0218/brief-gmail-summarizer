@@ -20,6 +20,12 @@ import {
   string,
 } from './validation';
 
+/**
+ * Authorization and persistence core for shared workspaces. Every workspace query passes
+ * through this class so membership, roles, tenant boundaries, events, and idempotency are
+ * enforced in one place.
+ */
+
 export type Principal =
   | { type: 'user'; id: string; name: string }
   | {
@@ -93,6 +99,7 @@ export class WorkspaceStore {
     workspaceId: string,
     permission: 'read' | 'write' | 'manage' = 'read',
   ): Promise<Role> {
+    // Integration keys belong to one workspace and cannot manage people or secrets.
     const a = this.actor;
     if (
       a.type === 'integration' &&
@@ -133,6 +140,7 @@ export class WorkspaceStore {
     ).results;
   }
   async createWorkspace(name: unknown): Promise<Workspace> {
+    // Workspace, owner membership, and audit event commit together.
     const actor = this.user();
     const id = crypto.randomUUID();
     const created = Date.now();
@@ -164,6 +172,7 @@ export class WorkspaceStore {
     ).results;
   }
   async changeMember(ws: string, userId: string, role: unknown) {
+    // Only owners manage membership, and the original owner cannot be removed or demoted.
     await this.authorize(ws, 'manage');
     const target = await this.db
       .prepare(
@@ -214,6 +223,7 @@ export class WorkspaceStore {
     const actor = this.user();
     if (role !== 'editor' && role !== 'viewer')
       throw new HttpError(400, 'Choose editor or viewer.');
+    // The raw invite is returned once; only its hash is stored.
     const token = secret('bwi_');
     const id = crypto.randomUUID();
     const expires = Date.now() + 7 * 86400000;
@@ -311,6 +321,7 @@ export class WorkspaceStore {
     if (scope !== 'read' && scope !== 'write')
       throw new HttpError(400, 'Choose read or write scope.');
     const days = integer(data.days ?? 30, 'expiry days', 1, 90);
+    // Integration credentials use the same return-once, hash-at-rest rule.
     const token = secret('bwk_');
     const id = crypto.randomUUID();
     const expires = Date.now() + days * 86400000;
@@ -354,6 +365,8 @@ export class WorkspaceStore {
     ws: string,
     params: URLSearchParams,
   ): Promise<Page<ArtifactSummary>> {
+    // Stable cursor pagination uses creation time plus ID so equal timestamps cannot skip
+    // or repeat results.
     await this.authorize(ws);
     const limit = integer(Number(params.get('limit') ?? 30), 'limit', 1, 100);
     const kind = params.get('kind') ?? '';
@@ -406,6 +419,7 @@ export class WorkspaceStore {
     value: unknown,
     requestKey: unknown,
   ): Promise<{ artifact: Artifact; replayed: boolean }> {
+    // Validate the full artifact and all parent links before any record is inserted.
     await this.authorize(ws, 'write');
     const input = artifactInput(value);
     const key = string(requestKey, 'Idempotency-Key', 128);

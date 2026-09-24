@@ -7,6 +7,11 @@ import {
 import { HttpError } from '../runtime';
 import { selectedIds } from './processors';
 import { string } from './validation';
+
+/**
+ * Explicit bridge from a private Gmail snapshot to a shareable corpus. Only summaries the
+ * user selected are copied; credentials and full message bodies remain private.
+ */
 /** Reads only the requesting human's existing snapshot; never shares the Gmail grant. */
 export async function gmailPreview(
   db: D1Database,
@@ -42,6 +47,7 @@ export async function gmailPreview(
     text: e.summary || e.subject,
     source: e.sender,
   }));
+  // Byte counts show how much compression occurred without exposing omitted text.
   const byteLength = (value: string) =>
     new TextEncoder().encode(value).byteLength;
   return {

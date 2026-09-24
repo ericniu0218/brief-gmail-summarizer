@@ -3,6 +3,10 @@ import { ArrowUpRight, Check, ShieldCheck, Sparkles } from 'lucide-react';
 import { demoEmails, emailKey, type Email } from '@/lib/mail';
 import { sortInboxEmails } from '@/lib/inbox-priority';
 
+/**
+ * Presents at most three high-value inbox highlights and explains whether the content is
+ * sample data, an AI summary, or the deterministic fallback.
+ */
 export function DailyBrief({
   emails,
   connected,
@@ -24,6 +28,7 @@ export function DailyBrief({
   onCollapse: () => void;
   onSelect: (email: Email) => void;
 }) {
+  // Noise is excluded before sorting so promotions never consume a highlight slot.
   const highlights = sortInboxEmails(
     emails.filter((email) => email.category !== 'noise'),
   ).slice(0, 3);

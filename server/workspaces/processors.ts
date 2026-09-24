@@ -8,6 +8,11 @@ import {
 } from '@/lib/workspaces/contracts';
 import { corpusDocuments, integer, string } from './validation';
 import { HttpError } from '../runtime';
+
+/**
+ * Deterministic workspace processors. The same source produces the same corpus or fold,
+ * which keeps previews, checksums, retries, and tests predictable.
+ */
 const bytes = (text: string) => new TextEncoder().encode(text).byteLength;
 /** Deterministic, lossy extractive compression. No remote model calls. */
 export function compressText(title: unknown, text: unknown): ArtifactInput {
@@ -41,6 +46,7 @@ export function compressText(title: unknown, text: unknown): ArtifactInput {
   };
 }
 export function foldCorpus(parent: Artifact): ArtifactInput {
+  // A fold is a new immutable artifact linked to its source, never an in-place edit.
   if (parent.kind !== CORPUS_KIND || parent.schemaVersion !== 1)
     throw new HttpError(400, 'This processor requires a v1 corpus.');
   const documents = corpusDocuments(parent.content.documents);
