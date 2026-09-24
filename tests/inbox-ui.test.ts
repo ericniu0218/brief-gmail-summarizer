@@ -6,7 +6,8 @@ import Dashboard from '../app/page';
 import { ConnectGmailButton } from '../components/connect-gmail-button';
 import { GmailSetupNote } from '../components/connection-panel';
 import { DailyBrief } from '../components/daily-brief';
-import type { ConnectionStatus } from '../hooks/use-inbox';
+import { resolveSelection, requestGate, type ConnectionStatus } from '../hooks/use-inbox';
+import { AccountList } from '../components/connection-panel';
 import { demoEmails } from '../lib/mail';
 import {
   api,
@@ -21,9 +22,6 @@ const status: ConnectionStatus = {
   connected: false,
   configured: true,
   aiConfigured: true,
-  email: null,
-  lastSync: null,
-  error: null,
   schedulerActive: false,
   intervalMinutes: 30,
 };
@@ -166,4 +164,79 @@ void test('the setup notice lists exactly which site settings are missing', () =
   );
   assert.match(html, /TOKEN_ENCRYPTION_KEY/);
   assert.match(html, /https:\/\/brief\.example\/api\/auth\/google\/callback/);
+});
+
+// ── Multi-account selection and stale-response protection ───────────────────
+
+void test('a remembered selection is restored only while the user still owns it', () => {
+  const accounts = [{ id: 'acct-1' }, { id: 'acct-2' }];
+  assert.equal(resolveSelection('acct-2', accounts, 'acct-1'), 'acct-2');
+  assert.equal(resolveSelection('all', accounts, 'acct-1'), 'all');
+  // A mailbox that was disconnected, or one belonging to somebody else, is not restored.
+  assert.equal(resolveSelection('acct-gone', accounts, 'acct-1'), 'acct-1');
+  assert.equal(resolveSelection('acct-b', accounts, null), 'acct-1');
+  // Nothing remembered and no default still lands on a mailbox the user owns.
+  assert.equal(resolveSelection(null, accounts, null), 'acct-1');
+  // With no accounts at all the combined view is the only sensible destination.
+  assert.equal(resolveSelection('acct-1', [], null), 'all');
+  // A stale default that no longer exists does not win over a valid remembered account.
+  assert.equal(resolveSelection('acct-2', accounts, 'acct-gone'), 'acct-2');
+});
+
+void test('a late response for a previous mailbox cannot overwrite the current one', async () => {
+  const gate = requestGate();
+  const painted: string[] = [];
+  // Two overlapping loads: the first mailbox is slow, the second resolves immediately.
+  const slow = (async () => {
+    const ticket = gate.begin();
+    await new Promise((r) => setTimeout(r, 20));
+    if (gate.isCurrent(ticket)) painted.push('acct-1');
+  })();
+  const fast = (async () => {
+    const ticket = gate.begin();
+    if (gate.isCurrent(ticket)) painted.push('acct-2');
+  })();
+  await Promise.all([slow, fast]);
+  assert.deepEqual(
+    painted,
+    ['acct-2'],
+    'only the mailbox the user switched to may paint',
+  );
+});
+
+void test('switching away and back keeps the newest selection authoritative', async () => {
+  const gate = requestGate();
+  const first = gate.begin();
+  const second = gate.begin();
+  const third = gate.begin();
+  assert.equal(gate.isCurrent(first), false);
+  assert.equal(gate.isCurrent(second), false);
+  assert.equal(gate.isCurrent(third), true, 'the newest switch wins');
+});
+
+void test('the settings list shows every mailbox with its own actions', () => {
+  const html = renderToStaticMarkup(
+    createElement(AccountList, {
+      accounts: [
+        { id: 'acct-1', email: 'first@example.com', lastSync: 1789000000000, error: null },
+        { id: 'acct-2', email: 'second@example.com', lastSync: null, error: 'Reconnect Gmail', reconnectRequired: true },
+      ],
+      defaultAccountId: 'acct-1',
+      onSetDefault: async () => {},
+      onDisconnectAccount: async () => {},
+    }),
+  );
+  assert.ok(html.includes('first@example.com'), 'lists the first mailbox');
+  assert.ok(html.includes('second@example.com'), 'lists the second mailbox');
+  assert.ok(html.includes('Default'), 'marks the default account');
+  assert.ok(html.includes('Needs reconnection'), 'shows the failing account status');
+  // Reconnect is aimed at the account that needs it, not a generic flow.
+  assert.ok(
+    html.includes('action=reconnect&amp;accountId=acct-2'),
+    'reconnect targets the failing account',
+  );
+  assert.ok(!html.includes('accountId=acct-1&amp;'), 'the healthy account offers no reconnect');
+  assert.ok(html.includes('action=add'), 'offers adding another mailbox');
+  assert.ok(html.includes('Set as default'), 'offers promoting the non-default account');
+  assert.ok(html.includes('Disconnect'), 'offers per-account disconnect');
 });

@@ -14,7 +14,9 @@ const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === 'seatbelt';
 
 const localBindingConfig = {
   main: './worker.ts',
-  triggers: { crons: ['*/30 * * * *'] },
+  // Frequent ticks advance large initial backfills; completed accounts remain gated by
+  // their 29-minute due time in `runAgent`.
+  triggers: { crons: ['*/5 * * * *'] },
   compatibility_flags: ['nodejs_compat'],
   d1_databases: d1
     ? [

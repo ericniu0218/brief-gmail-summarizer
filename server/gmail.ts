@@ -2,16 +2,51 @@ import type { Email } from '@/lib/mail';
 import { deterministicClassify } from '@/lib/deterministic';
 import { applyPolicy, type Classification } from '@/lib/classification';
 import { normalizeMessage, type GmailMessage, type NormalizedMessage } from './message';
-import { decrypt, googleClient, HttpError, runtime, type Runtime } from './runtime';
-export type Connection = { user_id:string; email:string; token:string; last_sync:number|null; sync_lock:number; error:string|null };
-export async function connection(user:string,e=runtime()) {
-  const c=await e.DB.prepare('SELECT * FROM connections WHERE user_id = ?').bind(user).first<Connection>();
-  if(!c) throw new HttpError(409,'Connect Gmail before using your live inbox.');
+import { decryptToken, googleClient, HttpError, runtime, type Runtime } from './runtime';
+
+export type Connection = {
+  id:string; user_id:string; provider_identity:string|null; email:string; token:string;
+  token_version:number; last_sync:number|null; sync_lock:number; error:string|null; created:number;
+  sync_page_token:string|null; sync_generation:string|null; sync_skipped:number;sync_full_scan:number;backfill_complete:number;last_full_scan:number|null;
+};
+
+/** The reserved selection for the combined view. It is never a credential-bearing account. */
+export const ALL_INBOXES='all';
+
+/**
+ * The single authorization funnel for every account-scoped operation.
+ *
+ * It matches owner *and* account together, so holding an account id proves nothing by
+ * itself. A mailbox owned by someone else and a mailbox that does not exist return the
+ * same error, so responses cannot be used to discover other users' accounts.
+ */
+export async function getOwnedConnection(user:string,accountId:string,e=runtime()){
+  if(!accountId||accountId===ALL_INBOXES)throw new HttpError(400,'Choose a specific Gmail account for this action.');
+  const c=await e.DB.prepare('SELECT * FROM connections WHERE id = ? AND user_id = ?').bind(accountId,user).first<Connection>();
+  if(!c)throw new HttpError(404,'That Gmail account is not connected.');
   return c;
 }
-export async function accessToken(user:string,e=runtime()) {
-  const c=await connection(user,e);
-  const refresh=await decrypt(c.token,user,e);
+
+/** Every mailbox this user owns, oldest connection first, for listing and fan-out. */
+export async function ownedConnections(user:string,e=runtime()){
+  const rows=await e.DB.prepare('SELECT * FROM connections WHERE user_id = ? ORDER BY created, id').bind(user).all<Connection>();
+  return rows.results||[];
+}
+
+/**
+ * Read a connection's refresh token in whichever format it was stored.
+ *
+ * This deliberately does not rewrite the stored ciphertext. A refresh holds its lease by
+ * remembering the token it started with, so re-encrypting here would change that value
+ * mid-sync and make a healthy refresh look stale. Legacy tokens are upgraded on reconnect.
+ */
+export async function refreshTokenFor(c:Connection,e=runtime()){
+  return decryptToken(c.token,c.user_id,c.id,c.token_version,e);
+}
+
+export async function accessToken(user:string,accountId:string,e=runtime()) {
+  const c=await getOwnedConnection(user,accountId,e);
+  const refresh=await refreshTokenFor(c,e);
   const result=await fetch('https://oauth2.googleapis.com/token',{method:'POST',body:new URLSearchParams({grant_type:'refresh_token',refresh_token:refresh,...googleClient(e)}),signal:AbortSignal.timeout(15000)});
   if(!result.ok) throw new HttpError(401,'Your Gmail connection needs to be renewed. Reconnect in settings.');
   const data=await result.json() as {access_token:string};
@@ -19,7 +54,7 @@ export async function accessToken(user:string,e=runtime()) {
 }
 export async function gmail<T>(path:string, token:string, init:RequestInit={}) {
   const result=await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${path}`,{...init,headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},signal:AbortSignal.timeout(20000)});
-  if(!result.ok) throw new HttpError(result.status===429?429:502,result.status===429?'Gmail is busy. Please try again in a minute.':'Gmail could not complete that request. Please try again.');
+  if(!result.ok) throw new HttpError(result.status===400?400:result.status===429?429:502,result.status===429?'Gmail is busy. Please try again in a minute.':'Gmail could not complete that request. Please try again.');
   return await result.json() as T;
 }
 export type { GmailMessage } from './message';

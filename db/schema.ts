@@ -14,45 +14,103 @@ import { sql } from 'drizzle-orm';
  * migration files; request handlers never create or alter tables.
  */
 
-// Private mailbox tables are keyed by the authenticated user.
+/**
+ * Private mailbox tables are keyed by an opaque account id, not by the mailbox address.
+ * One authenticated user may own several connected Gmail accounts, so every mailbox row
+ * carries both its owner (`user_id`) and its account (`account_id`). Queries match on
+ * both together: holding an account id is never on its own proof of ownership.
+ */
 export const connections = sqliteTable('connections', {
-  userId: text('user_id').primaryKey(),
+  // Opaque internal id. The email address is mutable, so it is never the primary key.
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull(),
+  // Google's stable subject claim when available, so a renamed mailbox still matches.
+  providerIdentity: text('provider_identity'),
   email: text('email').notNull(),
   token: text('token').notNull(),
+  // 1 = refresh token encrypted with the legacy user-only AAD, 2 = user + account AAD.
+  tokenVersion: integer('token_version').notNull().default(1),
   lastSync: integer('last_sync'),
   syncLock: integer('sync_lock').notNull().default(0),
+  // A mailbox is scanned in bounded pages across runs. The generation marks messages
+  // seen in the current full scan so stale records can be removed only at the last page.
+  syncPageToken: text('sync_page_token'),
+  syncGeneration: text('sync_generation'),
+  syncSkipped: integer('sync_skipped').notNull().default(0),
+  syncFullScan: integer('sync_full_scan').notNull().default(1),
+  backfillComplete: integer('backfill_complete').notNull().default(0),
+  lastFullScan: integer('last_full_scan'),
   error: text('error'),
+  created: integer('created').notNull(),
+}, table => [
+  // One user cannot connect the same mailbox twice, so two callbacks racing for the same
+  // address collide here rather than in application code. Two *different* users may each
+  // connect the same mailbox: access is granted per application user, not globally.
+  uniqueIndex('connections_user_email').on(table.userId, table.email),
+  index('connections_user').on(table.userId),
+  // Scheduler selection: least recently synced accounts that are not currently leased.
+  index('connections_due').on(table.syncLock, table.lastSync),
+]);
+/** One default mailbox per user, always validated against a connection they own. */
+export const accountPreferences = sqliteTable('account_preferences', {
+  userId: text('user_id').primaryKey(),
+  defaultAccountId: text('default_account_id').notNull(),
 });
 export const oauthStates = sqliteTable('oauth_states', {
   state: text('state').primaryKey(),
   userId: text('user_id').notNull(),
   verifier: text('verifier').notNull(),
+  // 'add' connects an additional mailbox; 'reconnect' renews targetAccountId only.
+  action: text('action').notNull().default('add'),
+  targetAccountId: text('target_account_id'),
   expires: integer('expires').notNull(),
 });
 export const snapshots = sqliteTable('snapshots', {
-  userId: text('user_id').primaryKey(),
+  accountId: text('account_id').primaryKey(),
+  userId: text('user_id').notNull(),
   data: text('data').notNull(),
   updated: integer('updated').notNull(),
-});
+  // Optimistic concurrency prevents sync, reply, and unsubscribe from losing updates.
+  revision: integer('revision').notNull().default(0),
+}, table => [index('snapshots_user').on(table.userId)]);
+/** Individual mailbox rows keep reads and updates bounded as a mailbox grows. */
+export const mailboxMessages = sqliteTable('mailbox_messages', {
+  userId: text('user_id').notNull(), accountId: text('account_id').notNull(), messageId: text('message_id').notNull(),
+  data: text('data').notNull(), receivedAt: integer('received_at').notNull().default(0), scanGeneration: text('scan_generation').notNull(),
+  // Once this app sends a reply, later Gmail refreshes must not restore needsReply=true.
+  replied: integer('replied').notNull().default(0),
+}, table => [primaryKey({columns:[table.accountId,table.messageId]}), index('mailbox_messages_account_received').on(table.accountId,table.receivedAt)]);
+/** A sender rule applies only inside one connected Gmail account. */
+export const senderRules = sqliteTable('sender_rules', {
+  userId:text('user_id').notNull(),accountId:text('account_id').notNull(),address:text('address').notNull(),
+  junkPreference:text('junk_preference').notNull(),revision:integer('revision').notNull().default(1),updated:integer('updated').notNull(),
+}, table => [primaryKey({columns:[table.accountId,table.address]}),index('sender_rules_user').on(table.userId)]);
 export const operations = sqliteTable('operations', {
+  // The id is a fingerprint that includes the account, so the same text sent from two
+  // mailboxes stays two distinct operations instead of being suppressed as a duplicate.
   id: text('id').primaryKey(),
   userId: text('user_id').notNull(),
+  accountId: text('account_id').notNull(),
   status: text('status').notNull(),
   result: text('result'),
-});
+}, table => [index('operations_account').on(table.accountId)]);
 export const unsubscribed = sqliteTable('unsubscribed', {
   id: text('id').primaryKey(),
   userId: text('user_id').notNull(),
+  accountId: text('account_id').notNull(),
   address: text('address').notNull(),
   created: integer('created').notNull(),
-});
+}, table => [uniqueIndex('unsubscribed_account_address').on(table.accountId, table.address)]);
 export const overrides = sqliteTable('overrides', {
-  // One row holds the effective manual correction for one message.
-  userId: text('user_id').notNull(), messageId: text('message_id').notNull(),
+  // One row holds manual intent for one message. Inactive rows are reset tombstones whose
+  // revision prevents stale requests from recreating corrections.
+  userId: text('user_id').notNull(), accountId: text('account_id').notNull(), messageId: text('message_id').notNull(),
   category: text('category'), addTags: text('add_tags').notNull(), removeTags: text('remove_tags').notNull(),
   notJunk: integer('not_junk').notNull().default(0), obligationState: text('obligation_state'),
-  source: text('source').notNull(), created: integer('created').notNull(),
-}, table => [primaryKey({columns: [table.userId, table.messageId]})]);
+  source: text('source').notNull(), created: integer('created').notNull(), junkPreference: text('junk_preference'),
+  obligationStates: text('obligation_states').notNull().default('{}'), revision: integer('revision').notNull().default(1),
+  active: integer('active').notNull().default(1),
+}, table => [primaryKey({columns: [table.accountId, table.messageId]}), index('overrides_user').on(table.userId)]);
 export const agentStatus = sqliteTable('agent_status', {
   id: text('id').primaryKey(),
   lastRun: integer('last_run').notNull(),

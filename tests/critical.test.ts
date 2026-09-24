@@ -5,13 +5,13 @@ import { parseMessage, safeUnsubscribe } from '../server/gmail';
 import { POST as reply } from '../app/api/reply/route';
 import { POST as suggest } from '../app/api/suggest/route';
 import { generate } from '../server/ai';
-import { demoEmails } from '../lib/mail';
+import { demoEmails, emailKey, senderKey, gmailThreadUrl, type Email } from '../lib/mail';
 import { GET as demoDigest } from '../app/api/demo/route';
 import { POST as runScheduledAgent } from '../app/api/agent/route';
 import { summarizeInbox } from '../server/sync';
 import { buildInboxRows, isImportantEmail, sortInboxEmails } from '../lib/inbox-priority';
 import { SECTIONS, classifyEmail, emailTags, parseView, rowLabels, sectionCount, selectEmails, tagCount, toggleExpanded, type Tag } from '../lib/categories';
-import { normalizeMessage, type GmailMessage, type NormalizedMessage } from '../server/message';
+import { hydrateDeferredBodies, normalizeMessage, type GmailMessage, type NormalizedMessage } from '../server/message';
 import { collectBatch, evidenceSupported, validateItem } from '../server/classify';
 import { applyOverride, contentFingerprint } from '../server/overrides';
 import { deterministicClassify } from '../lib/deterministic';
@@ -20,22 +20,27 @@ import { derivePriority, effectiveCategories, isOverdue, isOverviewMessage, need
 import { FIXTURES, DEV_FIXTURES, HELDOUT_FIXTURES } from './eval-set';
 
 declare global { var __briefTestEnv: Runtime; var __briefTestHeaders: Headers; }
+/** Resolve a fetch argument to its URL, matching the helper used by the other suites. */
+function requestUrl(input: Parameters<typeof fetch>[0]) {
+  return input instanceof Request ? input.url : input.toString();
+}
+
 const testEnv = {TOKEN_ENCRYPTION_KEY:encode(crypto.getRandomValues(new Uint8Array(32))),APP_URL:'https://brief.example'} as Runtime;
 globalThis.__briefTestEnv=testEnv;
 globalThis.__briefTestHeaders=new Headers();
 
-test('stored refresh tokens are encrypted and bound to the owning user',async()=>{
+void test('stored refresh tokens are encrypted and bound to the owning user',async()=>{
  const encrypted=await encrypt('sample-refresh-token','user-a',testEnv);
  assert.ok(!encrypted.includes('sample-refresh-token'));
  assert.equal(await decrypt(encrypted,'user-a',testEnv),'sample-refresh-token');
  await assert.rejects(decrypt(encrypted,'user-b',testEnv));
 });
-test('rejects external-origin mutations and requests without an origin',()=>{
+void test('rejects external-origin mutations and requests without an origin',()=>{
  assert.throws(()=>mutation(new Request('https://brief.example/api/reply',{method:'POST',headers:{origin:'https://attacker.example'}})));
  assert.throws(()=>mutation(new Request('https://brief.example/api/reply',{method:'POST'})));
  assert.doesNotThrow(()=>mutation(new Request('https://brief.example/api/reply',{method:'POST',headers:{origin:'https://brief.example'}})));
 });
-test('the scheduled agent endpoint requires its secret and records a heartbeat',async()=>{
+void test('the scheduled agent endpoint requires its secret and records a heartbeat',async()=>{
  const statements:string[]=[];
  const fakeDb={prepare(sql:string){return {bind(){return this;},async run(){statements.push(sql);return {meta:{changes:1}};},async all(){return {results:[]};}};}};
  globalThis.__briefTestEnv={...testEnv,DB:fakeDb as unknown as D1Database,AGENT_CRON_SECRET:'cron-secret'};
@@ -47,29 +52,29 @@ test('the scheduled agent endpoint requires its secret and records a heartbeat',
   assert.ok(statements.some(sql=>sql.includes('agent_status')));
  }finally{globalThis.__briefTestEnv=testEnv;}
 });
-test('one-click targets require trusted HTTPS domains without credentials or custom ports',()=>{
+void test('one-click targets require trusted HTTPS domains without credentials or custom ports',()=>{
  assert.equal(safeUnsubscribe('https://news.list-manage.com/unsubscribe?id=1',testEnv),true);
  for(const url of ['http://news.list-manage.com/unsubscribe','https://list-manage.com.attacker.example','https://attacker.example','https://127.0.0.1','https://localhost','https://user:pass@list-manage.com','https://list-manage.com:8443'])assert.equal(safeUnsubscribe(url,testEnv),false,url);
 });
-test('newsletter headers cannot promote marketing to an urgent work item',()=>{
+void test('newsletter headers cannot promote marketing to an urgent work item',()=>{
  const parsed=parseMessage({id:'abc',threadId:'thread',snippet:'Newsletter',internalDate:'1788960000000',labelIds:['INBOX','IMPORTANT'],payload:{mimeType:'text/plain',headers:[{name:'From',value:'Daily News <hello@news.example>'},{name:'Subject',value:'Our latest issue'},{name:'List-Unsubscribe',value:'<https://news.list-manage.com/u>'},{name:'List-Unsubscribe-Post',value:'List-Unsubscribe=One-Click'}],body:{data:encode('Hello, reader.')}}});
  // An unsubscribe header no longer forces Noise, but bulk mail still must not become urgent.
  assert.notEqual(parsed.category,'noise','an unsubscribe header alone must not prove junk');
  assert.equal(parsed.priority,'normal');assert.equal(parsed.address,'hello@news.example');assert.equal(parsed.body,'Hello, reader.');
 });
-test('security and account-access mail is important even without Gmail Important',()=>{
+void test('security and account-access mail is important even without Gmail Important',()=>{
  const parsed=parseMessage({id:'security',threadId:'thread',snippet:'Use code 482917 to finish signing in.',internalDate:'1788960000000',labelIds:['INBOX'],payload:{mimeType:'text/plain',headers:[{name:'From',value:'GitHub <noreply@github.com>'},{name:'Subject',value:'Your GitHub verification code'}],body:{data:encode('Use code 482917 to finish signing in.')}}});
  assert.equal(parsed.priority,'high');
  assert.equal(parsed.label,'Important');
  assert.equal(isImportantEmail(parsed),true);
 });
-test('reply-needed mail ranks first and routine mail stays at the bottom',()=>{
+void test('reply-needed mail ranks first and routine mail stays at the bottom',()=>{
  const routine={...demoEmails[3],id:'routine',priority:'normal' as const,needsReply:false};
  const security={...demoEmails[3],id:'security',sender:'GitHub',address:'noreply@github.com',subject:'Security alert: new sign-in',priority:'high' as const,needsReply:false};
  const replyNeeded={...demoEmails[3],id:'reply',priority:'normal' as const,needsReply:true};
  assert.deepEqual(sortInboxEmails([routine,security,replyNeeded]).map(email=>email.id),['reply','security','routine']);
 });
-test('related important company notifications fold without pulling routine mail into the group',()=>{
+void test('related important company notifications fold without pulling routine mail into the group',()=>{
  const verification={...demoEmails[3],id:'verify',sender:'GitHub',address:'noreply@github.com',subject:'Your GitHub verification code',summary:'Use this code to sign in.',priority:'high' as const,needsReply:false};
  const setup={...demoEmails[3],id:'setup',sender:'GitHub Security',address:'security@github.com',subject:'Complete your two-factor setup',summary:'Finish account security setup.',priority:'high' as const,needsReply:true};
  const routine={...demoEmails[3],id:'routine',sender:'GitHub',address:'news@github.com',subject:'This month on GitHub',summary:'A product roundup.',priority:'normal' as const,needsReply:false};
@@ -82,14 +87,14 @@ test('related important company notifications fold without pulling routine mail 
  assert.equal(rows[1].kind,'email');
  if(rows[1].kind==='email')assert.equal(rows[1].email.id,'routine');
 });
-test('the demo inbox keeps useful work and noise classifications without AI',()=>{
+void test('the demo inbox keeps useful work and noise classifications without AI',()=>{
  assert.ok(demoEmails.some(email=>email.category==='work'&&email.priority==='high'&&email.needsReply));
  assert.ok(demoEmails.some(email=>email.category==='noise'&&email.label==='Newsletter'));
  assert.ok(demoEmails.some(email=>email.category==='personal'&&email.needsReply));
 });
-test('Gemini prepay depletion is reported as a billing-project problem',async()=>{
+void test('Gemini prepay depletion is reported as a billing-project problem',async()=>{
  const original=globalThis.fetch;let endpoint='';
- globalThis.fetch=async input=>{endpoint=String(input);return Response.json({error:{code:429,status:'RESOURCE_EXHAUSTED',message:'Your prepayment credits are depleted. Please go to AI Studio to manage your project and billing.'}},{status:429});};
+ globalThis.fetch=async input=>{endpoint=requestUrl(input);return Response.json({error:{code:429,status:'RESOURCE_EXHAUSTED',message:'Your prepayment credits are depleted. Please go to AI Studio to manage your project and billing.'}},{status:429});};
  try{
   await assert.rejects(
    generate('Return a status.',{message:'test'},{type:'object',properties:{status:{type:'string'}},required:['status']},{...testEnv,GEMINI_API_KEY:'test-key'}),
@@ -103,7 +108,7 @@ test('Gemini prepay depletion is reported as a billing-project problem',async()=
   assert.match(endpoint,/\/models\/gemini-3\.5-flash-lite:generateContent$/);
  }finally{globalThis.fetch=original;}
 });
-test('Gemini JSON is rejected when it does not match the requested schema',async()=>{
+void test('Gemini JSON is rejected when it does not match the requested schema',async()=>{
  const original=globalThis.fetch;
  globalThis.fetch=async()=>Response.json({candidates:[{content:{parts:[{text:'{"options":["only one"]}'}]},finishReason:'STOP'}]});
  try{
@@ -113,7 +118,7 @@ test('Gemini JSON is rejected when it does not match the requested schema',async
   );
  }finally{globalThis.fetch=original;}
 });
-test('a Gemini outage does not prevent Gmail messages from loading',async()=>{
+void test('a Gemini outage does not prevent Gmail messages from loading',async()=>{
  const original=globalThis.fetch;
  globalThis.fetch=async()=>Response.json({error:{message:'Your prepayment credits are depleted.'}},{status:429});
  const originalError=console.error;console.error=()=>{};
@@ -123,18 +128,18 @@ test('a Gemini outage does not prevent Gmail messages from loading',async()=>{
   assert.equal(result.ai,false);assert.deepEqual(result.emails,messages);
  }finally{globalThis.fetch=original;console.error=originalError;}
 });
-test('send endpoint rejects unauthenticated callers before contacting any provider',async()=>{
+void test('send endpoint rejects unauthenticated callers before contacting any provider',async()=>{
  const original=globalThis.fetch;let called=false;
  globalThis.fetch=async()=>{called=true;throw new Error('Must not contact a provider');};
  try{const response=await reply(new Request('https://brief.example/api/reply',{method:'POST',headers:{origin:'https://brief.example','Content-Type':'application/json'},body:JSON.stringify({id:'abc',action:'send',body:'Hello'})}));assert.equal(response.status,401);assert.equal(called,false);}finally{globalThis.fetch=original;}
 });
 function sampleRequest(body:unknown){return new Request('https://brief.example/api/suggest',{method:'POST',headers:{origin:'https://brief.example','Content-Type':'application/json'},body:JSON.stringify(body)});}
-test('sample replies reject unauthenticated callers before contacting any provider',async()=>{
+void test('sample replies reject unauthenticated callers before contacting any provider',async()=>{
  const original=globalThis.fetch;let called=false;
  globalThis.fetch=async()=>{called=true;throw new Error('Must not contact a provider');};
  try{const response=await suggest(sampleRequest({id:'1',tone:'Concise'}));assert.equal(response.status,401);assert.equal(called,false);}finally{globalThis.fetch=original;}
 });
-test('a concurrent demo digest request uses deterministic fallback instead of duplicating Gemini work',async()=>{
+void test('a concurrent demo digest request uses deterministic fallback instead of duplicating Gemini work',async()=>{
  globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  const fakeDb={prepare(){return {bind(){return this;},async first(){return {data:'{"pending":true}',updated:Date.now()};}};}};
  globalThis.__briefTestEnv={...testEnv,DB:fakeDb as unknown as D1Database,GEMINI_API_KEY:'test-key'};
@@ -146,7 +151,7 @@ test('a concurrent demo digest request uses deterministic fallback instead of du
   assert.ok(body.emails.some(email=>email.category==='noise'));
  }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
 });
-test('the demo digest stays available when Gemini is out of credit',async()=>{
+void test('the demo digest stays available when Gemini is out of credit',async()=>{
  globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  const fakeDb={prepare(){return {bind(){return this;},async first(){return null;},async run(){return {meta:{changes:1}};}};}};
  globalThis.__briefTestEnv={...testEnv,DB:fakeDb as unknown as D1Database,GEMINI_API_KEY:'test-key'};
@@ -159,7 +164,7 @@ test('the demo digest stays available when Gemini is out of credit',async()=>{
   assert.ok(body.emails.some(email=>email.category==='work'&&email.needsReply));
  }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
 });
-test('sample replies generate only from the demo inbox, never from caller-supplied text',async()=>{
+void test('sample replies generate only from the demo inbox, never from caller-supplied text',async()=>{
  globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  globalThis.__briefTestEnv={...testEnv,GEMINI_API_KEY:'test-key'};
  const original=globalThis.fetch;let called=false;
@@ -169,11 +174,11 @@ test('sample replies generate only from the demo inbox, never from caller-suppli
   assert.equal(called,false);
  }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
 });
-test('sample reply options send the chosen tone and regeneration attempt to the model',async()=>{
+void test('sample reply options send the chosen tone and regeneration attempt to the model',async()=>{
  globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  globalThis.__briefTestEnv={...testEnv,GEMINI_API_KEY:'test-key',GEMINI_MODEL:'test-model'};
  const original=globalThis.fetch;let url='';let sent:{systemInstruction:{parts:{text:string}[]};contents:{role:string;parts:{text:string}[]}[]}|null=null;
- globalThis.fetch=async(input,init)=>{url=String(input);sent=JSON.parse(typeof init?.body==='string'?init.body:'{}') as typeof sent;return Response.json({candidates:[{content:{parts:[{text:'{"options":["Hi Sarah, approving before 2 PM.","Hi Sarah, I will sign off shortly.","Hi Sarah, you have my approval."]}'}]},finishReason:'STOP'}]});};
+ globalThis.fetch=async(input,init)=>{url=requestUrl(input);sent=JSON.parse(typeof init?.body==='string'?init.body:'{}') as typeof sent;return Response.json({candidates:[{content:{parts:[{text:'{"options":["Hi Sarah, approving before 2 PM.","Hi Sarah, I will sign off shortly.","Hi Sarah, you have my approval."]}'}]},finishReason:'STOP'}]});};
  try{
   const response=await suggest(sampleRequest({id:'1',tone:'Professional',variation:2}));
   assert.equal(response.status,200);
@@ -190,7 +195,7 @@ test('sample reply options send the chosen tone and regeneration attempt to the 
   assert.equal(modelInput.attempt,2);
  }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
 });
-test('polishing a reply sends the user’s notes and rejects empty ones before contacting any provider',async()=>{
+void test('polishing a reply sends the user’s notes and rejects empty ones before contacting any provider',async()=>{
  globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  globalThis.__briefTestEnv={...testEnv,GEMINI_API_KEY:'test-key'};
  const original=globalThis.fetch;let called=false;let sent:{contents:{role:string;parts:{text:string}[]}[]}|null=null;
@@ -206,17 +211,17 @@ test('polishing a reply sends the user’s notes and rejects empty ones before c
   assert.match(modelInput.notes,/two more days/);
  }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
 });
-test('a known successful send returns its receipt without sending a duplicate',async()=>{
+void test('a known successful send returns its receipt without sending a duplicate',async()=>{
  globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  const encrypted=await encrypt('refresh','user-a',testEnv);
- const fakeDb={prepare(sql:string){return {bind(){return this;},async first(){if(sql.includes('FROM connections'))return {user_id:'user-a',email:'a@example.com',token:encrypted};if(sql.includes('FROM operations'))return {status:'complete',result:'{"id":"sent-1","status":"sent"}'};return null;}};}};
+ const fakeDb={prepare(sql:string){return {bind(){return this;},async first(){if(sql.includes('FROM connections'))return {id:'acct-1',user_id:'user-a',provider_identity:null,email:'a@example.com',token:encrypted,token_version:1,last_sync:null,sync_lock:0,error:null,created:0};if(sql.includes('FROM operations'))return {status:'complete',result:'{"id":"sent-1","status":"sent"}'};return null;}};}};
  globalThis.__briefTestEnv={...testEnv,DB:fakeDb as unknown as D1Database,GOOGLE_CLIENT_ID:'client',GOOGLE_CLIENT_SECRET:'secret'};
  const original=globalThis.fetch;let sends=0;
- globalThis.fetch=async(input)=>{const url=String(input);if(url.includes('oauth2.googleapis.com'))return Response.json({access_token:'access'});if(url.includes('messages/send')){sends++;return Response.json({id:'unexpected'});}return Response.json({id:'abc',threadId:'thread',snippet:'Can you review?',internalDate:'1788960000000',labelIds:['INBOX'],payload:{mimeType:'text/plain',headers:[{name:'From',value:'Sender <sender@example.com>'},{name:'Subject',value:'Review'}],body:{data:encode('Can you review?')}}});};
- try{const response=await reply(new Request('https://brief.example/api/reply',{method:'POST',headers:{origin:'https://brief.example','Content-Type':'application/json'},body:JSON.stringify({id:'abc',action:'send',body:'Thanks, received.'})}));assert.equal(response.status,200);assert.deepEqual(await response.json(),{id:'sent-1',status:'sent'});assert.equal(sends,0);}finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
+ globalThis.fetch=async(input)=>{const url=requestUrl(input);if(url.includes('oauth2.googleapis.com'))return Response.json({access_token:'access'});if(url.includes('messages/send')){sends++;return Response.json({id:'unexpected'});}return Response.json({id:'abc',threadId:'thread',snippet:'Can you review?',internalDate:'1788960000000',labelIds:['INBOX'],payload:{mimeType:'text/plain',headers:[{name:'From',value:'Sender <sender@example.com>'},{name:'Subject',value:'Review'}],body:{data:encode('Can you review?')}}});};
+ try{const response=await reply(new Request('https://brief.example/api/reply',{method:'POST',headers:{origin:'https://brief.example','Content-Type':'application/json'},body:JSON.stringify({id:'abc',accountId:'acct-1',action:'send',body:'Thanks, received.'})}));assert.equal(response.status,200);assert.deepEqual(await response.json(),{id:'sent-1',status:'sent'});assert.equal(sends,0);}finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
 });
 
-test('an expired dashboard session returns a usable sign-in destination',async()=>{
+void test('an expired dashboard session returns a usable sign-in destination',async()=>{
  const {GET:connectionStatus}=await import('../app/api/connection/route');
  const {api}=await import('../hooks/use-inbox');
  globalThis.__briefTestHeaders=new Headers();
@@ -234,7 +239,7 @@ test('an expired dashboard session returns a usable sign-in destination',async()
  }finally{globalThis.fetch=original;}
 });
 
-test('missing Gmail credentials are reported before starting Google OAuth',async()=>{
+void test('missing Gmail credentials are reported before starting Google OAuth',async()=>{
  const {GET:startGoogle}=await import('../app/api/auth/google/route');
  globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  const original=globalThis.fetch;let called=false;
@@ -247,7 +252,7 @@ test('missing Gmail credentials are reported before starting Google OAuth',async
  }finally{globalThis.fetch=original;globalThis.__briefTestHeaders=new Headers();}
 });
 
-test('a Gmail token failure does not masquerade as a dashboard sign-in failure',async()=>{
+void test('a Gmail token failure does not masquerade as a dashboard sign-in failure',async()=>{
  const {failure,HttpError}=await import('../server/runtime');
  const response=failure(new HttpError(401,'Reconnect Gmail.'));
  const body=await response.json() as {signInUrl?:string};
@@ -255,7 +260,7 @@ test('a Gmail token failure does not masquerade as a dashboard sign-in failure',
  assert.equal(body.signInUrl,undefined);
 });
 
-test('configured Gmail starts OAuth with PKCE and the exact callback origin',async()=>{
+void test('configured Gmail starts OAuth with PKCE and the exact callback origin',async()=>{
  const {GET:startGoogle}=await import('../app/api/auth/google/route');
  globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  let bound:unknown[]=[];
@@ -277,7 +282,7 @@ test('configured Gmail starts OAuth with PKCE and the exact callback origin',asy
 
 // Exercises the callback against the real migrations so schema drift fails here
 // instead of silently redirecting the user back with a connection error.
-test('completing Google OAuth stores the connection in the migrated schema',async()=>{
+void test('completing Google OAuth stores the connection in the migrated schema',async()=>{
  const {DatabaseSync}=await import('node:sqlite');
  const fs=await import('node:fs/promises');
  const sqlite=new DatabaseSync(':memory:');
@@ -309,15 +314,22 @@ test('completing Google OAuth stores the connection in the migrated schema',asyn
   const {GET:callback}=await import('../app/api/auth/google/callback/route');
   const response=await callback(new Request('https://brief.example/api/auth/google/callback?state=state-1&code=code-1'));
   assert.equal(new URL(response.headers.get('location')!).search,'?connected=1');
-  const stored=db.prepare('SELECT email, token FROM connections WHERE user_id = ?').bind('user-a').first() as {email:string;token:string};
+  const stored=db.prepare('SELECT id, email, token, token_version FROM connections WHERE user_id = ?').bind('user-a').first() as {id:string;email:string;token:string;token_version:number};
   assert.equal(stored.email,'person@example.com');
-  assert.equal(await decrypt(stored.token,'user-a',testEnv),'refresh');
+  // New credentials are written in the account-bound format and decrypt only with both
+  // identifiers, so a token cannot be reused against a different mailbox.
+  assert.equal(stored.token_version,2);
+  assert.equal(await decrypt(stored.token,'user-a',testEnv,stored.id),'refresh');
+  await assert.rejects(decrypt(stored.token,'user-a',testEnv,'other-account'));
+  // The first mailbox a user connects becomes their default.
+  const preference=db.prepare('SELECT default_account_id FROM account_preferences WHERE user_id = ?').bind('user-a').first() as {default_account_id:string};
+  assert.equal(preference.default_account_id,stored.id);
  }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
 });
 
 const demoById=(id:string)=>{const found=demoEmails.find(m=>m.id===id);assert.ok(found,`demo email ${id} is missing`);return found;};
 
-test('submenus start collapsed and each section toggles independently',()=>{
+void test('submenus start collapsed and each section toggles independently',()=>{
  assert.deepEqual(toggleExpanded([],'work'),['work']);
  // Expanding one section must not expand or collapse another.
  assert.deepEqual(toggleExpanded(['work'],'personal'),['work','personal']);
@@ -325,7 +337,7 @@ test('submenus start collapsed and each section toggles independently',()=>{
  assert.deepEqual(toggleExpanded(['personal'],'personal'),[]);
 });
 
-test('parent views keep section mail that matches no subcategory',()=>{
+void test('parent views keep section mail that matches no subcategory',()=>{
  const untagged=demoById('18');
  assert.equal(untagged.category,'work');
  assert.deepEqual(emailTags(untagged),[]);
@@ -333,7 +345,7 @@ test('parent views keep section mail that matches no subcategory',()=>{
  assert.ok(!selectEmails(demoEmails,'work:deadlines').includes(untagged));
 });
 
-test('Inbox is the complete incoming view and Noise carries junk directly',()=>{
+void test('Inbox is the complete incoming view and Noise carries junk directly',()=>{
  assert.equal(selectEmails(demoEmails,'inbox').length,demoEmails.length);
  const noise=selectEmails(demoEmails,'noise');
  assert.ok(noise.length>0);
@@ -341,14 +353,14 @@ test('Inbox is the complete incoming view and Noise carries junk directly',()=>{
  assert.equal(SECTIONS.find(s=>s.id==='noise')?.tags.length,0,'Noise has no submenu');
 });
 
-test('email selection ignores nullish snapshot entries in every view',()=>{
+void test('email selection ignores nullish snapshot entries in every view',()=>{
  const malformed=[demoEmails[0],undefined,null,demoEmails[1]];
  assert.deepEqual(selectEmails(malformed,'inbox').map(email=>email.id),[demoEmails[0].id,demoEmails[1].id]);
  assert.doesNotThrow(()=>selectEmails(malformed,'work'));
  assert.doesNotThrow(()=>selectEmails(malformed,'work:deadlines'));
 });
 
-test('parent counts are unique while subcategory counts may overlap',()=>{
+void test('parent counts are unique while subcategory counts may overlap',()=>{
  const overlapping=demoById('50');
  // Copy before sorting: emailTags returns the message's own tag array.
  assert.deepEqual([...emailTags(overlapping)].sort(),['deadlines','meetings','research']);
@@ -360,7 +372,7 @@ test('parent counts are unique while subcategory counts may overlap',()=>{
  assert.equal(selectEmails(demoEmails,'work').filter(m=>m.id==='50').length,1);
 });
 
-test('subcategory views filter to their tag',()=>{
+void test('subcategory views filter to their tag',()=>{
  const deadlines=selectEmails(demoEmails,'work:deadlines');
  assert.ok(deadlines.length>0);
  assert.ok(deadlines.every(m=>m.category==='work'&&emailTags(m).includes('deadlines')));
@@ -368,7 +380,7 @@ test('subcategory views filter to their tag',()=>{
  assert.ok(research.some(m=>m.id==='50'),'a research message with other tags still appears under Research');
 });
 
-test('a research newsletter with an unsubscribe link is not junk',()=>{
+void test('a research newsletter with an unsubscribe link is not junk',()=>{
  const digest=demoById('51');
  assert.ok(digest.unsubscribe,'this fixture must carry an unsubscribe link');
  assert.equal(digest.category,'work');
@@ -376,7 +388,7 @@ test('a research newsletter with an unsubscribe link is not junk',()=>{
  assert.equal(classifyEmail(digest).category,'work','newsletter format alone must not prove junk');
 });
 
-test('urgent personal mail stays personal and reaches Overview',()=>{
+void test('urgent personal mail stays personal and reaches Overview',()=>{
  const urgent=demoById('54');
  assert.equal(urgent.category,'personal');
  assert.equal(classifyEmail(urgent).category,'personal');
@@ -384,7 +396,7 @@ test('urgent personal mail stays personal and reaches Overview',()=>{
  assert.ok(!emailTags(urgent).includes('low-priority'));
 });
 
-test('bulk promotions are junk but a single promotional word is not',()=>{
+void test('bulk promotions are junk but a single promotional word is not',()=>{
  const promo=demoEmails.find(m=>m.id==='39');
  assert.ok(promo);
  assert.equal(classifyEmail(promo).category,'noise');
@@ -392,14 +404,14 @@ test('bulk promotions are junk but a single promotional word is not',()=>{
  assert.notEqual(classifyEmail(mild).category,'noise','one promotional word must not force junk');
 });
 
-test('view ids resolve to a section and optional tag',()=>{
+void test('view ids resolve to a section and optional tag',()=>{
  assert.deepEqual(parseView('work'),{section:'work',tag:undefined});
  assert.deepEqual(parseView('personal:low-priority'),{section:'personal',tag:'low-priority'});
  assert.deepEqual(parseView('overview'),{});
  assert.deepEqual(parseView('inbox'),{});
 });
 
-test('email rows show at most two compact category labels',()=>{
+void test('email rows show at most two compact category labels',()=>{
  for(const email of demoEmails)assert.ok(rowLabels(email).length<=2,`${email.id} produced more than two row labels`);
  assert.deepEqual(rowLabels(demoById('50')),['Research','Meetings']);
  assert.ok(!rowLabels(demoById('39')).includes('Junk'),'junk is shown by the Noise view, not as a row chip');
@@ -423,7 +435,7 @@ const classification=(over:Partial<Classification>={}):Classification=>({
  processingStatus:'classified',reason:'r',version:'test',...over,
 });
 
-test('HTML-only mail is read as text rather than from the snippet',()=>{
+void test('HTML-only mail is read as text rather than from the snippet',()=>{
  const html=encode('<html><body><p>Please approve the <a href="https://x.example/doc">launch doc</a>.</p><script>alert(1)</script></body></html>');
  const result=normalizeMessage({id:'h1',threadId:'t',snippet:'Please approve',internalDate:'1789000000000',labelIds:['INBOX'],
   payload:{mimeType:'text/html',headers:[{name:'From',value:'A <a@b.example>'},{name:'Subject',value:'Doc'}],body:{data:html}}});
@@ -433,7 +445,7 @@ test('HTML-only mail is read as text rather than from the snippet',()=>{
  assert.equal(result.receivedAt,1789000000000,'the original timestamp must be preserved');
 });
 
-test('quoted history is separated from the current message',()=>{
+void test('quoted history is separated from the current message',()=>{
  const body=encode('Thanks, that works.\n\nOn Mon, Sarah wrote:\n> Could you approve this by Friday?');
  const result=normalizeMessage({id:'q1',threadId:'t',snippet:'',internalDate:'1789000000000',labelIds:[],
   payload:{mimeType:'text/plain',headers:[{name:'From',value:'S <s@x.example>'}],body:{data:body}}});
@@ -441,7 +453,7 @@ test('quoted history is separated from the current message',()=>{
  assert.match(result.quoted,/approve this by Friday/);
 });
 
-test('incomplete content is flagged rather than silently dropped',()=>{
+void test('incomplete content is flagged rather than silently dropped',()=>{
  const long=encode('x'.repeat(25000));
  const result=normalizeMessage({id:'l1',threadId:'t',snippet:'',internalDate:'1789000000000',labelIds:[],
   payload:{mimeType:'multipart/mixed',headers:[{name:'From',value:'S <s@x.example>'}],parts:[
@@ -453,7 +465,20 @@ test('incomplete content is flagged rather than silently dropped',()=>{
  assert.ok(result.incompleteReasons.includes('attachments-not-read'),'attachments are never claimed to be understood');
 });
 
-test('excessively nested MIME content is bounded and marked incomplete',()=>{
+void test('Gmail bodies stored behind attachment ids are fetched before normalization',async()=>{
+ const message:GmailMessage={id:'large',threadId:'t',snippet:'Fallback',internalDate:'1789000000000',labelIds:['INBOX'],
+  payload:{mimeType:'multipart/alternative',headers:[{name:'From',value:'S <s@x.example>'}],parts:[
+   {mimeType:'text/plain',body:{size:32,attachmentId:'body-1'}},
+  ]}};
+ const requested:string[]=[];
+ await hydrateDeferredBodies(message,async id=>{requested.push(id);return {data:encode('The complete large message body.'),size:32};});
+ const result=normalizeMessage(message);
+ assert.deepEqual(requested,['body-1']);
+ assert.equal(result.text,'The complete large message body.');
+ assert.ok(!result.incompleteReasons.includes('body-stored-separately-by-gmail'));
+});
+
+void test('excessively nested MIME content is bounded and marked incomplete',()=>{
  let payload:{mimeType:string;body?:{data:string};parts?:typeof payload[]}={mimeType:'text/plain',body:{data:encode('deep body')}};
  for(let depth=0;depth<25;depth++)payload={mimeType:'multipart/mixed',parts:[payload]};
  const result=normalizeMessage({id:'deep',threadId:'t',snippet:'Safe fallback',internalDate:'1789000000000',labelIds:[],
@@ -463,7 +488,7 @@ test('excessively nested MIME content is bounded and marked incomplete',()=>{
  assert.ok(result.incompleteReasons.includes('mime-depth-limit'));
 });
 
-test('sender identity falls back safely when From is missing',()=>{
+void test('sender identity falls back safely when From is missing',()=>{
  const withSender=normalizeMessage({id:'sender',threadId:'t',snippet:'',internalDate:'1789000000000',labelIds:[],
   payload:{mimeType:'text/plain',headers:[{name:'Sender',value:'Service <service@example.com>'}],body:{data:encode('Hello')}}});
  assert.equal(withSender.from.address,'service@example.com');
@@ -474,7 +499,7 @@ test('sender identity falls back safely when From is missing',()=>{
  assert.notEqual(unattributed.from.address,'');
 });
 
-test('malformed Gmail structures are contained and marked incomplete',()=>{
+void test('malformed Gmail structures are contained and marked incomplete',()=>{
  const malformed=[
   {id:'parts',threadId:'t',snippet:'Fallback',internalDate:'1789000000000',labelIds:[],
    payload:{mimeType:'multipart/mixed',headers:[],parts:[null]}},
@@ -490,7 +515,7 @@ test('malformed Gmail structures are contained and marked incomplete',()=>{
  }
 });
 
-test('relative dates resolve against the message timestamp, not the refresh time',()=>{
+void test('relative dates resolve against the message timestamp, not the refresh time',()=>{
  const monday=Date.UTC(2026,8,14,15,0,0);
  assert.equal(resolveDate('Friday',monday).date,'2026-09-18');
  assert.equal(resolveDate('tomorrow',monday).date,'2026-09-15');
@@ -498,7 +523,7 @@ test('relative dates resolve against the message timestamp, not the refresh time
  assert.equal(resolveDate('Friday',Date.UTC(2026,8,17,9,0,0)).date,'2026-09-18');
 });
 
-test('vague phrases never become dates and date-only deadlines gain no time',()=>{
+void test('vague phrases never become dates and date-only deadlines gain no time',()=>{
  const vague=resolveDate('soon',Date.UTC(2026,8,14));
  assert.equal(vague.date,undefined);
  assert.equal(vague.ambiguous,true);
@@ -512,14 +537,14 @@ test('vague phrases never become dates and date-only deadlines gain no time',()=
  assert.equal(timed.reason,'timezone-unknown','a clock time without a zone is not silently resolved');
 });
 
-test('evidence must be quoted from the source message',()=>{
+void test('evidence must be quoted from the source message',()=>{
  const source=normalized({subject:'Launch',text:'Could you approve the   launch doc by Friday?'});
  assert.equal(evidenceSupported('approve the launch doc',source),true,'whitespace differences are tolerated');
  assert.equal(evidenceSupported('approve the budget instead',source),false);
  assert.equal(evidenceSupported('a',source),false,'trivially short quotes are rejected');
 });
 
-test('a batch keeps valid results and retries only missing or invalid ones',()=>{
+void test('a batch keeps valid results and retries only missing or invalid ones',()=>{
  const batch=[normalized({id:'a',text:'Please approve the plan.'}),normalized({id:'b',text:'Please approve the plan.'}),normalized({id:'c',text:'Please approve the plan.'})];
  const good=(id:string)=>({id,context:'work',topics:[],disposition:'useful',replyRequired:false,securityEvent:false,reason:'ok',
   obligations:[{kind:'request',description:'approve',owner:'recipient',ownerIsUser:'yes',required:true,evidence:'Please approve the plan.',state:'open'}]});
@@ -534,7 +559,7 @@ test('a batch keeps valid results and retries only missing or invalid ones',()=>
  assert.ok(!outcome.results.has('zzz'),'unexpected ids are rejected');
 });
 
-test('duplicate results for one id are rejected',()=>{
+void test('duplicate results for one id are rejected',()=>{
  const batch=[normalized({id:'a',text:'Please approve the plan.'})];
  const item={id:'a',context:'work',topics:[],disposition:'useful',replyRequired:false,securityEvent:false,reason:'ok',obligations:[]};
  const outcome=collectBatch({items:[item,item]},batch);
@@ -542,7 +567,7 @@ test('duplicate results for one id are rejected',()=>{
  assert.equal(outcome.failures.get('a'),'duplicate-result');
 });
 
-test('unsupported evidence is rejected instead of stored as fact',()=>{
+void test('unsupported evidence is rejected instead of stored as fact',()=>{
  const source=normalized({text:'The workshop notes are attached.'});
  const result=validateItem({id:'m1',context:'work',topics:[],disposition:'useful',replyRequired:false,securityEvent:false,reason:'x',
   obligations:[{kind:'request',description:'approve',owner:'recipient',ownerIsUser:'yes',required:true,evidence:'Please approve the budget by Friday',state:'open'}]},source);
@@ -550,7 +575,7 @@ test('unsupported evidence is rejected instead of stored as fact',()=>{
  if(!result.ok)assert.equal(result.reason,'unsupported-evidence');
 });
 
-test('priority comes from evidence, not from the word urgent',()=>{
+void test('priority comes from evidence, not from the word urgent',()=>{
  const now=Date.UTC(2026,8,14);
  const shouty=classification({obligations:[obligation({kind:'action',evidence:'URGENT!!! do this'})]});
  assert.equal(derivePriority(shouty,now),'normal','claiming urgency must not raise priority');
@@ -565,21 +590,21 @@ test('priority comes from evidence, not from the word urgent',()=>{
  assert.equal(isOverviewMessage(old,now),true,'an unresolved overdue item remains visible');
 });
 
-test('a corrupt stored classification without obligations degrades safely',()=>{
+void test('a corrupt stored classification without obligations degrades safely',()=>{
  const corrupt={...classification(),obligations:undefined} as unknown as Classification;
  assert.deepEqual(effectiveCategories(corrupt),{category:'work',tags:[]});
  assert.equal(derivePriority(corrupt,Date.UTC(2026,8,14)),'normal');
  assert.equal(needsReview(corrupt),undefined);
 });
 
-test('cancelled meetings stay as history but leave upcoming events',()=>{
+void test('cancelled meetings stay as history but leave upcoming events',()=>{
  const cancelled=classification({obligations:[obligation({kind:'meeting',meetingState:'cancelled',state:'cancelled'})]});
  assert.ok(effectiveCategories(cancelled).tags.includes('meetings'),'still filed under Meetings');
  assert.equal(upcomingMeetings(cancelled).length,0,'but not an upcoming event');
  assert.equal(isOverviewMessage(cancelled,Date.UTC(2026,8,14)),false);
 });
 
-test('somebody else’s task does not become the user’s tag',()=>{
+void test('somebody else’s task does not become the user’s tag',()=>{
  const theirs=classification({obligations:[obligation({kind:'action',ownerIsUser:false})]});
  assert.ok(!effectiveCategories(theirs).tags.includes('actions'));
  const ambiguous=classification({obligations:[obligation({kind:'action',ownerIsUser:null})]});
@@ -587,7 +612,7 @@ test('somebody else’s task does not become the user’s tag',()=>{
  assert.equal(needsReview(ambiguous),'unclear-task-owner');
 });
 
-test('personal mail with an open obligation is not marked low priority',()=>{
+void test('personal mail with an open obligation is not marked low priority',()=>{
  const urgentPersonal=classification({context:'personal',obligations:[obligation({kind:'meeting',meetingState:'confirmed'})]});
  const mapped=effectiveCategories(urgentPersonal);
  assert.equal(mapped.category,'personal');
@@ -596,19 +621,19 @@ test('personal mail with an open obligation is not marked low priority',()=>{
  assert.deepEqual(quiet.tags,['low-priority']);
 });
 
-test('research is a topic and never implies an action',()=>{
+void test('research is a topic and never implies an action',()=>{
  const paper=classification({topics:['research']});
  const mapped=effectiveCategories(paper);
  assert.deepEqual(mapped.tags,['research']);
  assert.ok(!mapped.tags.includes('actions'));
 });
 
-test('a junk prediction carrying a real obligation is sent for review',()=>{
+void test('a junk prediction carrying a real obligation is sent for review',()=>{
  const conflicted=classification({disposition:'junk',obligations:[obligation({kind:'request'})]});
  assert.equal(needsReview(conflicted),'junk-with-open-obligation');
 });
 
-test('manual corrections outrank the classifier and survive reclassification',()=>{
+void test('manual corrections outrank the classifier and survive reclassification',()=>{
  const junk=classification({disposition:'junk'});
  const corrected=applyOverride(junk,{messageId:'m1',addTags:[],removeTags:[],notJunk:true,source:'message',createdAt:0});
  assert.notEqual(effectiveCategories(corrected).category,'noise','marking not junk moves it out of Noise');
@@ -624,13 +649,13 @@ test('manual corrections outrank the classifier and survive reclassification',()
  assert.ok(!effectiveCategories(removedJunk).tags.includes('junk'));
 });
 
-test('a fingerprint changes only when classification-relevant content changes',()=>{
+void test('a fingerprint changes only when classification-relevant content changes',()=>{
  const base=normalized({subject:'Launch',text:'Approve please'});
  assert.equal(contentFingerprint(base),contentFingerprint(normalized({subject:'Launch',text:'Approve please'})));
  assert.notEqual(contentFingerprint(base),contentFingerprint(normalized({subject:'Launch',text:'Approve please now'})));
 });
 
-test('quoted requests do not create new obligations',()=>{
+void test('quoted requests do not create new obligations',()=>{
  const reply=deterministicClassify({id:'r1',subject:'Re: checklist',text:'Thanks, that all looks good.',
   quoted:'> Could you review the checklist and approve it by Friday?',
   from:{name:'S',address:'sarah@studio.example'},to:[{address:'alex@studio.example'}],cc:[],
@@ -638,7 +663,7 @@ test('quoted requests do not create new obligations',()=>{
  assert.equal(reply.obligations.length,0,'an obligation quoted from history is not a new task');
 });
 
-test('deterministic classification tolerates missing recipient arrays',()=>{
+void test('deterministic classification tolerates missing recipient arrays',()=>{
  const input={id:'missing-recipients',subject:'Hello',text:'No action needed.',quoted:'',
   from:{name:'S',address:'sender@example.com'},receivedAt:Date.UTC(2026,8,14),
   labels:['INBOX'],attachments:[],contentComplete:true} as unknown as Parameters<typeof deterministicClassify>[0];
@@ -683,7 +708,7 @@ function score(fixtures:typeof FIXTURES,mode:'baseline'|'new'):Scored{
 
 const percent=(n:number,d:number)=>d===0?'n/a':`${((n/d)*100).toFixed(0)}%`;
 
-test('evaluation: the new classifier is measured against the previous one',()=>{
+void test('evaluation: the new classifier is measured against the previous one',()=>{
  const report:string[]=[];
  for(const [name,set] of [['dev',DEV_FIXTURES],['held-out',HELDOUT_FIXTURES],['all',FIXTURES]] as const){
   const before=score(set,'baseline');
@@ -709,7 +734,7 @@ test('evaluation: the new classifier is measured against the previous one',()=>{
  assert.ok(all.section>=baseline.section,'section accuracy must not regress against the baseline');
 });
 
-test('evaluation fixtures keep threads and near-duplicates in one split',()=>{
+void test('evaluation fixtures keep threads and near-duplicates in one split',()=>{
  const splits=new Map<string,string>();
  for(const fixture of FIXTURES){
   const family=fixture.id.replace(/-(same-sender|reschedule|cancelled|marketing|newsletter)$/,'');
@@ -720,15 +745,40 @@ test('evaluation fixtures keep threads and near-duplicates in one split',()=>{
  assert.ok(DEV_FIXTURES.length>0&&HELDOUT_FIXTURES.length>0);
 });
 
-test('disconnecting removes manual corrections along with mail data',async()=>{
+void test('disconnecting removes manual corrections along with mail data',async()=>{
  const tables:string[]=[];
- const fakeDb={prepare(sql:string){tables.push(sql);return {bind(){return this;},async first(){return null;},async run(){return {};},async all(){return {results:[]};}};},
+ const token=await encrypt('refresh','user-a',testEnv);
+ // Disconnect now names one owned mailbox, so the fake connection must look real.
+ const connection={id:'acct-1',user_id:'user-a',provider_identity:null,email:'a@example.com',token,token_version:1,last_sync:null,sync_lock:0,error:null,created:0};
+ const fakeDb={prepare(sql:string){tables.push(sql);return {bind(){return this;},async first(){return sql.includes('FROM connections')?connection:null;},async run(){return {};},async all(){return {results:[]};}};},
   async batch(statements:unknown[]){return statements;}};
  globalThis.__briefTestEnv={...testEnv,DB:fakeDb as unknown as D1Database};
  globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
+ globalThis.fetch=async()=>Response.json({});
  try{
   const {POST:disconnect}=await import('../app/api/disconnect/route');
-  await disconnect(new Request('https://brief.example/api/disconnect',{method:'POST',headers:{origin:'https://brief.example'}}));
+  await disconnect(new Request('https://brief.example/api/disconnect',{method:'POST',headers:{origin:'https://brief.example','Content-Type':'application/json'},body:JSON.stringify({accountId:'acct-1'})}));
   assert.ok(tables.some(sql=>sql.includes('DELETE FROM overrides')),'overrides must be cleared with the rest of the account data');
+  assert.ok(tables.some(sql=>sql.includes('DELETE FROM connections WHERE id = ? AND user_id = ?')),'only the named account is removed');
  }finally{globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
+});
+
+// ── Multi-account: composite identity and account-scoped keys ───────────────
+
+void test('the same message id in two mailboxes has distinct keys',()=>{
+ const a={id:'m1',accountId:'acct-1',address:'sender@x.example'} as unknown as Email;
+ const b={id:'m1',accountId:'acct-2',address:'sender@x.example'} as unknown as Email;
+ assert.notEqual(emailKey(a),emailKey(b),'React keys must not collide across mailboxes');
+ assert.notEqual(senderKey(a),senderKey(b),'unsubscribing in one mailbox is not the other');
+});
+
+void test('Gmail links name the mailbox instead of assuming the first account',()=>{
+ const link=gmailThreadUrl('second@example.com','thread-1');
+ assert.ok(link.includes('authuser=second%40example.com'));
+ assert.ok(!link.includes('/u/0/'),'a hardcoded account index opens the wrong mailbox');
+});
+
+void test('the combined view is never accepted as a sending account',async()=>{
+ const {ALL_INBOXES}=await import('../server/gmail');
+ assert.equal(ALL_INBOXES,'all');
 });

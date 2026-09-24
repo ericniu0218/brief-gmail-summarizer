@@ -13,6 +13,20 @@ export type Email = {
   contentComplete?: boolean;
   incompleteReasons?: string[];
   classification?: Classification;
+  /** Revision of this message's persisted manual intent; zero means no row exists yet. */
+  correctionRevision?: number;
+  manuallyCorrected?: boolean;
+  /** Manual intent is separate from effective values so controls can offer per-field reset. */
+  manualCorrection?:{
+    category?:Section;
+    addTags:Tag[];
+    removeTags:Tag[];
+    junkPreference?:'junk'|'not-junk';
+    obligationStates:Record<string,import('./classification').ObligationState>;
+  };
+  automaticClassificationAvailable?: boolean;
+  senderJunkPreference?:'junk'|'not-junk';
+  senderRuleRevision?:number;
   receivedAt?: number; messageId?: string; unsubscribe?: string; oneClick?: boolean;
 };
 // These deterministic classifications keep the demo useful when Gemini is unavailable.
@@ -87,7 +101,14 @@ export const demoEmails: Email[] = [
 
 export function emailKey(email: Email): string { return JSON.stringify([email.accountId || 'demo', email.id]); }
 export function senderKey(email: Email): string { return JSON.stringify([email.accountId || 'demo', email.address]); }
+/**
+ * Deep link to a thread in a named mailbox. `authuser` selects the right account when
+ * several Google accounts are signed in; a hardcoded `/u/0/` opens whichever mailbox is
+ * first, which is the wrong one as soon as a second account is connected.
+ */
+export function gmailThreadUrl(accountEmail: string | undefined, threadId: string): string {
+  return `https://mail.google.com/mail/u/?authuser=${encodeURIComponent(accountEmail || '')}#all/${encodeURIComponent(threadId)}`;
+}
 export function gmailLink(email: Email): string {
-  // `authuser` selects the correct mailbox when several Google accounts are signed in.
-  return `https://mail.google.com/mail/u/?authuser=${encodeURIComponent(email.accountEmail || '')}#all/${encodeURIComponent(email.threadId || email.id)}`;
+  return gmailThreadUrl(email.accountEmail, email.threadId || email.id);
 }

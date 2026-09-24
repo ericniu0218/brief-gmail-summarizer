@@ -30,11 +30,38 @@ export type NormalizedMessage={
   incompleteReasons:string[];
 };
 
-type Part={mimeType?:string;filename?:string;body?:{data?:string;size?:number;attachmentId?:string};parts?:Part[];headers?:{name:string;value:string}[]};
+export type GmailPart={mimeType?:string;filename?:string;body?:{data?:string;size?:number;attachmentId?:string};parts?:GmailPart[];headers?:{name:string;value:string}[]};
 export type GmailMessage={id:string;threadId:string;snippet:string;internalDate:string;labelIds:string[];payload:Part};
+type Part=GmailPart;
 
 const TEXT_LIMIT=20000;
 const MAX_MIME_DEPTH=20;
+const MAX_DEFERRED_BODIES=8;
+const MAX_DEFERRED_BYTES=2_000_000;
+
+/**
+ * Gmail may put a large text body behind an attachment id even though it is not a file.
+ * Fetch only those readable body parts, with hard count and declared-size limits. A
+ * failed fetch stays unset, so normalization truthfully marks the message incomplete.
+ */
+export async function hydrateDeferredBodies(message:GmailMessage,load:(attachmentId:string)=>Promise<{data?:unknown;size?:unknown}>){
+  const deferred:GmailPart[]=[];
+  function visit(part:GmailPart|undefined,depth=0){
+    if(!part||depth>MAX_MIME_DEPTH)return;
+    const mime=typeof part.mimeType==='string'?part.mimeType.toLowerCase():'';
+    if(!part.filename&&part.body?.attachmentId&&!part.body.data&&['text/plain','text/html','text/calendar','application/ics'].includes(mime))deferred.push(part);
+    for(const child of Array.isArray(part.parts)?part.parts:[])visit(child,depth+1);
+  }
+  visit(message.payload);
+  for(const part of deferred.slice(0,MAX_DEFERRED_BODIES)){
+    if((part.body?.size||0)>MAX_DEFERRED_BYTES)continue;
+    try{
+      const result=await load(part.body!.attachmentId!);
+      if(typeof result.data==='string'&&result.data.length<=Math.ceil(MAX_DEFERRED_BYTES*4/3)+8)part.body!.data=result.data;
+    }catch{/* The normalizer records the still-deferred body as incomplete. */}
+  }
+  return message;
+}
 
 const ENTITIES:Record<string,string>={amp:'&',lt:'<',gt:'>',quot:'"',apos:"'",nbsp:' ',mdash:'—',ndash:'–',hellip:'…',rsquo:'’',lsquo:'‘',ldquo:'“',rdquo:'”'};
 

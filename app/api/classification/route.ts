@@ -1,46 +1,145 @@
-import { failure, inputObject, json, mutation, runtime, userId } from '@/server/runtime';
-import { applyOverride, clearOverride, saveOverride, type Override } from '@/server/overrides';
-import { applyPolicy } from '@/lib/classification';
+import { failure, HttpError, json, mutation, runtime, userId } from '@/server/runtime';
+import {
+  applyCorrection,
+  automaticBaseline,
+  composeClassification,
+  CORRECTABLE_STATES,
+  CORRECTABLE_TAGS,
+  loadOverride,
+  loadSenderRules,
+  manualCorrectionView,
+  saveSenderRule,
+  withSenderRule,
+  type CorrectionAction,
+} from '@/server/overrides';
+import { getOwnedConnection } from '@/server/gmail';
+import { obligationCorrectionKey } from '@/lib/classification';
 import type { Section, Tag } from '@/lib/categories';
-import type { Snapshot } from '@/server/sync';
+import type { Snapshot, StoredEmail } from '@/server/sync';
+import { parseSnapshot } from '@/server/snapshots';
+import { loadMessage } from '@/server/messages';
 
 const SECTIONS:Section[]=['work','personal','noise'];
-const TAGS:Tag[]=['deadlines','meetings','requests','actions','research','low-priority','junk'];
-const STATES=['open','completed','cancelled','superseded','unknown'] as const;
+const MAX_MESSAGE_ID=1024;
+const MAX_OBLIGATION_KEY=2048;
+const MAX_BODY_BYTES=16384;
 
-function tagList(value:unknown):Tag[]{
-  return Array.isArray(value)?value.filter((tag):tag is Tag=>TAGS.includes(tag as Tag)):[];
+/** Strictly decode one command. Omitted fields never double as “clear this value”. */
+function correctionAction(value:unknown):CorrectionAction{
+  if(!value||typeof value!=='object'||Array.isArray(value))throw new HttpError(400,'Choose one correction action.');
+  const action=value as Record<string,unknown>;
+  const exact=(allowed:string[])=>{
+    if(Object.keys(action).some(key=>!allowed.includes(key)))throw new HttpError(400,'A correction must contain only the fields used by its action.');
+  };
+  switch(action.type){
+    case 'set-section':
+      exact(['type','section']);
+      if(!SECTIONS.includes(action.section as Section))break;
+      return {type:'set-section',section:action.section as Section};
+    case 'clear-section':exact(['type']);return {type:'clear-section'};
+    case 'set-junk-preference':
+      exact(['type','value']);
+      if(action.value!=='junk'&&action.value!=='not-junk')break;
+      return {type:'set-junk-preference',value:action.value};
+    case 'clear-junk-preference':exact(['type']);return {type:'clear-junk-preference'};
+    case 'add-tag':case 'remove-tag':case 'clear-tag-correction':
+      exact(['type','tag']);
+      if(!CORRECTABLE_TAGS.includes(action.tag as Tag))break;
+      return {type:action.type,tag:action.tag as Tag};
+    case 'set-obligation-state':
+      exact(['type','obligationKey','state']);
+      if(typeof action.obligationKey!=='string'||!action.obligationKey||action.obligationKey.length>MAX_OBLIGATION_KEY||
+        !CORRECTABLE_STATES.includes(action.state as typeof CORRECTABLE_STATES[number]))break;
+      return {type:'set-obligation-state',obligationKey:action.obligationKey,state:action.state as typeof CORRECTABLE_STATES[number]};
+    case 'clear-obligation-state':
+      exact(['type','obligationKey']);
+      if(typeof action.obligationKey!=='string'||!action.obligationKey||action.obligationKey.length>MAX_OBLIGATION_KEY)break;
+      return {type:'clear-obligation-state',obligationKey:action.obligationKey};
+    case 'reset-all':exact(['type']);return {type:'reset-all'};
+  }
+  throw new HttpError(400,'That correction action is not supported.');
+}
+
+async function correctionBody(request:Request):Promise<Record<string,unknown>>{
+  const text=await request.text();
+  if(new TextEncoder().encode(text).byteLength>MAX_BODY_BYTES)throw new HttpError(413,'That correction request is too large.');
+  try{
+    const value:unknown=JSON.parse(text);
+    if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('bad body');
+    return value as Record<string,unknown>;
+  }catch{throw new HttpError(400,'Send a valid correction request.');}
+}
+
+function findMessage(snapshot:Snapshot,messageId:string):StoredEmail{
+  const matches=snapshot.emails.filter(email=>email?.id===messageId);
+  if(matches.length!==1)throw new HttpError(404,'That message is not available in this mailbox. Refresh and try again.');
+  return matches[0];
 }
 
 export async function POST(request:Request){
   try{
     mutation(request);
-    const user=await userId();const e=runtime();
-    const body=await inputObject(request);
+    const user=await userId(),e=runtime(),body=await correctionBody(request);
     const messageId=typeof body.messageId==='string'?body.messageId:'';
-    if(!messageId)return json({error:'Tell us which message to correct.'},400);
+    if(!messageId||messageId.length>MAX_MESSAGE_ID)throw new HttpError(400,'Tell us which message to correct.');
+    const expectedRevision=body.expectedRevision;
+    if(!Number.isSafeInteger(expectedRevision)||Number(expectedRevision)<0)throw new HttpError(400,'Reload this message before saving a correction.');
+    const rawAction=body.action;
+    const senderAction=rawAction&&typeof rawAction==='object'&&!Array.isArray(rawAction)&&
+      ((rawAction as {type?:unknown}).type==='set-sender-junk-preference'||(rawAction as {type?:unknown}).type==='clear-sender-junk-preference');
+    const action=senderAction?undefined:correctionAction(rawAction);
 
-    if(body.reset===true)await clearOverride(user,messageId,e);
-    else{
-      const category=SECTIONS.includes(body.category as Section)?body.category as Section:undefined;
-      const obligationState=STATES.includes(body.obligationState as typeof STATES[number])?body.obligationState as Override['obligationState']:undefined;
-      // A correction applies to this message only. A sender-wide rule is a separate,
-      // explicit choice and is never created as a side effect.
-      await saveOverride(user,{messageId,category,addTags:tagList(body.addTags),removeTags:tagList(body.removeTags),
-        notJunk:body.notJunk===true,obligationState,source:body.scope==='rule'?'rule':'message',createdAt:Date.now()},e);
+    // Ownership is checked before both the snapshot read and correction write. Message
+    // ids are only meaningful together with their account id.
+    const owned=await getOwnedConnection(user,typeof body.accountId==='string'?body.accountId:'',e);
+    const rowSource=await loadMessage(user,owned.id,messageId,e);
+    const stored=rowSource?undefined:await e.DB.prepare('SELECT data FROM snapshots WHERE account_id = ? AND user_id = ?').bind(owned.id,user).first<{data:string}>();
+    const parsed=stored?parseSnapshot(stored.data):undefined;
+    const source=rowSource||(parsed?findMessage(parsed,messageId):undefined);
+    if(!source)throw new HttpError(404,'Refresh this mailbox before correcting a message.');
+    const automatic=automaticBaseline(source.automaticClassification)??automaticBaseline(source.classification);
+    // A manually altered legacy snapshot cannot reveal what the classifier originally
+    // chose. Reset fails without clearing anything; the next sync creates a clean baseline.
+    if(!automatic)throw new HttpError(409,action?.type==='reset-all'
+      ?'Refresh this mailbox before returning the message to automatic classification.'
+      :'Refresh this mailbox before saving a correction.');
+
+    if(action?.type==='set-obligation-state'||action?.type==='clear-obligation-state'){
+      const matches=automatic.obligations.filter(item=>obligationCorrectionKey(item)===action.obligationKey);
+      if(matches.length!==1)throw new HttpError(409,'That task changed during classification. Refresh and review it again.');
     }
 
-    const stored=await e.DB.prepare('SELECT data FROM snapshots WHERE user_id = ?').bind(user).first<{data:string}>();
-    if(!stored)return json({updated:false});
-    const snapshot=JSON.parse(stored.data) as Snapshot;
-    const now=Date.now();
-    const overrides=await (await import('@/server/overrides')).loadOverrides(user,e);
-    snapshot.emails=snapshot.emails.map(email=>{
-      if(email.id!==messageId||!email.classification)return email;
-      const {classification,category,tags,priority,label}=applyPolicy(applyOverride(email.classification,overrides.get(messageId)),now);
-      return {...email,classification,category,tags,priority,label};
-    });
-    await e.DB.prepare('UPDATE snapshots SET data=? WHERE user_id=?').bind(JSON.stringify(snapshot),user).run();
-    return json({updated:true,emails:snapshot.emails});
+    let manual=await loadOverride(user,owned.id,messageId,e);
+    let senderRule=(await loadSenderRules(user,owned.id,e)).get(source.address);
+    if(senderAction){
+      const sender=rawAction as Record<string,unknown>;
+      if(Object.keys(sender).some(key=>!['type','value'].includes(key)))throw new HttpError(400,'A sender preference contains unsupported fields.');
+      const expectedSenderRevision=body.expectedSenderRevision;
+      if(!Number.isSafeInteger(expectedSenderRevision)||Number(expectedSenderRevision)<0)throw new HttpError(400,'Reload this message before saving a sender preference.');
+      const value=sender.type==='clear-sender-junk-preference'?undefined:sender.value;
+      if(value!==undefined&&value!=='junk'&&value!=='not-junk')throw new HttpError(400,'Choose whether to keep this sender or move it to Junk.');
+      senderRule=await saveSenderRule(user,owned.id,source.address,Number(expectedSenderRevision),value,e);
+    }else manual=await applyCorrection(user,owned.id,messageId,Number(expectedRevision),action!,e);
+    // A sync may have published newer source content while the correction was being
+    // saved. Re-read the snapshot and compose against its automatic baseline so the
+    // response cannot paint an older message body or classifier result over the UI.
+    const latestRow=await loadMessage(user,owned.id,messageId,e);
+    const latestStored=latestRow?undefined:await e.DB.prepare('SELECT data FROM snapshots WHERE account_id = ? AND user_id = ?').bind(owned.id,user).first<{data:string}>();
+    // The correction is already durable. A concurrently replaced or corrupt snapshot
+    // must not turn that successful write into an error response that invites a retry.
+    const latestSnapshot=latestStored?parseSnapshot(latestStored.data):undefined;
+    const latestSource=latestRow??latestSnapshot?.emails.find(item=>item?.id===messageId)??source;
+    const latestAutomatic=automaticBaseline(latestSource.automaticClassification)??automaticBaseline(latestSource.classification)??automatic;
+    const effective=withSenderRule(manual,senderRule,messageId);
+    const {classification,category,tags,priority,label}=composeClassification(latestAutomatic,effective,Date.now());
+    const email:StoredEmail={...latestSource,accountId:owned.id,accountEmail:owned.email,
+      automaticClassification:latestAutomatic,classification,category,tags,priority,label,
+      correctionRevision:manual?.revision??0,manuallyCorrected:manual?.active!==false&&!!manual,
+      manualCorrection:manualCorrectionView(manual),
+      senderJunkPreference:senderRule?.junkPreference,senderRuleRevision:senderRule?.revision??0,
+      automaticClassificationAvailable:true};
+    // Return only the affected record. Replacing a whole inbox from this response could
+    // overwrite a newer background refresh or the mailbox currently visible in the UI.
+    return json({updated:true,email,revision:manual?.revision??0,senderRuleRevision:senderRule?.revision??0});
   }catch(error){return failure(error);}
 }

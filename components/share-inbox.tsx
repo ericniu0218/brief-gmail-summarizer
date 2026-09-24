@@ -61,6 +61,18 @@ export function ShareInbox({
       cancelled = true;
     };
   }, [open, accountId]);
+  // Changing the sharing mailbox invalidates any reviewed preview and selection: the
+  // messages belonged to the previous account, so publishing them here would share
+  // something the user never reviewed for this workspace. This adjusts state during
+  // render rather than in an effect, so the reset lands in the same render as the new
+  // account instead of causing a second pass with stale data briefly visible.
+  const [previewAccount, setPreviewAccount] = useState(accountId);
+  if (previewAccount !== accountId) {
+    setPreviewAccount(accountId);
+    setPreview(null);
+    setIds([]);
+    setNotice('');
+  }
   function changeOpen(value: boolean) {
     setOpen(value);
     if (value) {

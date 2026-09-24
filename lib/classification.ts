@@ -68,6 +68,20 @@ export type Classification={
   override?:{source:'message'|'rule';category?:Section;addTags?:Tag[];removeTags?:Tag[]};
 };
 
+/**
+ * Stable identity for a task correction. It uses grounded source evidence instead of an
+ * array index, so a model may reorder obligations without moving a completion to another
+ * task. Duplicate identical keys are treated as ambiguous by the composer and are never
+ * updated automatically.
+ */
+export function obligationCorrectionKey(obligation:Obligation){
+  // Keep the normalized source itself instead of a short non-cryptographic hash. Exact
+  // canonical strings cannot collide, and the server still verifies that exactly one
+  // current obligation matches before accepting a correction.
+  return JSON.stringify([obligation.kind,obligation.evidence,obligation.due?.phrase||'',obligation.owner]
+    .map(value=>value.toLowerCase().replace(/\s+/g,' ').trim()));
+}
+
 export const EMPTY_CLASSIFICATION:Classification={
   context:'unknown',topics:[],obligations:[],disposition:'uncertain',replyRequired:false,
   securityEvent:false,processingStatus:'pending',reason:'Awaiting classification.',version:POLICY_VERSION,
@@ -239,6 +253,7 @@ const REVIEW_EXPLANATIONS:Record<string,string>={
   'ambiguous-date':'A date in this message could not be resolved, so it is waiting for your review.',
   'conflicting-dates':'This message gives more than one due date, so it is waiting for your review.',
   'classification-failed':'Automatic classification did not complete for this message.',
+  'manual-obligation-unmatched':'A corrected task changed during automatic reclassification and needs review.',
 };
 
 export function reviewExplanation(classification:Classification):string|undefined{

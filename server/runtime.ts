@@ -74,15 +74,38 @@ async function key(e: Runtime) {
   if (!e.TOKEN_ENCRYPTION_KEY) throw new HttpError(503,'The Gmail connection is not configured yet.');
   return crypto.subtle.importKey('raw', decode(e.TOKEN_ENCRYPTION_KEY.trim()), 'AES-GCM', false, ['encrypt','decrypt']);
 }
-export async function encrypt(value:string,user:string,e=runtime()) {
-  // A fresh IV protects each token. Binding the ciphertext to the user ID prevents an
-  // encrypted token from being copied to another account.
+/**
+ * Refresh tokens are bound to their owner so ciphertext cannot be moved between accounts.
+ *
+ * Version 1 bound the application user only, because a user had exactly one mailbox.
+ * Version 2 binds user *and* account, so a token lifted from one mailbox row cannot be
+ * pasted into another. Both stay readable: a connection's stored `token_version` selects
+ * the binding, and a v1 token is rewritten as v2 only when the mailbox is reconnected,
+ * which is already a credential write. Nothing downgrades a v2 token back to v1.
+ */
+export const LEGACY_TOKEN_VERSION=1;
+export const CURRENT_TOKEN_VERSION=2;
+
+function tokenBinding(user:string,accountId?:string){
+  return accountId?`${user}:${accountId}`:user;
+}
+
+export async function encrypt(value:string,user:string,e=runtime(),accountId?:string) {
+  // A fresh IV protects each token.
   const iv=crypto.getRandomValues(new Uint8Array(12));
-  const encrypted=await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:new TextEncoder().encode(user)},await key(e),new TextEncoder().encode(value));
+  const encrypted=await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:new TextEncoder().encode(tokenBinding(user,accountId))},await key(e),new TextEncoder().encode(value));
   return `${encode(iv)}.${encode(new Uint8Array(encrypted))}`;
 }
-export async function decrypt(value:string,user:string,e=runtime()) {
+export async function decrypt(value:string,user:string,e=runtime(),accountId?:string) {
   const [iv, ciphertext]=value.split('.');
-  const bytes=await crypto.subtle.decrypt({name:'AES-GCM',iv:decode(iv),additionalData:new TextEncoder().encode(user)},await key(e),decode(ciphertext));
+  const bytes=await crypto.subtle.decrypt({name:'AES-GCM',iv:decode(iv),additionalData:new TextEncoder().encode(tokenBinding(user,accountId))},await key(e),decode(ciphertext));
   return new TextDecoder().decode(bytes);
+}
+/**
+ * Decrypt a stored refresh token using the format it was written with. An unknown version
+ * is treated as legacy rather than failing, because an unreadable token would disconnect a
+ * working mailbox. Ownership is enforced by the query that loaded the row, not here.
+ */
+export async function decryptToken(token:string,user:string,accountId:string,version:number,e=runtime()) {
+  return version>=CURRENT_TOKEN_VERSION?decrypt(token,user,e,accountId):decrypt(token,user,e);
 }

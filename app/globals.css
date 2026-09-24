@@ -311,3 +311,19 @@
 .dark .mail-label.review{background:#332c1d;color:#d8c48e;border-color:#4a3f27}
 .dark .classification-review{background:#332c1d;border-color:#4a3f27;color:#d8c48e}
 .dark .classification-proposed{color:#b5a67e}
+.reply-sender{display:block;font-size:11px;color:#8a94a5;margin-top:6px}
+.dark .reply-sender{color:var(--text-soft)}
+.account-list{display:flex;flex-direction:column;gap:9px}
+.account-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;border:1px solid var(--border);border-radius:10px;padding:12px 13px;background:var(--surface-soft)}
+.account-identity{flex:1;min-width:0}
+.account-identity strong{display:block;font-size:13px;font-weight:570;color:#556174;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.account-identity small{display:block;font-size:11px;color:#8b96a8;margin-top:4px}
+.account-default{font-size:10px;color:#2d67c8;background:#e4ebf8;border-radius:4px;padding:3px 6px;white-space:nowrap}
+.account-actions{display:flex;gap:6px;flex-wrap:wrap}
+.account-action{font-size:11px;border:1px solid var(--border);background:var(--surface);color:#6b7686;border-radius:6px;padding:5px 9px;white-space:nowrap}
+.account-action.danger{color:#b46b6b}
+.account-action:disabled{opacity:.5}
+.dark .account-identity strong{color:var(--text-strong)}
+.dark .account-default{background:var(--accent);color:var(--primary)}
+.dark .account-action{background:var(--surface);color:var(--text)}
+@media(max-width:480px){.account-row{align-items:flex-start}.account-actions{width:100%}}
