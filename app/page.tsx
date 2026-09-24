@@ -25,7 +25,12 @@ import { emailTags, parseView, selectEmails, sectionName, tagName } from '@/lib/
 import { useTheme } from '@/hooks/use-theme';
 import { ThemePrompt } from '@/components/theme-prompt';
 
+/**
+ * Main inbox screen. It combines mailbox state, category filtering, daily highlights,
+ * settings, the conversation panel, and reply tools without owning their server logic.
+ */
 export default function Dashboard() {
+  // Navigation and panel state stay local because changing views does not change Gmail.
   const [view,setView]=useState('overview');
   const [filter,setFilter]=useState('all');
   const [selected,setSelected]=useState<Email|null>(null);
@@ -38,6 +43,7 @@ export default function Dashboard() {
   const [date,setDate]=useState('YOUR DAILY OVERVIEW');
   const [greeting,setGreeting]=useState('Welcome back');
   useEffect(()=>{
+    // Refresh the greeting at minute boundaries without forcing mailbox data to reload.
     const update=()=>{
       const now=new Date();
       setDate(now.toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'}).toUpperCase());
@@ -49,6 +55,8 @@ export default function Dashboard() {
     return()=>{window.clearTimeout(initial);window.clearInterval(timer);};
   },[]);
   const allInboxes=inbox.activeAccountId==='all';
+  // Derive every visible collection from the current snapshot instead of maintaining
+  // duplicate lists that could fall out of sync.
   const mail=emails.filter(m=>m.category!=='noise');
   const noise=emails.filter(m=>m.category==='noise');
   const work=mail.filter(m=>m.category==='work');
@@ -85,6 +93,7 @@ export default function Dashboard() {
       <main className="dashboard-content">
         <div className="heading-row"><div><div className="eyebrow"><Sun size={14}/> {date}</div><h1>{greeting}<span>.</span></h1>{view==='noise'&&<p>Your subscriptions, neatly in one place.</p>}</div><div className="inbox-primary-actions">{!connected&&<ConnectGmailButton status={status} signInUrl={inbox.signInUrl} onSetup={()=>setConnect(true)}/>}<button className="button white" disabled={busy} onClick={()=>void inbox.refresh()} aria-label="Refresh inbox"><RefreshCw size={15} className={busy?'spinning':''}/>{busy?'Refreshing…':'Refresh inbox'}</button></div></div>
         {notice&&<output className="inbox-notice"><span>{notice}</span>{inbox.signInUrl&&<a className="button white" href={inbox.signInUrl} target="_top">Sign in</a>}<button aria-label="Dismiss notification" onClick={()=>inbox.setNotice('')}><X size={14}/></button></output>}
+        {connected&&inbox.skipped>0&&<p className="gmail-connect-hint">{inbox.skipped} {inbox.skipped===1?'message was':'messages were'} unreadable and skipped during the latest refresh.</p>}
         {!connected&&<p className="gmail-connect-hint">You’re viewing sample emails. Connect Gmail to see summaries of your own inbox.</p>}
         <div style={{display:"flex",justifyContent:"flex-end",gap:12,marginBottom:20}}>{connected&&<ShareInbox emails={emails} accountId={inbox.activeAccountId}/>}<Link className="button white" href="/team">Team workspace <ArrowUpRight size={15}/></Link></div><div className="content-columns"><div className="primary-column">
           {(view==='overview')&&<DailyBrief emails={emails} connected={connected} ai={inbox.ai} aiConfigured={!!status?.aiConfigured} busy={busy} updated={inbox.updated} collapsed={briefRead} onCollapse={()=>setBriefRead(!briefRead)} onSelect={setSelected}/>}

@@ -1,6 +1,8 @@
 import { polishReply, replyOptions } from '@/server/ai';
 import { failure, HttpError, json, mutation, userId } from '@/server/runtime';
 import { demoEmails } from '@/lib/mail';
+
+/** Generates reply suggestions for the fixed demo inbox without touching Gmail. */
 // Sample-inbox replies. The message is looked up server-side by id, so this route
 // generates only from the fixed demo corpus and never from caller-supplied text.
 export async function POST(request:Request){

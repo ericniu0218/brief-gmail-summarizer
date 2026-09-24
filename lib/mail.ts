@@ -1,6 +1,8 @@
 import type { Section, Tag } from './categories';
 import type { Classification } from './classification';
 
+/** Shared inbox record used by the API, dashboard, demo data, and browser tools. */
+
 export type Email = {
   id: string; accountId?: string; accountEmail?: string; threadId?: string; sender: string; address: string; initials: string;
   subject: string; summary: string; body: string; time: string; category: Section;
@@ -30,6 +32,7 @@ const demoTags:Record<string,Tag[]>={
   '53':['research','deadlines'],'54':['meetings'],'55':['low-priority'],
 };
 function seed(s:Seed):Email {
+  // Turn compact fixtures into complete UI records so demo messages stay easy to edit.
   const category:Section=s.category||(s.oneClick?'noise':workIds.has(s.id)?'work':'personal');
   const priority:Email['priority']=highPriorityIds.has(s.id)?'high':'normal';
   const tags:Tag[]=s.tags||demoTags[s.id]||(category==='noise'?['junk']:[]);
@@ -85,5 +88,6 @@ export const demoEmails: Email[] = [
 export function emailKey(email: Email): string { return JSON.stringify([email.accountId || 'demo', email.id]); }
 export function senderKey(email: Email): string { return JSON.stringify([email.accountId || 'demo', email.address]); }
 export function gmailLink(email: Email): string {
+  // `authuser` selects the correct mailbox when several Google accounts are signed in.
   return `https://mail.google.com/mail/u/?authuser=${encodeURIComponent(email.accountEmail || '')}#all/${encodeURIComponent(email.threadId || email.id)}`;
 }

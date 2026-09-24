@@ -2,6 +2,7 @@
 import { Mail } from 'lucide-react';
 import type { ConnectionStatus } from '@/hooks/use-inbox';
 
+/** Chooses between starting OAuth now and opening settings for missing configuration. */
 export function ConnectGmailButton({
   status,
   signInUrl,

@@ -5,7 +5,9 @@ import { useCallback, useEffect, useState } from 'react';
 const THEME_KEY = 'brief-theme';
 const PROMPT_KEY = 'brief-theme-prompted';
 
+/** Applies and remembers the global color theme plus the one-time prompt state. */
 function applyTheme(darkMode: boolean) {
+  // The root class drives CSS variables, while colorScheme also updates native controls.
   document.documentElement.classList.toggle('dark', darkMode);
   document.documentElement.style.colorScheme = darkMode ? 'dark' : 'light';
 }
@@ -19,6 +21,8 @@ export function useTheme() {
   const [showThemePrompt, setShowThemePrompt] = useState(false);
 
   useEffect(() => {
+    // Read browser storage after mount, then show the question only if it has never been
+    // answered. Light remains the default when no choice exists.
     let storedTheme: string | null = null;
     let hasAnsweredPrompt = false;
     try {
@@ -37,6 +41,7 @@ export function useTheme() {
   }, []);
 
   const setDarkMode = useCallback((enabled: boolean) => {
+    // A choice applies immediately even when storage is unavailable for this browser.
     setDarkModeState(enabled);
     applyTheme(enabled);
     try {

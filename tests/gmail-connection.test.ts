@@ -208,6 +208,80 @@ void test('OAuth persists a real-schema connection, consumes PKCE state and load
   );
 });
 
+void test('one malformed Gmail message is skipped without losing the valid batch', async () => {
+  await seed();
+  const provider = globalThis.fetch;
+  const ids = ['good-1', 'good-2', 'bad', 'good-3', 'good-4', 'good-5'];
+  globalThis.fetch = async (input, init) => {
+    const url = requestUrl(input);
+    if (url.endsWith('/users/me/messages?labelIds=INBOX&maxResults=60'))
+      return Response.json({ messages: ids.map((id) => ({ id })) });
+    const match = /\/users\/me\/messages\/([^?]+)\?format=full$/.exec(url);
+    if (match) {
+      const id = decodeURIComponent(match[1]);
+      return Response.json({
+        id,
+        threadId: 'thread-' + id,
+        snippet: 'Hello',
+        internalDate: '1788960000000',
+        labelIds: ['INBOX'],
+        payload: {
+          mimeType: 'text/plain',
+          headers: [
+            { name: 'From', value: 'Sender <sender@example.com>' },
+            { name: 'Subject', value: id },
+          ],
+          body: { data: id === 'bad' ? '%%%invalid-base64%%%' : encode('Hello') },
+        },
+      });
+    }
+    return provider(input, init);
+  };
+  const snapshot = await syncInbox('user-a', env);
+  assert.deepEqual(snapshot.emails.map((email) => email.id), ids.filter((id) => id !== 'bad'));
+  assert.equal(snapshot.skipped, 1);
+  const stored = JSON.parse(String(row('snapshots')!.data)) as InboxSnapshot;
+  assert.equal(stored.emails.length, 5);
+  assert.equal(stored.skipped, 1);
+});
+
+void test('a corrupt override row falls back to empty tags without aborting sync', async () => {
+  await seed();
+  storage.sql.prepare(
+    'INSERT INTO overrides (user_id,message_id,category,add_tags,remove_tags,not_junk,obligation_state,source,created) VALUES (?,?,?,?,?,?,?,?,?)',
+  ).run('user-a','message','invalid-section','{bad json','null',0,'invalid-state','message',Date.now());
+  const snapshot=await syncInbox('user-a',env);
+  assert.equal(snapshot.emails.length,1);
+  assert.equal(snapshot.emails[0].id,'message');
+  assert.equal(snapshot.skipped,0);
+});
+
+void test('a downstream classify/build failure skips only that message', async () => {
+  await seed();
+  const provider=globalThis.fetch;
+  const ids=['good-a','bad-labels','good-b','good-c','good-d','good-e'];
+  globalThis.fetch=async(input,init)=>{
+    const url=requestUrl(input);
+    if(url.endsWith('/users/me/messages?labelIds=INBOX&maxResults=60'))
+      return Response.json({messages:ids.map(id=>({id}))});
+    const match=/\/users\/me\/messages\/([^?]+)\?format=full$/.exec(url);
+    if(match){
+      const id=decodeURIComponent(match[1]);
+      return Response.json({
+        id,threadId:'thread-'+id,snippet:'Hello',internalDate:'1788960000000',
+        labelIds:id==='bad-labels'?1:['INBOX'],
+        payload:{mimeType:'text/plain',headers:[
+          {name:'From',value:'Sender <sender@example.com>'},{name:'Subject',value:id},
+        ],body:{data:encode('Hello')}},
+      });
+    }
+    return provider(input,init);
+  };
+  const snapshot=await syncInbox('user-a',env);
+  assert.deepEqual(snapshot.emails.map(email=>email.id),ids.filter(id=>id!=='bad-labels'));
+  assert.equal(snapshot.skipped,1);
+});
+
 void test('returning from Google automatically loads summaries of the connected Gmail messages', async () => {
   env.GEMINI_API_KEY = 'test-gemini-key';
   connected(await callback());

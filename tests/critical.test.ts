@@ -11,12 +11,12 @@ import { POST as runScheduledAgent } from '../app/api/agent/route';
 import { summarizeInbox } from '../server/sync';
 import { buildInboxRows, isImportantEmail, sortInboxEmails } from '../lib/inbox-priority';
 import { SECTIONS, classifyEmail, emailTags, parseView, rowLabels, sectionCount, selectEmails, tagCount, toggleExpanded, type Tag } from '../lib/categories';
-import { normalizeMessage, type NormalizedMessage } from '../server/message';
+import { normalizeMessage, type GmailMessage, type NormalizedMessage } from '../server/message';
 import { collectBatch, evidenceSupported, validateItem } from '../server/classify';
 import { applyOverride, contentFingerprint } from '../server/overrides';
 import { deterministicClassify } from '../lib/deterministic';
 import { resolveDate } from '../lib/dates';
-import { derivePriority, effectiveCategories, isOverviewMessage, needsReview, upcomingMeetings, type Classification, type Obligation } from '../lib/classification';
+import { derivePriority, effectiveCategories, isOverdue, isOverviewMessage, needsReview, upcomingMeetings, type Classification, type Obligation } from '../lib/classification';
 import { FIXTURES, DEV_FIXTURES, HELDOUT_FIXTURES } from './eval-set';
 
 declare global { var __briefTestEnv: Runtime; var __briefTestHeaders: Headers; }
@@ -341,6 +341,13 @@ test('Inbox is the complete incoming view and Noise carries junk directly',()=>{
  assert.equal(SECTIONS.find(s=>s.id==='noise')?.tags.length,0,'Noise has no submenu');
 });
 
+test('email selection ignores nullish snapshot entries in every view',()=>{
+ const malformed=[demoEmails[0],undefined,null,demoEmails[1]];
+ assert.deepEqual(selectEmails(malformed,'inbox').map(email=>email.id),[demoEmails[0].id,demoEmails[1].id]);
+ assert.doesNotThrow(()=>selectEmails(malformed,'work'));
+ assert.doesNotThrow(()=>selectEmails(malformed,'work:deadlines'));
+});
+
 test('parent counts are unique while subcategory counts may overlap',()=>{
  const overlapping=demoById('50');
  // Copy before sorting: emailTags returns the message's own tag array.
@@ -446,6 +453,43 @@ test('incomplete content is flagged rather than silently dropped',()=>{
  assert.ok(result.incompleteReasons.includes('attachments-not-read'),'attachments are never claimed to be understood');
 });
 
+test('excessively nested MIME content is bounded and marked incomplete',()=>{
+ let payload:{mimeType:string;body?:{data:string};parts?:typeof payload[]}={mimeType:'text/plain',body:{data:encode('deep body')}};
+ for(let depth=0;depth<25;depth++)payload={mimeType:'multipart/mixed',parts:[payload]};
+ const result=normalizeMessage({id:'deep',threadId:'t',snippet:'Safe fallback',internalDate:'1789000000000',labelIds:[],
+  payload:{...payload,headers:[{name:'From',value:'S <s@x.example>'}]}});
+ assert.equal(result.text,'Safe fallback');
+ assert.equal(result.contentComplete,false);
+ assert.ok(result.incompleteReasons.includes('mime-depth-limit'));
+});
+
+test('sender identity falls back safely when From is missing',()=>{
+ const withSender=normalizeMessage({id:'sender',threadId:'t',snippet:'',internalDate:'1789000000000',labelIds:[],
+  payload:{mimeType:'text/plain',headers:[{name:'Sender',value:'Service <service@example.com>'}],body:{data:encode('Hello')}}});
+ assert.equal(withSender.from.address,'service@example.com');
+ const unattributed=normalizeMessage({id:'unknown-1',threadId:'t',snippet:'',internalDate:'1789000000000',labelIds:[],
+  payload:{mimeType:'text/plain',headers:[],body:{data:encode('Hello')}}});
+ assert.equal(unattributed.from.name,'Unknown sender');
+ assert.equal(unattributed.from.address,'unattributed:unknown-1');
+ assert.notEqual(unattributed.from.address,'');
+});
+
+test('malformed Gmail structures are contained and marked incomplete',()=>{
+ const malformed=[
+  {id:'parts',threadId:'t',snippet:'Fallback',internalDate:'1789000000000',labelIds:[],
+   payload:{mimeType:'multipart/mixed',headers:[],parts:[null]}},
+  {id:'headers',threadId:'t',snippet:'',internalDate:'1789000000000',labelIds:[],
+   payload:{mimeType:'text/plain',headers:null,body:{data:encode('Hello')}}},
+  {id:'data',threadId:'t',snippet:'Fallback',internalDate:'1789000000000',labelIds:[],
+   payload:{mimeType:'text/plain',headers:[],body:{data:42}}},
+ ] as unknown as GmailMessage[];
+ for(const message of malformed){
+  const result=normalizeMessage(message);
+  assert.equal(result.contentComplete,false,message.id);
+  assert.ok(result.incompleteReasons.includes('malformed-message-structure'),message.id);
+ }
+});
+
 test('relative dates resolve against the message timestamp, not the refresh time',()=>{
  const monday=Date.UTC(2026,8,14,15,0,0);
  assert.equal(resolveDate('Friday',monday).date,'2026-09-18');
@@ -515,6 +559,17 @@ test('priority comes from evidence, not from the word urgent',()=>{
  assert.equal(derivePriority(due,now),'high','a supported near deadline does');
  const done={...due,obligations:[{...due.obligations[0],state:'completed' as const}]};
  assert.equal(derivePriority(done,now),'normal','a completed obligation is not urgent');
+ const old=classification({obligations:[obligation({kind:'deadline',due:{phrase:'January 1, 2020',date:'2020-01-01',ambiguous:false}})]});
+ assert.equal(derivePriority(old,now),'normal','an old deadline is overdue, not newly urgent');
+ assert.equal(isOverdue(old.obligations[0],now),true);
+ assert.equal(isOverviewMessage(old,now),true,'an unresolved overdue item remains visible');
+});
+
+test('a corrupt stored classification without obligations degrades safely',()=>{
+ const corrupt={...classification(),obligations:undefined} as unknown as Classification;
+ assert.deepEqual(effectiveCategories(corrupt),{category:'work',tags:[]});
+ assert.equal(derivePriority(corrupt,Date.UTC(2026,8,14)),'normal');
+ assert.equal(needsReview(corrupt),undefined);
 });
 
 test('cancelled meetings stay as history but leave upcoming events',()=>{
@@ -562,6 +617,11 @@ test('manual corrections outrank the classifier and survive reclassification',()
  assert.ok(effectiveCategories(retagged).tags.includes('research'));
  const forced=applyOverride(classification({context:'work'}),{messageId:'m1',category:'personal',addTags:[],removeTags:[],notJunk:false,source:'message',createdAt:0});
  assert.equal(effectiveCategories(forced).category,'personal');
+ const invalidPersonalTag=applyOverride(classification({context:'personal'}),{messageId:'m1',addTags:['research'],removeTags:[],notJunk:false,source:'message',createdAt:0});
+ assert.ok(!effectiveCategories(invalidPersonalTag).tags.includes('research'),'Work-only tags cannot leak into Personal');
+ const removedJunk=applyOverride(junk,{messageId:'m1',addTags:[],removeTags:['junk'],notJunk:false,source:'message',createdAt:0});
+ assert.notEqual(effectiveCategories(removedJunk).category,'noise','removing Junk is a not-junk correction');
+ assert.ok(!effectiveCategories(removedJunk).tags.includes('junk'));
 });
 
 test('a fingerprint changes only when classification-relevant content changes',()=>{
@@ -576,6 +636,13 @@ test('quoted requests do not create new obligations',()=>{
   from:{name:'S',address:'sarah@studio.example'},to:[{address:'alex@studio.example'}],cc:[],
   receivedAt:Date.UTC(2026,8,14),labels:['INBOX'],attachments:[],contentComplete:true},'alex@studio.example');
  assert.equal(reply.obligations.length,0,'an obligation quoted from history is not a new task');
+});
+
+test('deterministic classification tolerates missing recipient arrays',()=>{
+ const input={id:'missing-recipients',subject:'Hello',text:'No action needed.',quoted:'',
+  from:{name:'S',address:'sender@example.com'},receivedAt:Date.UTC(2026,8,14),
+  labels:['INBOX'],attachments:[],contentComplete:true} as unknown as Parameters<typeof deterministicClassify>[0];
+ assert.doesNotThrow(()=>deterministicClassify(input,'alex@example.com'));
 });
 
 // ── Evaluation: measured, deterministic, no live AI ──────────────────────────

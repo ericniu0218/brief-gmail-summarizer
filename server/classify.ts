@@ -4,6 +4,12 @@ import type { NormalizedMessage } from './message';
 import { resolveDate } from '@/lib/dates';
 import { POLICY_VERSION, needsReview, type Classification, type Obligation, type ObligationKind, type ObligationState, type MeetingState, type Context, type Disposition } from '@/lib/classification';
 
+/**
+ * AI classification trust boundary. The provider receives a bounded representation of
+ * each message, and every returned field is checked against the schema and source text
+ * before it can influence stored classifications.
+ */
+
 const CONTEXTS:Context[]=['work','personal','unknown'];
 const KINDS:ObligationKind[]=['deadline','meeting','request','action'];
 const STATES:ObligationState[]=['open','completed','cancelled','superseded','unknown'];
@@ -14,6 +20,8 @@ const MAX_REASON=240;
 const MAX_OBLIGATIONS=6;
 const MAX_FIELD=400;
 
+// The provider uses this schema to constrain its response. `validateItem` below remains
+// the authority because provider-side structured output cannot prove source evidence.
 export const CLASSIFY_SCHEMA={type:'object',properties:{items:{type:'array',items:{type:'object',properties:{
   id:{type:'string'},
   context:{type:'string',enum:CONTEXTS},
@@ -72,6 +80,7 @@ export function evidenceSupported(evidence:string,message:NormalizedMessage){
 }
 
 function text(value:unknown,limit=MAX_FIELD){
+  // Never allow model-generated strings to bypass the storage and display bounds.
   return typeof value==='string'?value.slice(0,limit):'';
 }
 
@@ -165,6 +174,8 @@ export function collectBatch(raw:unknown,batch:NormalizedMessage[]):BatchOutcome
 }
 
 function payload(message:NormalizedMessage,userAddress:string){
+  // Send only fields needed for classification. Attachment contents and arbitrary raw
+  // headers stay out of the model request; completeness flags disclose missing context.
   return {
     id:message.id,
     account:userAddress,
@@ -191,6 +202,11 @@ export async function classifyMessages(messages:NormalizedMessage[],userAddress:
   const results=new Map<string,Classification>();
   const failures=new Map<string,string>();
   let calls=0;
+  // No configured model is not a failure. The deterministic classifier already covers
+  // every message, so nothing is queued for retry and nothing is flagged for review.
+  if(!e.GEMINI_API_KEY)return {results,failures,calls,version:analysisVersion(e)};
+  // A retry contains only invalid or missing ids from its batch. Valid neighboring
+  // results are committed to the result map immediately and are never regenerated.
   for(let start=0;start<messages.length;start+=batchSize){
     let pending=messages.slice(start,start+batchSize);
     for(let attempt=0;attempt<maxAttempts&&pending.length;attempt++){

@@ -3,12 +3,19 @@ import { useEffect, useRef } from 'react';
 import { emailKey, type Email } from '@/lib/mail';
 type MailTool = {name:string;description:string;inputSchema:object;annotations:{readOnlyHint:boolean;untrustedContentHint:boolean};execute:(input:unknown)=>unknown};
 type MailContext = {registerTool:(tool:MailTool,options:{signal:AbortSignal})=>void|Promise<void>};
+
+/**
+ * Exposes a small, optional browser tool surface to an assistant: read visible summaries
+ * or open an existing conversation. It cannot draft, send, or modify Gmail.
+ */
 export function useMailTools(emails:Email[],open:(email:Email)=>void,demo:boolean){
+  // Keep tool callbacks current without unregistering and registering them after each render.
   const current=useRef({emails,open,demo});
   useEffect(()=>{current.current={emails,open,demo};},[emails,open,demo]);
   useEffect(()=>{
     const context=(document as Document & {modelContext?:MailContext}).modelContext;
     if(!context?.registerTool)return;
+    // Aborting on unmount lets the host remove both registered tools together.
     const lifecycle=new AbortController();
     const register=(tool:MailTool)=>{try{void Promise.resolve(context.registerTool(tool,{signal:lifecycle.signal})).catch(()=>{});}catch{/* Optional browser capability. */}};
     register({name:'read_inbox_brief',description:'Read the currently visible inbox summaries and priority flags. Returns whether the inbox is demo data.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:true,untrustedContentHint:true},execute(input){if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).length)throw new Error('Expected an empty object.');return {demo:current.current.demo,emails:current.current.emails.map(email=>({id:emailKey(email),account:email.accountEmail,sender:email.sender,subject:email.subject,summary:email.summary,category:email.category,priority:email.priority,needsReply:email.needsReply}))};}});

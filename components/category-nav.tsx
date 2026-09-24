@@ -7,6 +7,10 @@ import type { Email } from '@/lib/mail';
 
 const SECTION_ICONS:Record<Section,typeof Inbox>={work:BriefcaseBusiness,personal:UserRound,noise:Layers3};
 
+/**
+ * Sidebar category navigation. Clicking a row opens its full section; the separate arrow
+ * controls only whether that section's subcategories are visible.
+ */
 export function CategoryNav({emails,view,onSelect}:{emails:Email[];view:string;onSelect:(view:string)=>void}){
   // Each section tracks its own disclosure state, so expanding one never collapses
   // or expands another, and navigation never changes it.
@@ -25,6 +29,8 @@ export function CategoryNav({emails,view,onSelect}:{emails:Email[];view:string;o
       </div>
     </SidebarMenuItem>
     {SECTIONS.map(section=>{
+      // Counts are derived from the current inbox on every render, so parent and child
+      // totals update immediately after a classification changes.
       const Icon=SECTION_ICONS[section.id];
       const open=expanded.includes(section.id);
       const submenuId=`nav-submenu-${section.id}`;

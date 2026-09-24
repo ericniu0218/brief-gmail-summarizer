@@ -7,14 +7,16 @@ import { rowLabels } from '@/lib/categories';
 
 /** At most two compact labels per row; the conversation panel carries the full set. */
 function rowChips(email:Email,important:boolean){
-  const tags=rowLabels(email).map(text=>({text,important:false}));
-  const chips=important?[{text:'Important',important:true},...tags]:tags.length?tags:[{text:email.label||'Mail',important:false}];
-  return chips.slice(0,2);
+  const tags=rowLabels(email).map(text=>({text,important:false,review:false}));
+  const chips=important?[{text:'Important',important:true,review:false},...tags]:tags.length?tags:[{text:email.label||'Mail',important:false,review:false}];
+  // Awaiting review is a status, not urgency, so it never claims the Important slot.
+  const review=email.classification?.processingStatus==='needs_review';
+  return (review?[{text:'Needs review',important:false,review:true},...chips]:chips).slice(0,2);
 }
 
 function EmailRow({email,onSelect}:{email:Email;onSelect:(email:Email)=>void}){
   const important=isImportantEmail(email);
-  return <article className="email-row"><button className={`avatar ${email.color}`} aria-label={`Read ${email.sender}’s email`} onClick={()=>onSelect(email)}>{email.initials}</button><button className="email-text" onClick={()=>onSelect(email)}><div className="sender-line"><strong>{email.sender}</strong>{email.unread?<span className="unread-dot"/>:null}{rowChips(email,important).map(chip=><span key={chip.text} className={`mail-label${chip.important?' important':''}`}>{chip.text}</span>)}</div><h3>{email.subject}</h3><p>{email.summary}</p></button><div className="email-actions"><time>{email.time}</time>{email.needsReply?<button className="quick-reply" onClick={()=>onSelect(email)}><Sparkles size={13}/>Quick reply</button>:<span className="no-action">No reply needed</span>}</div></article>;
+  return <article className="email-row"><button className={`avatar ${email.color}`} aria-label={`Read ${email.sender}’s email`} onClick={()=>onSelect(email)}>{email.initials}</button><button className="email-text" onClick={()=>onSelect(email)}><div className="sender-line"><strong>{email.sender}</strong>{email.unread?<span className="unread-dot"/>:null}{rowChips(email,important).map(chip=><span key={chip.text} className={`mail-label${chip.important?' important':''}${chip.review?' review':''}`}>{chip.text}</span>)}</div><h3>{email.subject}</h3><p>{email.summary}</p></button><div className="email-actions"><time>{email.time}</time>{email.needsReply?<button className="quick-reply" onClick={()=>onSelect(email)}><Sparkles size={13}/>Quick reply</button>:<span className="no-action">No reply needed</span>}</div></article>;
 }
 
 function FoldedEmailGroup({company,emails,needsReplyCount,onSelect}:{company:string;emails:Email[];needsReplyCount:number;onSelect:(email:Email)=>void}){

@@ -13,6 +13,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 
+/** One-time first-visit choice; the persistent switch remains in Settings & connections. */
 export function ThemePrompt({
   open,
   onChoose,

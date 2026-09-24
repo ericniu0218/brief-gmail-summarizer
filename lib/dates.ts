@@ -1,10 +1,16 @@
 import type { ExtractedDate } from './classification';
 
+/**
+ * Conservative date resolver used by email classification. It supports a deliberately
+ * small set of phrases and marks everything else ambiguous instead of guessing.
+ */
+
 const VAGUE=/\b(soon|asap|as soon as possible|when you can|at your convenience|shortly|sometime|in a bit|no rush)\b/i;
 const WEEKDAYS=['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
 const MONTHS=['january','february','march','april','may','june','july','august','september','october','november','december'];
 
 function iso(year:number,month:number,day:number){
+  // UTC construction plus a round-trip check prevents invalid dates rolling forward.
   const date=new Date(Date.UTC(year,month,day));
   if(date.getUTCFullYear()!==year||date.getUTCMonth()!==month||date.getUTCDate()!==day)return undefined;
   return date.toISOString().slice(0,10);
@@ -31,6 +37,7 @@ export function resolveDate(phrase:string,receivedAt:number,timezone?:string):Ex
   const clock=/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i.exec(text)||/\b(\d{1,2}):(\d{2})\b/.exec(text);
   const zone=/\b(UTC|GMT|[A-Z]{2,4}T)\b/.exec(text)?.[1]||timezone;
 
+  // Try supported forms from most explicit to least explicit.
   let date:string|undefined;
   const isoMatch=/\b(20\d{2})-(\d{2})-(\d{2})\b/.exec(text);
   const monthMatch=new RegExp(`\\b(${MONTHS.join('|')}|${MONTHS.map(m=>m.slice(0,3)).join('|')})\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:,?\\s+(20\\d{2}))?\\b`,'i').exec(text);

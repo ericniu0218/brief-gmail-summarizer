@@ -1,12 +1,19 @@
 import { HttpError, runtime, type Runtime } from './runtime';
 import type { Email } from '@/lib/mail';
 import type { Tag } from '@/lib/categories';
+
+/**
+ * Single boundary around Gemini. It pins the model/prompt version, requests structured
+ * JSON, validates responses, translates provider failures, and exposes narrow email tasks.
+ */
+
 const DEFAULT_GEMINI_MODEL='gemini-3.5-flash-lite';
 const PROMPT_VERSION='2026-09-21-categories';
 function geminiModel(e:Runtime){return (e.GEMINI_MODEL||DEFAULT_GEMINI_MODEL).replace(/^models\//,'');}
 export function analysisVersion(e:Runtime){return `gemini:${geminiModel(e)}:${PROMPT_VERSION}`;}
 type JsonSchema={type?:string;enum?:unknown[];properties?:Record<string,JsonSchema>;required?:string[];additionalProperties?:boolean;items?:JsonSchema;minItems?:number;maxItems?:number;minimum?:number;maximum?:number};
 function matchesSchema(value:unknown,schema:JsonSchema):boolean {
+  // This supports only the JSON Schema features used by this application.
   if(schema.enum&&!schema.enum.some(item=>Object.is(item,value)))return false;
   if(schema.type==='string'&&typeof value!=='string')return false;
   if(schema.type==='boolean'&&typeof value!=='boolean')return false;
@@ -34,6 +41,8 @@ function matchesSchema(value:unknown,schema:JsonSchema):boolean {
 const RETRYABLE_STATUS=new Set([500,503]);
 async function callGemini(instructions:string,input:unknown,schema:object,e:Runtime,attempt=0):Promise<Response> {
   const model=geminiModel(e);
+  // Email text is untrusted data. System instructions isolate it from the application's
+  // rules, while the response schema limits what the provider can return.
   const result=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{
     method:'POST',
     headers:{'x-goog-api-key':e.GEMINI_API_KEY!,'Content-Type':'application/json'},
@@ -45,6 +54,7 @@ async function callGemini(instructions:string,input:unknown,schema:object,e:Runt
     signal:AbortSignal.timeout(60000),
   });
   if(!result.ok&&RETRYABLE_STATUS.has(result.status)&&attempt<2){
+    // Retry brief provider outages with a small exponential delay.
     await new Promise(resolve=>setTimeout(resolve,400*2**attempt));
     return callGemini(instructions,input,schema,e,attempt+1);
   }
@@ -87,6 +97,7 @@ export async function generateRaw(instructions:string,input:unknown,schema:objec
 export async function summarize(emails:Email[],e:Runtime) {
   if(!e.GEMINI_API_KEY)return {emails,ai:false};
   const enriched:Email[]=[];
+  // Bound each request so one inbox cannot create an oversized model prompt.
   for(let start=0;start<emails.length;start+=10){
     const group=emails.slice(start,start+10);
     const result=await generate<{items:{id:string;summary:string;category:Email['category'];tags:Tag[];priority:Email['priority'];needsReply:boolean;label:string}[]}>(
@@ -112,6 +123,7 @@ const toneGuide:Record<string,string>={
   Professional:'Measured and businesslike. Complete sentences, explicit next steps, and a formal greeting and sign-off.',
 };
 export function replyOptions(email:Email,tone:string,variation=0,e=runtime()) {
+  // This only drafts text; sending remains a separate explicit Gmail action.
   return generate<{options:string[]}>(
     'Draft three complete email replies for the user to review, each signed as Alex. Tone: '+tone+'. '+(toneGuide[tone]||toneGuide.Concise)+
     ' Let the tone shape every option, not only the greeting and sign-off: change the sentence structure, length, and word choice to match it.'+

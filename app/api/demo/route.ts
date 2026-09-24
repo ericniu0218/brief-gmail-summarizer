@@ -3,6 +3,8 @@ import { failure, json, runtime, userId } from '@/server/runtime';
 import { demoEmails } from '@/lib/mail';
 const DEMO_CORPUS_VERSION='2';
 function fallback(){return {emails:demoEmails,updated:null,ai:false,hasMore:false};}
+
+/** Provides the sample inbox shown before Gmail is connected. */
 // The sample inbox is fixed, so its AI summaries are computed once per prompt/model
 // version. A short-lived pending row prevents concurrent cold requests from multiplying
 // Gemini usage; those callers receive the deterministic fallback while the cache warms.
@@ -14,6 +16,8 @@ export async function GET(){
     const cacheId=`${analysisVersion(e)}:demo:${DEMO_CORPUS_VERSION}`;
     const cached=await e.DB.prepare('SELECT data, updated FROM demo_digest WHERE id = ?').bind(cacheId).first<{data:string;updated:number}>();
     if(cached){
+      // A completed row is returned immediately. A recent pending row means another
+      // request is already warming the cache, so this caller uses the local fallback.
       const value=JSON.parse(cached.data) as {emails?:unknown};
       if(Array.isArray(value.emails))return json(value);
       if(Date.now()-cached.updated<120000)return json(fallback());

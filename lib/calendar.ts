@@ -1,9 +1,15 @@
 import type { Email } from './mail';
 
+/**
+ * Lightweight calendar helpers for the dashboard. They find date phrases in email text
+ * and turn them into local date keys; they do not create or modify calendar events.
+ */
+
 export function dateKey(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 export function weekDays(today: Date): Date[] {
+  // Convert JavaScript's Sunday-first numbering into a Monday-first dashboard week.
   const start = new Date(today.getFullYear(), today.getMonth(), today.getDate());
   start.setDate(start.getDate() - (start.getDay() + 6) % 7);
   return Array.from({ length: 7 }, (_, index) => new Date(start.getFullYear(), start.getMonth(), start.getDate() + index));
@@ -16,6 +22,8 @@ export function emailDates(email: Email, demoDate?: Date): string[] {
   const anchor = email.receivedAt !== undefined ? new Date(email.receivedAt) : demoDate;
   const validAnchor = anchor && !Number.isNaN(anchor.getTime()) ? anchor : undefined;
   const add = (year: number, month: number, day: number) => {
+    // Dates can silently roll into another month, so compare the parts to reject inputs
+    // such as February 31.
     const date = new Date(year, month, day);
     if (date.getFullYear() === year && date.getMonth() === month && date.getDate() === day) dates.add(dateKey(date));
   };
@@ -48,6 +56,7 @@ export function emailDates(email: Email, demoDate?: Date): string[] {
 }
 
 export function nextEmailEvent(emails: Email[], today: Date, demo = false): { email: Email; date: string } | undefined {
+  // Ignore Noise, keep today or later, then prefer priority mail when dates are equal.
   const current = dateKey(today);
   return emails.filter(email => email.category !== 'noise')
     .flatMap(email => emailDates(email, demo ? today : undefined).filter(date => date >= current).map(date => ({ email, date })))

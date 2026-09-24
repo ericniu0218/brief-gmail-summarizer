@@ -1,6 +1,11 @@
 import { POLICY_VERSION, type Classification, type MeetingState, type Obligation, type ObligationState } from './classification';
 import { resolveDate } from './dates';
 
+/**
+ * Explainable, offline email classifier. It supplies demo behavior and a safe fallback
+ * when the AI provider is unavailable, using fixed patterns rather than learned guesses.
+ */
+
 /** The subset of a normalized message this classifier reads. */
 export type ClassifiableMessage={
   id:string;subject:string;text:string;quoted:string;
@@ -9,6 +14,8 @@ export type ClassifiableMessage={
   contentComplete:boolean;
 };
 
+// Signal patterns are intentionally narrow because false positives can hide or
+// over-prioritize mail.
 const SECURITY=/\b(verification code|security alert|one[- ]time (?:code|password)|two[- ]factor|2fa|password reset|reset your password|new sign[- ]?in|unrecognized login|confirm your identity)\b/i;
 const DEADLINE=/\b(due|deadline|closes?|expires?|no later than|submit by|rsvp by|last day)\b/i;
 const MEETING=/\b(meeting|invite|invitation|call|stand[- ]?up|sync|catch[- ]?up|appointment|zoom|google meet|reschedul\w*|cancel\w*)\b/i;
@@ -27,7 +34,9 @@ const CONFIRMED=/\b(confirmed|see you (?:then|at)|it'?s booked|accepted|locked i
 const COMPLETED=/\b(received (?:it|the|your)|got (?:it|the|your)|thanks[, ]+(?:received|got it)|all set|this is (?:now )?done|completed)\b/i;
 const PROMISE=/\b(i'?ll send|i will send|i'?ll get|will follow up|coming (?:shortly|soon))\b/i;
 const PERSONAL_DOMAIN=/(^|[.@])(family|personal|friends?|gmail|outlook|yahoo|icloud|hotmail)([.@]|$)/i;
-const WORK_DOMAIN=/\.(edu|org|gov)$|@[a-z0-9-]+\.(com|io|co|net)$/i;
+// Only domains that are institutional by definition. A commercial TLD is not evidence
+// of a working relationship, since most bulk mail also comes from .com senders.
+const INSTITUTIONAL=/\.(edu|gov)$/i;
 const BULK_SENDER=/(^|[.@])(no[-_]?reply|newsletter|marketing|promo|offers?|deals?|mailer|campaign|news)([.@]|$)/i;
 
 function firstSentenceWith(text:string,pattern:RegExp){
@@ -59,10 +68,12 @@ export function deterministicClassify(message:ClassifiableMessage,userAddress=''
   // Obligations are read only from what this message itself says.
   const current=`${message.subject}\n${message.text}`;
   const whole=`${current}\n${message.quoted}`;
-  const address=message.from.address.toLowerCase();
+  const address=typeof message.from?.address==='string'?message.from.address.toLowerCase():'';
   const user=userAddress.toLowerCase();
-  const addressedDirectly=!user||message.to.some(party=>party.address.toLowerCase()===user);
-  const onlyCopied=!!user&&!addressedDirectly&&message.cc.some(party=>party.address.toLowerCase()===user);
+  const to=Array.isArray(message.to)?message.to:[];
+  const cc=Array.isArray(message.cc)?message.cc:[];
+  const addressedDirectly=!user||to.some(party=>typeof party?.address==='string'&&party.address.toLowerCase()===user);
+  const onlyCopied=!!user&&!addressedDirectly&&cc.some(party=>typeof party?.address==='string'&&party.address.toLowerCase()===user);
 
   const securityEvent=SECURITY.test(current);
   const research=RESEARCH.test(current)&&!MARKETING_STUDY.test(current);
@@ -70,6 +81,8 @@ export function deterministicClassify(message:ClassifiableMessage,userAddress=''
   const transactional=TRANSACTIONAL.test(current);
   const spamLabel=message.labels.includes('SPAM');
 
+  // Build structured obligations from matching sentences so the interface can explain
+  // what triggered a deadline, meeting, request, or action label.
   const obligations:Obligation[]=[];
   const push=(kind:Obligation['kind'],pattern:RegExp,extra:Partial<Obligation>={})=>{
     const evidence=firstSentenceWith(current,pattern);
@@ -100,11 +113,19 @@ export function deterministicClassify(message:ClassifiableMessage,userAddress=''
   if(ACTION.test(current)&&promotional<2)push('action',ACTION);
 
   const junk=spamLabel||(promotional>=2&&!transactional&&!research&&!securityEvent&&obligations.length===0);
+  // Conflicting promotional signals become uncertain instead of being silently discarded.
   const uncertain=!junk&&promotional>=2;
   // Mail from the user's own organisation is work context even when nothing else says so.
   const sameOrganisation=!!user&&address.split('@')[1]===user.split('@')[1];
-  const context=sameOrganisation||research||(WORK_DOMAIN.test(address)&&!PERSONAL_DOMAIN.test(address))?'work'
-    :PERSONAL_DOMAIN.test(address)?'personal':'unknown';
+  const personalSender=PERSONAL_DOMAIN.test(address);
+  const bulkSender=BULK_SENDER.test(address);
+  // Work needs actual evidence of a working relationship: the user's own organisation,
+  // research content, an account event, or a task this message assigns to the user.
+  // Bulk senders never qualify, so a newsletter is not filed as colleague mail. Anything
+  // else stays unknown and is routed conservatively by whether it carries obligations.
+  const worksWithUser=sameOrganisation||research||securityEvent||
+    (!bulkSender&&!personalSender&&(INSTITUTIONAL.test(address)||obligations.some(o=>o.ownerIsUser===true)));
+  const context=worksWithUser?'work':personalSender?'personal':'unknown';
 
   const reasons:string[]=[];
   if(securityEvent)reasons.push('Contains an account-security event.');

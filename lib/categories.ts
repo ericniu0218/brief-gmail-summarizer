@@ -1,6 +1,11 @@
 import type { Email } from './mail';
 import { hasImportantSignal } from './inbox-priority';
 
+/**
+ * Shared navigation vocabulary and deterministic fallback rules. The sidebar, counts,
+ * filters, and demo inbox all use these helpers so category names mean the same thing.
+ */
+
 export type Section = 'work' | 'personal' | 'noise';
 export type Tag = 'deadlines' | 'meetings' | 'requests' | 'actions' | 'research' | 'low-priority' | 'junk';
 
@@ -27,6 +32,8 @@ const TAG_NAMES=new Map<Tag,string>(SECTIONS.flatMap(s=>s.tags.map(t=>[t.id,t.na
 export function tagName(tag:Tag){return TAG_NAMES.get(tag)||tag;}
 export function sectionName(section:Section){return SECTIONS.find(s=>s.id===section)?.name||section;}
 
+// These patterns support the offline/demo fallback. Connected AI classifications remain
+// authoritative when available.
 const DEADLINE=/\b(deadline|due (?:date|by|on|today|tomorrow)|due\b|by (?:tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}\s*(?:am|pm))|closes? (?:on|this|friday|monday|tomorrow)|expires?|last day|submit(?:ted)? by|no later than|rsvp by|payment due|invoice due|renew(?:al)? by)\b/i;
 const MEETING=/\b(meeting|invite|invitation|calendar|call (?:tomorrow|today|on|at)|reschedul\w*|cancel(?:led|ling)? (?:the )?(?:meeting|call)|stand[- ]?up|sync|catch[- ]?up|are you (?:free|available)|book a time|zoom|google meet|teams link|appointment|conference call)\b/i;
 const REQUEST=/\b(approval|approve|sign(?:ature|ed)?\b|please (?:confirm|review|approve|advise|respond)|need(?:s)? your (?:input|decision|approval|signature|response)|could you (?:review|approve|confirm|sign|let me know)|can you (?:review|approve|confirm|sign|join)|waiting on your|decision needed|response (?:needed|required))\b/i;
@@ -106,11 +113,14 @@ export function parseView(view:string):{section?:Section;tag?:Tag}{
 }
 
 /** Combined parent views keep section mail that matches no subcategory. */
-export function selectEmails(emails:Email[],view:string):Email[]{
-  if(view==='inbox')return emails;
+export function selectEmails(emails:ReadonlyArray<Email|null|undefined>,view:string):Email[]{
+  // Snapshots normally contain only complete records, but this read boundary discards
+  // nullish entries before either returning Inbox or evaluating category properties.
+  const present=emails.filter((email):email is Email=>email!=null);
+  if(view==='inbox')return present;
   const {section,tag}=parseView(view);
-  if(!section)return emails;
-  const inSection=emails.filter(email=>email.category===section);
+  if(!section)return present;
+  const inSection=present.filter(email=>email.category===section);
   if(!tag)return inSection;
   return inSection.filter(email=>emailTags(email).includes(tag));
 }

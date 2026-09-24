@@ -1,4 +1,5 @@
 import type { Email } from './mail';
+import { isOverviewMessage } from './classification';
 
 const SECURITY_OR_ACCESS = /\b(verification code|verify (?:your|this)|security alert|security code|one[- ]time (?:code|password)|otp|two[- ]factor|2fa|password reset|reset your password|new (?:sign[- ]in|login|device)|unrecognized (?:sign[- ]in|login)|confirm your (?:email|account|identity)|activate your account)\b/i;
 const DIRECT_ACTION = /\b(action required|approval (?:needed|required)|response (?:needed|required)|complete (?:your|the) setup|finish (?:your|the) setup|setup incomplete|due (?:today|tomorrow)|deadline|urgent)\b/i;
@@ -24,7 +25,14 @@ export function hasImportantSignal(subject:string,content:string) {
   return SECURITY_OR_ACCESS.test(text)||DIRECT_ACTION.test(text);
 }
 
-export function isImportantEmail(email:Email) {
+/**
+ * Messages carrying a structured classification are judged by the shared policy, so the
+ * dashboard cannot hide one just because the classifier's original guess was Junk.
+ * The keyword rule remains only for messages that have no classification, such as the
+ * sample workspace and snapshots predating structured results.
+ */
+export function isImportantEmail(email:Email,now=Date.now()) {
+  if(email.classification)return isOverviewMessage(email.classification,now);
   return email.category!=='noise'&&(email.needsReply||email.priority==='high'||hasImportantSignal(email.subject,`${email.summary} ${email.body}`));
 }
 

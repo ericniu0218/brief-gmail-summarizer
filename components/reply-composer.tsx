@@ -4,6 +4,11 @@ import { Sparkles, Send, FilePenLine, RefreshCw, ExternalLink, Wand2, Check, Che
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { api } from '@/hooks/use-inbox';
 import type { Email } from '@/lib/mail';
+
+/**
+ * Review-first reply workflow. Users may generate or polish text, edit it locally, then
+ * explicitly save a Gmail draft or send the final wording.
+ */
 export function ReplyComposer({email,demo,aiReady,onSent}:{email:Email;demo:boolean;aiReady:boolean;onSent:()=>void}){
   const [tone,setTone]=useState('Concise');
   const [text,setText]=useState('');
@@ -18,6 +23,8 @@ export function ReplyComposer({email,demo,aiReady,onSent}:{email:Email;demo:bool
   const [sent,setSent]=useState('');
   function endpoint(){return demo?'/api/suggest':'/api/reply';}
   async function generate(){
+    // Regeneration increments a bounded variation number so the server can request a
+    // meaningfully different batch while the current draft remains under user control.
     setBusy('options');setMessage('');setError(false);
     const attempt=options.length?variation+1:0;
     try{
@@ -39,6 +46,8 @@ export function ReplyComposer({email,demo,aiReady,onSent}:{email:Email;demo:bool
     finally{setBusy('');}
   }
   async function complete(action:'send'|'draft'){
+    // Demo mode exercises the interface locally. Connected mode is the only branch that
+    // calls the Gmail-changing reply endpoint.
     setBusy(action);setMessage('');setError(false);
     try{
       if(demo){setMessage(action==='send'?'Demo reply complete. No email was sent.':'Demo draft saved for this conversation.');if(action==='send'){setSent(text);onSent();}}

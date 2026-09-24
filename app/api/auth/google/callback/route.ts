@@ -1,4 +1,9 @@
 import { appUrl, configured, encrypt, googleClient, HttpError, notConfigured, runtime, userId } from '@/server/runtime';
+
+/**
+ * Completes Gmail OAuth: consume the one-time state, exchange the authorization code,
+ * verify the granted mailbox, encrypt the refresh token, and save the connection.
+ */
 /** Google's token errors that a retry cannot fix are almost always site or Cloud Console configuration. */
 function tokenError(error:unknown,callback:string){
   if(error==='invalid_client'||error==='unauthorized_client')return 'Google rejected this site’s OAuth client. Check that GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the site settings belong to the same Web application client, then redeploy.';
@@ -15,11 +20,14 @@ export async function GET(request:Request){
     if(url.searchParams.has('error'))throw new HttpError(400,'Google connection was cancelled.');
     const state=url.searchParams.get('state'); const code=url.searchParams.get('code');
     if(!state||!code)throw new HttpError(400,'The Google connection could not be completed.');
+    // Deleting and returning the row in one statement makes every state value single-use.
     const saved=await e.DB.prepare('DELETE FROM oauth_states WHERE state = ? AND user_id = ? AND expires > ? RETURNING verifier').bind(state,user,Date.now()).first<{verifier:string}>();
     if(!saved)throw new HttpError(400,'This connection link expired. Please try again.');
     const response=await fetch('https://oauth2.googleapis.com/token',{method:'POST',body:new URLSearchParams({code,...googleClient(e),redirect_uri:origin+'/api/auth/google/callback',grant_type:'authorization_code',code_verifier:saved.verifier}),signal:AbortSignal.timeout(20000)});
     if(!response.ok)throw new HttpError(400,tokenError((await response.json().catch(()=>null) as {error?:unknown}|null)?.error,origin+'/api/auth/google/callback'));
     const token=await response.json() as {access_token:string;refresh_token?:string;scope?:string};
+    // Brief needs offline access for scheduled refreshes and verifies every required Gmail
+    // permission before storing the long-lived credential.
     if(!token.refresh_token)throw new HttpError(400,'Offline Gmail access was not granted. Please reconnect and allow access.');
     const scopes=token.scope||'';
     if(!['gmail.readonly','gmail.send','gmail.compose'].every(scope=>scopes.includes('/auth/'+scope)))throw new HttpError(400,'Please allow the requested Gmail permissions to connect Brief.');

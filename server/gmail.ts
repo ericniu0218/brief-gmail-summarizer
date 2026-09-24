@@ -1,6 +1,6 @@
 import type { Email } from '@/lib/mail';
 import { deterministicClassify } from '@/lib/deterministic';
-import { derivePriority, effectiveCategories, type Classification } from '@/lib/classification';
+import { applyPolicy, type Classification } from '@/lib/classification';
 import { normalizeMessage, type GmailMessage, type NormalizedMessage } from './message';
 import { decrypt, googleClient, HttpError, runtime, type Runtime } from './runtime';
 export type Connection = { user_id:string; email:string; token:string; last_sync:number|null; sync_lock:number; error:string|null };
@@ -28,9 +28,9 @@ export type { GmailMessage } from './message';
  * Build the dashboard's email shape from a normalized message and its classification.
  * Category, tags and priority all come from the one policy in lib/classification.
  */
-export function emailFrom(n:NormalizedMessage,classification:Classification,now=Date.now()):Email {
-  const {category,tags}=effectiveCategories(classification);
-  const priority=derivePriority(classification,now);
+export function emailFrom(n:NormalizedMessage,proposed:Classification,now=Date.now()):Email {
+  // One policy decides the effective classification and everything derived from it.
+  const {classification,category,tags,priority,label}=applyPolicy(proposed,now);
   const sender=n.from.name||n.from.address.split('@')[0]||'Unknown sender';
   const list=n.headers['list-unsubscribe']||'';
   const unsubscribe=list.match(/<(https:\/\/[^>]+)>/i)?.[1];
@@ -46,7 +46,7 @@ export function emailFrom(n:NormalizedMessage,classification:Classification,now=
     needsReply:classification.replyRequired,
     unread:n.labels.includes('UNREAD'),
     color:['purple','blue','rose','green'][sender.length%4],
-    label:priority==='high'?'Important':category==='noise'?'Junk':category==='work'?'Work':'Personal',
+    label,
     classification,
     contentComplete:n.contentComplete,incompleteReasons:n.incompleteReasons,
     messageId:n.messageId,unsubscribe,

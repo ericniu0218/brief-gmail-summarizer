@@ -304,3 +304,10 @@
 .team-shell :focus-visible{outline:2px solid #427d5d;outline-offset:3px}.team-shell button:disabled{opacity:.5;cursor:not-allowed}
 @media(max-width:1000px){.team-results{grid-template-columns:1fr}.team-layout{grid-template-columns:220px minmax(0,1fr)}.team-stats{gap:14px}.team-topbar{padding:16px 24px}}
 @media(max-width:700px){.team-layout{grid-template-columns:1fr}.team-sidebar{border-right:0;border-bottom:1px solid var(--border);padding:20px}.team-sidebar .team-form.compact{display:flex;flex-wrap:wrap;align-items:center;margin-top:14px;padding-top:14px}.team-sidebar .team-form.compact label{width:100%}.team-sidebar .team-form.compact input{flex:1;min-width:160px}.team-sidebar .team-form.compact button{width:auto}.team-sidebar-note{display:none}.team-topbar{gap:20px;flex-wrap:wrap}.team-cloud{display:none}.team-main{padding:28px 20px}.team-heading{align-items:flex-start}.team-heading>button{padding:8px}.team-tabs{gap:2px}.team-tabs [data-slot=tabs-trigger]{padding:8px}.team-panel{padding:20px}.team-stats>span:last-child{width:100%}}
+.mail-label.review{background:#fdf6e8;color:#96813f;border:1px solid #f0e3c8}
+.classification-review{display:flex;gap:7px;align-items:flex-start;flex-wrap:wrap;font-size:12px;line-height:1.7;color:#7c6a3c;background:#fdf6e8;border:1px solid #f0e3c8;border-radius:8px;padding:10px 12px;margin:0}
+.classification-review svg{margin-top:2px;flex-shrink:0}
+.classification-proposed{display:block;width:100%;font-size:11px;color:#9a8a63;margin-top:5px}
+.dark .mail-label.review{background:#332c1d;color:#d8c48e;border-color:#4a3f27}
+.dark .classification-review{background:#332c1d;border-color:#4a3f27;color:#d8c48e}
+.dark .classification-proposed{color:#b5a67e}

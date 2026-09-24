@@ -1,6 +1,6 @@
 import { failure, inputObject, json, mutation, runtime, userId } from '@/server/runtime';
 import { applyOverride, clearOverride, saveOverride, type Override } from '@/server/overrides';
-import { effectiveCategories, derivePriority } from '@/lib/classification';
+import { applyPolicy } from '@/lib/classification';
 import type { Section, Tag } from '@/lib/categories';
 import type { Snapshot } from '@/server/sync';
 
@@ -37,11 +37,8 @@ export async function POST(request:Request){
     const overrides=await (await import('@/server/overrides')).loadOverrides(user,e);
     snapshot.emails=snapshot.emails.map(email=>{
       if(email.id!==messageId||!email.classification)return email;
-      const classification=applyOverride(email.classification,overrides.get(messageId));
-      const {category,tags}=effectiveCategories(classification);
-      const priority=derivePriority(classification,now);
-      return {...email,classification,category,tags,priority,
-        label:priority==='high'?'Important':category==='noise'?'Junk':category==='work'?'Work':'Personal'};
+      const {classification,category,tags,priority,label}=applyPolicy(applyOverride(email.classification,overrides.get(messageId)),now);
+      return {...email,classification,category,tags,priority,label};
     });
     await e.DB.prepare('UPDATE snapshots SET data=? WHERE user_id=?').bind(JSON.stringify(snapshot),user).run();
     return json({updated:true,emails:snapshot.emails});

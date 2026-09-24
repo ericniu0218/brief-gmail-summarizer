@@ -17,14 +17,25 @@ export type Override={
 
 type Row={message_id:string;category:string|null;add_tags:string;remove_tags:string;not_junk:number;obligation_state:string|null;source:string;created:number};
 
+const SECTIONS:Section[]=['work','personal','noise'];
+const TAGS:Tag[]=['deadlines','meetings','requests','actions','research','low-priority','junk'];
+const STATES:ObligationState[]=['open','completed','cancelled','superseded','unknown'];
+
+function parsedTags(value:string):Tag[]{
+  try{
+    const parsed:unknown=JSON.parse(value);
+    return Array.isArray(parsed)?parsed.filter((tag):tag is Tag=>TAGS.includes(tag as Tag)):[];
+  }catch{return [];}
+}
+
 function toOverride(row:Row):Override{
   return {
     messageId:row.message_id,
-    category:(row.category||undefined) as Section|undefined,
-    addTags:JSON.parse(row.add_tags) as Tag[],
-    removeTags:JSON.parse(row.remove_tags) as Tag[],
+    category:SECTIONS.includes(row.category as Section)?row.category as Section:undefined,
+    addTags:parsedTags(row.add_tags),
+    removeTags:parsedTags(row.remove_tags),
     notJunk:!!row.not_junk,
-    obligationState:(row.obligation_state||undefined) as ObligationState|undefined,
+    obligationState:STATES.includes(row.obligation_state as ObligationState)?row.obligation_state as ObligationState:undefined,
     source:row.source==='rule'?'rule':'message',
     createdAt:row.created,
   };
@@ -54,17 +65,27 @@ export async function clearOverride(user:string,messageId:string,e:Runtime){
  */
 export function applyOverride(classification:Classification,override?:Override):Classification{
   if(!override)return classification;
-  const next:Classification={...classification,override:{source:override.source,addTags:override.addTags,removeTags:override.removeTags}};
-  if(override.notJunk&&next.disposition==='junk')next.disposition='useful';
+  // Corrections apply to what the classifier actually proposed, not to a protective
+  // state the conflict policy added, so re-running a sync cannot compound the two.
+  const proposed=classification.proposedDisposition;
+  const base:Classification=proposed
+    ?{...classification,disposition:proposed,proposedDisposition:undefined,reviewReason:undefined}
+    :classification;
+
+  const next:Classification={...base,override:{source:override.source,category:override.category,addTags:override.addTags,removeTags:override.removeTags}};
+  // Removing Junk is a disposition correction, not a request for a tagless Noise item.
+  const removesJunk=override.removeTags.includes('junk');
+  if((override.notJunk||removesJunk)&&next.disposition==='junk')next.disposition='useful';
   if(override.category==='noise')next.disposition='junk';
   else if(override.category){
     next.context=override.category;
     if(next.disposition==='junk')next.disposition='useful';
   }
-  if(override.obligationState)next.obligations=next.obligations.map(o=>({...o,state:override.obligationState!}));
-  // A correction resolves the message: it is no longer awaiting review.
-  next.processingStatus='classified';
+  if(override.obligationState)next.obligations=(Array.isArray(next.obligations)?next.obligations:[]).map(o=>({...o,state:override.obligationState!}));
   next.reason=override.source==='rule'?'Set by one of your rules.':'You corrected this message.';
+  // Only a correction that speaks to the disposition settles the message. Adding an
+  // unrelated tag must not be read as permission to resolve a Junk conflict.
+  if(override.category||override.notJunk||removesJunk||override.obligationState)next.processingStatus='classified';
   return next;
 }
 

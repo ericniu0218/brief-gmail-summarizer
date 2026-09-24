@@ -1,5 +1,11 @@
 import { decode } from './runtime';
 
+/**
+ * Gmail-to-application normalization. This module turns nested MIME payloads into a
+ * bounded, inert record for classification while preserving quoted history, signatures,
+ * calendar metadata, and indicators for content that could not be read.
+ */
+
 export type Party={name:string;address:string};
 export type Attachment={filename:string;mimeType:string;size:number};
 export type CalendarInvite={method?:string;summary?:string;start?:string;end?:string;status?:string;uid?:string};
@@ -28,6 +34,7 @@ type Part={mimeType?:string;filename?:string;body?:{data?:string;size?:number;at
 export type GmailMessage={id:string;threadId:string;snippet:string;internalDate:string;labelIds:string[];payload:Part};
 
 const TEXT_LIMIT=20000;
+const MAX_MIME_DEPTH=20;
 
 const ENTITIES:Record<string,string>={amp:'&',lt:'<',gt:'>',quot:'"',apos:"'",nbsp:' ',mdash:'—',ndash:'–',hellip:'…',rsquo:'’',lsquo:'‘',ldquo:'“',rdquo:'”'};
 
@@ -120,21 +127,28 @@ export function parseParties(value:string):Party[]{
   }).filter(party=>party.address.includes('@'));
 }
 
-function collect(part:Part,into:{text:string[];html:string[];attachments:Attachment[];calendar:string[];deferred:boolean}){
-  const mime=(part.mimeType||'').toLowerCase();
-  const isAttachment=!!part.filename;
+function collect(part:Part|null|undefined,into:{text:string[];html:string[];attachments:Attachment[];calendar:string[];deferred:boolean;depthLimited:boolean;malformed:boolean},depth=0){
+  // Walk the MIME tree once, separating readable body variants from metadata-only
+  // attachments. Attachment bytes are deliberately never decoded here.
+  if(depth>MAX_MIME_DEPTH){into.depthLimited=true;return;}
+  if(!part||typeof part!=='object'){into.malformed=true;return;}
+  const mime=typeof part.mimeType==='string'?part.mimeType.toLowerCase():'';
+  const isAttachment=typeof part.filename==='string'&&!!part.filename;
   if(isAttachment){
     into.attachments.push({filename:part.filename!,mimeType:mime||'application/octet-stream',size:part.body?.size||0});
-  }else if(part.body?.data){
+  }else if(typeof part.body?.data==='string'&&part.body.data){
     const decoded=new TextDecoder().decode(decode(part.body.data));
     if(mime==='text/plain')into.text.push(decoded);
     else if(mime==='text/html')into.html.push(decoded);
     else if(mime==='text/calendar'||mime==='application/ics')into.calendar.push(decoded);
+  }else if(part.body?.data!==undefined&&typeof part.body.data!=='string'){
+    into.malformed=true;
   }else if(part.body?.attachmentId&&!isAttachment&&(mime==='text/plain'||mime==='text/html')){
     // Gmail stores oversized bodies separately; this needs a second fetch to read.
     into.deferred=true;
   }
-  for(const child of part.parts||[])collect(child,into);
+  if(part.parts!==undefined&&!Array.isArray(part.parts))into.malformed=true;
+  for(const child of Array.isArray(part.parts)?part.parts:[])collect(child,into,depth+1);
 }
 
 function icsValue(ics:string,field:string){
@@ -143,6 +157,8 @@ function icsValue(ics:string,field:string){
 }
 
 export function parseCalendar(ics:string):CalendarInvite|undefined{
+  // Extract only fields the sorter needs. This is intentionally not a general iCalendar
+  // parser; folded lines are handled by `icsValue` and all other properties are ignored.
   if(!/BEGIN:VEVENT/i.test(ics))return undefined;
   return {
     method:icsValue(ics,'METHOD'),summary:icsValue(ics,'SUMMARY'),
@@ -152,18 +168,31 @@ export function parseCalendar(ics:string):CalendarInvite|undefined{
 }
 
 export function normalizeMessage(m:GmailMessage):NormalizedMessage{
+  // 1. Read headers and partition the MIME tree into its useful content types.
   const headers:Record<string,string>={};
-  for(const header of m.payload.headers||[])headers[header.name.toLowerCase()]=header.value;
-  const found={text:[] as string[],html:[] as string[],attachments:[] as Attachment[],calendar:[] as string[],deferred:false};
-  collect(m.payload,found);
+  const found={text:[] as string[],html:[] as string[],attachments:[] as Attachment[],calendar:[] as string[],deferred:false,depthLimited:false,malformed:false};
+  const payload=m.payload&&typeof m.payload==='object'?m.payload:undefined;
+  if(!payload)found.malformed=true;
+  if(payload?.headers!==undefined&&!Array.isArray(payload.headers))found.malformed=true;
+  for(const header of Array.isArray(payload?.headers)?payload.headers:[]){
+    if(!header||typeof header.name!=='string'||typeof header.value!=='string'){found.malformed=true;continue;}
+    headers[header.name.toLowerCase()]=header.value;
+  }
+  collect(payload,found);
 
+  // 2. Prefer plain text, safely reduce HTML when needed, and record every reason the
+  // normalized content is incomplete instead of silently treating a snippet as complete.
   const incompleteReasons:string[]=[];
   const plain=found.text.join('\n').trim();
   const htmlOnly=!plain&&found.html.length>0;
   let raw=plain||(found.html.length?htmlToText(found.html.join('\n')):'');
   if(!raw){raw=m.snippet||'';if(raw)incompleteReasons.push('only-snippet-available');}
   if(found.deferred)incompleteReasons.push('body-stored-separately-by-gmail');
+  if(found.depthLimited)incompleteReasons.push('mime-depth-limit');
+  if(found.malformed)incompleteReasons.push('malformed-message-structure');
 
+  // 3. Separate newly written text from old thread context and signatures, then enforce
+  // independent size limits so quoted history cannot crowd out the current message.
   const {current,quoted}=splitQuoted(raw);
   const {body,signature}=splitSignature(current);
   let text=body;
@@ -172,8 +201,14 @@ export function normalizeMessage(m:GmailMessage):NormalizedMessage{
   if(quotedText.length>TEXT_LIMIT){quotedText=quotedText.slice(0,TEXT_LIMIT);incompleteReasons.push('quoted-text-truncated');}
   if(found.attachments.length)incompleteReasons.push('attachments-not-read');
 
+  // 4. Assemble the stable record consumed by classification and inbox rendering.
   const receivedAt=Number(m.internalDate);
-  const from=parseParties(headers.from||'')[0]||{name:'Unknown sender',address:''};
+  // Some automated mail omits From but still supplies Sender or Return-Path. The final
+  // identifier is deliberately unique so unrelated unattributed mail cannot share a mute.
+  const from=parseParties(headers.from||'')[0]
+    ||parseParties(headers.sender||'')[0]
+    ||parseParties(headers['return-path']||'')[0]
+    ||{name:'Unknown sender',address:`unattributed:${m.id}`};
   return {
     id:m.id,threadId:m.threadId,messageId:headers['message-id']||'',
     receivedAt:Number.isFinite(receivedAt)?receivedAt:Date.now(),

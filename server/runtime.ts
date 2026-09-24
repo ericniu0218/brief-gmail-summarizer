@@ -1,5 +1,11 @@
 import { env } from 'cloudflare:workers';
 import { chatGPTSignInPath, getChatGPTUser } from '@/app/chatgpt-auth';
+
+/**
+ * Shared server boundary for environment bindings, authenticated identity, safe API
+ * responses, request-origin checks, and encryption of stored Gmail credentials.
+ */
+
 export type Runtime = {
   DB: D1Database; GOOGLE_CLIENT_ID?: string; GOOGLE_CLIENT_SECRET?: string;
   TOKEN_ENCRYPTION_KEY?: string; GEMINI_API_KEY?: string; GEMINI_MODEL?: string; APP_URL?: string; AGENT_CRON_SECRET?: string;
@@ -16,6 +22,7 @@ export async function userId() {
   return user.userId;
 }
 export function mutation(request: Request) {
+  // State-changing browser requests must originate from this application.
   const origin = request.headers.get('origin');
   const expected = appUrl() || new URL(request.url).origin;
   if (!origin || origin !== expected) throw new HttpError(403, 'Please use this action from your dashboard.');
@@ -27,6 +34,7 @@ export async function inputObject(request:Request):Promise<Record<string,unknown
   return value as Record<string,unknown>;
 }
 export function json(data: unknown, status=200) {
+  // Mailbox and workspace data must not be cached by shared browsers or proxies.
   return Response.json(data, {status, headers: {'Cache-Control':'private, no-store'}});
 }
 export function failure(error: unknown) {
@@ -67,6 +75,8 @@ async function key(e: Runtime) {
   return crypto.subtle.importKey('raw', decode(e.TOKEN_ENCRYPTION_KEY.trim()), 'AES-GCM', false, ['encrypt','decrypt']);
 }
 export async function encrypt(value:string,user:string,e=runtime()) {
+  // A fresh IV protects each token. Binding the ciphertext to the user ID prevents an
+  // encrypted token from being copied to another account.
   const iv=crypto.getRandomValues(new Uint8Array(12));
   const encrypted=await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:new TextEncoder().encode(user)},await key(e),new TextEncoder().encode(value));
   return `${encode(iv)}.${encode(new Uint8Array(encrypted))}`;

@@ -5,9 +5,11 @@ import { ArrowUpRight, CalendarDays } from 'lucide-react';
 import type { Email } from '@/lib/mail';
 import { nextEmailEvent } from '@/lib/calendar';
 
+/** Shows the earliest future date found in non-Noise email. */
 export function NextEvent({ emails, demo, onSelect }: { emails: Email[]; demo: boolean; onSelect: (email: Email) => void }) {
   const [now, setNow] = useState<Date | null>(null);
   useEffect(() => {
+    // Time is initialized in the browser to avoid server/client timezone disagreement.
     const update = () => setNow(new Date());
     const initial = window.setTimeout(update, 0);
     const timer = window.setInterval(update, 60000);

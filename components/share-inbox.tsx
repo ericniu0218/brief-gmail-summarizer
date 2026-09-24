@@ -18,6 +18,11 @@ import { WorkspaceClient } from '@/lib/workspaces/client';
 import type { ArtifactInput, Workspace } from '@/lib/workspaces/contracts';
 import type { Email } from '@/lib/mail';
 const api = new WorkspaceClient();
+
+/**
+ * Preview-before-publish flow for sharing selected summaries with a team. The server
+ * rebuilds the preview from the private snapshot; the browser never submits email bodies.
+ */
 export function ShareInbox({
   emails,
   accountId,
@@ -38,6 +43,7 @@ export function ShareInbox({
   const [busy, setBusy] = useState(false);
   const key = useRef('');
   useEffect(() => {
+    // Only editor and owner workspaces can receive a new shared artifact.
     if (!open) return;
     let cancelled = false;
     void api
@@ -67,6 +73,8 @@ export function ShareInbox({
     setBusy(true);
     setNotice('');
     try {
+      // Preview and publish share one idempotency key. The server also requires the preview
+      // hash, so a changed mailbox cannot be published without another review.
       if (!publish) key.current = crypto.randomUUID();
       const result = await api.request<{
         preview: ArtifactInput;

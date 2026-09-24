@@ -7,6 +7,12 @@ import {
 import { canonical, hash, readBody } from '@/server/workspaces/validation';
 import { compressText, foldCorpus } from '@/server/workspaces/processors';
 import { gmailPreview } from '@/server/workspaces/gmail-adapter';
+
+/**
+ * Versioned HTTP router for shared workspaces. It resolves a human or integration actor,
+ * checks browser mutation origins, then delegates authorization and persistence to
+ * `WorkspaceStore`.
+ */
 export const dynamic = 'force-dynamic';
 
 async function handle(request: Request) {
@@ -15,6 +21,8 @@ async function handle(request: Request) {
     const db = runtime().DB;
     const authorization = request.headers.get('authorization');
     let actor;
+    // Bearer tokens identify server integrations. Requests without one use the verified
+    // signed-in human supplied by the hosting dispatcher.
     if (authorization !== null) {
       if (!authorization.startsWith('Bearer '))
         throw new HttpError(401, 'Use Bearer authentication.');
@@ -50,6 +58,7 @@ async function handle(request: Request) {
     const key = request.headers.get('idempotency-key');
     const [root, ws, resource, id, action] = path;
     const body = () => readBody(request);
+    // Route matching stays explicit so every endpoint has a visible method and permission.
     let result: unknown;
     let status = 200;
     if (root === 'workspaces' && path.length === 1) {
@@ -118,6 +127,8 @@ async function handle(request: Request) {
         const data = await body();
         const preview = await gmailPreview(db, actor.id, data);
         const previewHash = await hash(canonical(preview));
+        // Publishing must match the exact preview the user reviewed. If the inbox changed,
+        // the user receives a new preview instead of sharing different text silently.
         if (data.publish === true) {
           if (data.previewHash !== previewHash)
             throw new HttpError(
