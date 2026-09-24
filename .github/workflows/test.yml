@@ -33,13 +33,13 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
-      # Scoped to hand-written code on purpose. A repo-wide `npm run lint`
-      # currently reports errors in components/ui/** (generated shadcn
-      # components) and tests/critical.test.ts, which is why the README only
-      # claims "affected-file linting" passes. Widen this list — ideally to
-      # plain `npm run lint` — once that backlog is cleared.
+      # Repo-wide. Generated shadcn components under components/ui/** are declared in
+      # .oxlintrc.json's ignorePatterns, because hand-fixes there are lost the next time
+      # the CLI regenerates them. Their 18 remaining findings are jsx-a11y and style nits
+      # inside that vendored code; `tsc --noEmit` above still typechecks it, so the
+      # application code that imports it is not exempt from correctness checks.
       - name: Lint
-        run: npx oxlint app server lib db worker.ts
+        run: npm run lint
 
       - name: Run tests
         run: node scripts/test.mjs

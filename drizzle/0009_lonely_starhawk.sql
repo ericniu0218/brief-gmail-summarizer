@@ -1,0 +1,1 @@
+ALTER TABLE `mailbox_messages` ADD `replied` integer DEFAULT 0 NOT NULL;

@@ -3,8 +3,8 @@ import { useState } from 'react';
 import { Info, Quote, RotateCcw, ShieldQuestion } from 'lucide-react';
 import type { Email } from '@/lib/mail';
 import { SECTIONS, sectionName, tagName, type Section, type Tag } from '@/lib/categories';
-import { appliesToUser, isOverdue, isResolved, reviewExplanation } from '@/lib/classification';
-import { api } from '@/hooks/use-inbox';
+import { appliesToUser, isOverdue, isResolved, obligationCorrectionKey, reviewExplanation } from '@/lib/classification';
+import { api, ApiError } from '@/hooks/use-inbox';
 
 const CORRECTABLE_TAGS:Tag[]=['deadlines','meetings','requests','actions','research','low-priority'];
 
@@ -12,22 +12,37 @@ const CORRECTABLE_TAGS:Tag[]=['deadlines','meetings','requests','actions','resea
  * Full explanation for one message: why it landed where it did, the evidence behind each
  * obligation, and the controls to correct it. Row chips stay compact; detail lives here.
  */
-export function ClassificationDetail({email,demo,onApplied}:{email:Email;demo:boolean;onApplied:(emails:Email[])=>void}){
+export function ClassificationDetail({email,demo,onApplied}:{email:Email;demo:boolean;onApplied:(email:Email)=>void}){
   const [open,setOpen]=useState(false);
   const [busy,setBusy]=useState(false);
   const [message,setMessage]=useState('');
   const [now]=useState(()=>Date.now());
   const classification=email.classification;
   const tags=email.tags||[];
+  const manual=email.manualCorrection;
 
-  async function correct(body:Record<string,unknown>){
+  async function correct(action:Record<string,unknown>){
     if(demo){setMessage('Corrections apply to a connected mailbox. This is the sample workspace.');return;}
     setBusy(true);
     try{
-      const result=await api<{updated:boolean;emails?:Email[]}>('/api/classification',{messageId:email.id,...body});
-      if(result.emails)onApplied(result.emails);
-      setMessage('Saved. This correction survives future syncs.');
-    }catch(error){setMessage(error instanceof Error?error.message:'Could not save that correction.');}
+      const result=await api<{updated:boolean;email?:Email}>('/api/classification',{
+        messageId:email.id,accountId:email.accountId,expectedRevision:email.correctionRevision||0,
+        expectedSenderRevision:email.senderRuleRevision||0,action,
+      });
+      if(result.email)onApplied(result.email);
+      setMessage(action.type==='reset-all'?'Automatic classification restored.':'Saved. This correction survives future syncs.');
+    }catch(error){
+      // A conflict means another tab or refresh has newer state. Reload just this account
+      // before asking the user to repeat the action, instead of overwriting that state.
+      if(error instanceof ApiError&&error.status===409&&email.accountId){
+        try{
+          const latest=await api<{emails:Email[]}>(`/api/mailbox?accountId=${encodeURIComponent(email.accountId)}`);
+          const match=latest.emails.find(item=>item.id===email.id&&item.accountId===email.accountId);
+          if(match)onApplied(match);
+        }catch{/* Keep the original conflict message when the reload also fails. */}
+      }
+      setMessage(error instanceof Error?error.message:'Could not save that correction.');
+    }
     finally{setBusy(false);}
   }
 
@@ -38,13 +53,14 @@ export function ClassificationDetail({email,demo,onApplied}:{email:Email;demo:bo
       <p>{classification?.reason||'This message has not been classified yet.'}</p>
     </div>
     {classification&&reviewExplanation(classification)&&<p className="classification-review"><ShieldQuestion size={14}/> {reviewExplanation(classification)}{classification.proposedDisposition==='junk'&&<span className="classification-proposed">Automatic prediction was Junk.</span>}</p>}
+    {email.manuallyCorrected&&<p className="classification-proposed">Manual corrections are active for this message.</p>}
     {classification?.uncertainty&&classification.uncertainty!==classification.reviewReason&&<p className="classification-uncertain"><ShieldQuestion size={14}/> {classification.uncertainty}</p>}
     {email.incompleteReasons?.length?<p className="classification-uncertain"><ShieldQuestion size={14}/> Content was incomplete: {email.incompleteReasons.join(', ').replaceAll('-',' ')}.</p>:null}
     {obligations.length>0&&<ul className="obligation-list">
       {obligations.map(obligation=>{const overdue=isOverdue(obligation,now);return <li key={obligation.id} className={isResolved(obligation)?'resolved':undefined}>
         <div className="obligation-head">
           <strong>{tagName(({deadline:'deadlines',meeting:'meetings',request:'requests',action:'actions'} as const)[obligation.kind])}</strong>
-          <span className="obligation-state">{overdue?'overdue':obligation.meetingState&&obligation.kind==='meeting'?obligation.meetingState:obligation.state}</span>
+          <span className="obligation-state">{overdue?'overdue':isResolved(obligation)?obligation.state:obligation.meetingState&&obligation.kind==='meeting'?obligation.meetingState:obligation.state}</span>
           {!appliesToUser(obligation)&&<span className="obligation-state">{obligation.owner}</span>}
           {obligation.ownerIsUser===null&&<span className="obligation-state">owner unclear</span>}
         </div>
@@ -57,20 +73,36 @@ export function ClassificationDetail({email,demo,onApplied}:{email:Email;demo:bo
     </button>
     {open&&<div className="classification-controls">
       <div className="control-row"><span>Section</span><div>
-        {SECTIONS.map(section=><button key={section.id} type="button" disabled={busy} data-active={email.category===section.id||undefined}
-          onClick={()=>void correct({category:section.id as Section,notJunk:section.id!=='noise'})}>{sectionName(section.id)}</button>)}
+        {SECTIONS.map(section=>{const selected=manual?.category===section.id;return <button key={section.id} type="button" disabled={busy} data-active={selected||undefined}
+          title={selected?'Clear this section correction':`Always sort this message into ${sectionName(section.id)}`}
+          onClick={()=>void correct(selected?{type:'clear-section'}:{type:'set-section',section:section.id as Section})}>{sectionName(section.id)}</button>})}
+      </div></div>
+      <div className="control-row"><span>Junk</span><div>
+        <button type="button" disabled={busy} data-active={manual?.junkPreference==='not-junk'||undefined}
+          onClick={()=>void correct(manual?.junkPreference==='not-junk'?{type:'clear-junk-preference'}:{type:'set-junk-preference',value:'not-junk'})}>Keep</button>
+        <button type="button" disabled={busy} data-active={manual?.junkPreference==='junk'||undefined}
+          onClick={()=>void correct(manual?.junkPreference==='junk'?{type:'clear-junk-preference'}:{type:'set-junk-preference',value:'junk'})}>Move to Junk</button>
+      </div></div>
+      <div className="control-row"><span>This sender</span><div>
+        <button type="button" disabled={busy} data-active={email.senderJunkPreference==='not-junk'||undefined}
+          onClick={()=>void correct(email.senderJunkPreference==='not-junk'?{type:'clear-sender-junk-preference'}:{type:'set-sender-junk-preference',value:'not-junk'})}>Always keep</button>
+        <button type="button" disabled={busy} data-active={email.senderJunkPreference==='junk'||undefined}
+          onClick={()=>void correct(email.senderJunkPreference==='junk'?{type:'clear-sender-junk-preference'}:{type:'set-sender-junk-preference',value:'junk'})}>Always move to Junk</button>
       </div></div>
       <div className="control-row"><span>Tags</span><div>
-        {CORRECTABLE_TAGS.map(tag=><button key={tag} type="button" disabled={busy} data-active={tags.includes(tag)||undefined}
-          onClick={()=>void correct(tags.includes(tag)?{removeTags:[tag]}:{addTags:[tag]})}>{tagName(tag)}</button>)}
+        {CORRECTABLE_TAGS.map(tag=>{const added=manual?.addTags.includes(tag),removed=manual?.removeTags.includes(tag),corrected=added||removed;return <button key={tag} type="button" disabled={busy}
+          data-active={corrected||undefined} title={removed?`Manually removed ${tagName(tag)}`:added?`Manually added ${tagName(tag)}`:undefined}
+          onClick={()=>void correct(corrected?{type:'clear-tag-correction',tag}:{type:tags.includes(tag)?'remove-tag':'add-tag',tag})}>{removed?'Remove: ':added?'Add: ':''}{tagName(tag)}</button>})}
       </div></div>
-      {obligations.length>0&&<div className="control-row"><span>Task status</span><div>
-        {(['open','completed','cancelled'] as const).map(state=><button key={state} type="button" disabled={busy}
-          onClick={()=>void correct({obligationState:state})}>{state}</button>)}
-      </div></div>}
-      <button type="button" className="text-button" disabled={busy} onClick={()=>void correct({reset:true})}>
+      {obligations.map((obligation,index)=>{const key=obligationCorrectionKey(obligation),manualState=manual?.obligationStates[key];return <div className="control-row" key={`correction-${obligation.id}`}><span>Task {index+1}</span><div>
+        {(['open','completed','cancelled'] as const).map(state=>{const selected=manualState===state;return <button key={state} type="button" disabled={busy}
+          data-active={selected||undefined}
+          onClick={()=>void correct(selected?{type:'clear-obligation-state',obligationKey:key}:{type:'set-obligation-state',obligationKey:key,state})}>{state}</button>})}
+      </div></div>})}
+      <button type="button" className="text-button" disabled={busy} onClick={()=>void correct({type:'reset-all'})}>
         <RotateCcw size={13}/> Return to automatic classification
       </button>
+      <small>Removes your corrections for this message and uses automatic sorting again.</small>
     </div>}
     {message&&<output className="action-message">{message}</output>}
   </section>;

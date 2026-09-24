@@ -317,11 +317,11 @@ void test('Gmail adapter shares selected summaries only and requires ownership o
     unsubscribe: 'https://secret.example',
   };
   await db
-    .prepare('INSERT INTO snapshots (user_id, data, updated) VALUES (?, ?, ?)')
-    .bind('owner', JSON.stringify({ emails: [email], ai: true }), 1000)
+    .prepare('INSERT INTO snapshots (account_id, user_id, data, updated) VALUES (?, ?, ?, ?)')
+    .bind('owner-account', 'owner', JSON.stringify({ emails: [email], ai: true }), 1000)
     .run();
   const preview = await gmailPreview(db, 'owner', {
-    accountId: 'default',
+    accountId: 'owner-account',
     messageIds: ['mail-1'],
     title: 'Team summary',
   });
@@ -330,7 +330,7 @@ void test('Gmail adapter shares selected summaries only and requires ownership o
   assert.ok(!JSON.stringify(preview).includes('secret.example'));
   await assert.rejects(
     gmailPreview(db, 'other', {
-      accountId: 'default',
+      accountId: 'owner-account',
       messageIds: ['mail-1'],
       title: 'Stolen',
     }),
@@ -338,7 +338,7 @@ void test('Gmail adapter shares selected summaries only and requires ownership o
   );
   await assert.rejects(
     gmailPreview(db, 'owner', {
-      accountId: 'default',
+      accountId: 'owner-account',
       messageIds: ['missing'],
       title: 'Missing',
     }),
@@ -472,8 +472,8 @@ void test('HTTP Gmail publication rejects a changed preview without sharing it',
     ],
   };
   await db
-    .prepare('INSERT INTO snapshots (user_id, data, updated) VALUES (?, ?, ?)')
-    .bind('owner', JSON.stringify(snapshot), 100)
+    .prepare('INSERT INTO snapshots (account_id, user_id, data, updated) VALUES (?, ?, ?, ?)')
+    .bind('owner-account', 'owner', JSON.stringify(snapshot), 100)
     .run();
   const req = (body: unknown) =>
     new Request(`https://brief.example/api/v1/workspaces/${ws.id}/capture`, {
@@ -485,7 +485,7 @@ void test('HTTP Gmail publication rejects a changed preview without sharing it',
       },
       body: JSON.stringify(body),
     });
-  const data = { accountId: 'default', messageIds: ['mail'], title: 'Inbox' };
+  const data = { accountId: 'owner-account', messageIds: ['mail'], title: 'Inbox' };
   const preview = (await (await POST(req(data))).json()) as {
     previewHash: string;
   };

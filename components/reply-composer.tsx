@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { Sparkles, Send, FilePenLine, RefreshCw, ExternalLink, Wand2, Check, CheckCircle2 } from 'lucide-react';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { api } from '@/hooks/use-inbox';
-import type { Email } from '@/lib/mail';
+import { gmailLink, type Email } from '@/lib/mail';
 
 /**
  * Review-first reply workflow. Users may generate or polish text, edit it locally, then
@@ -28,7 +28,7 @@ export function ReplyComposer({email,demo,aiReady,onSent}:{email:Email;demo:bool
     setBusy('options');setMessage('');setError(false);
     const attempt=options.length?variation+1:0;
     try{
-      const result=await api<{options:string[]}>(endpoint(),{id:email.id,action:'options',tone,variation:attempt});
+      const result=await api<{options:string[]}>(endpoint(),{id:email.id,accountId:email.accountId,action:'options',tone,variation:attempt});
       setOptions(result.options);setChosen(-1);setVariation(attempt);
       if(demo)setMessage('Written for the sample inbox. Pick an option, then edit it before trying the reply flow.');
     }catch(error){setMessage(error instanceof Error?error.message:'Could not generate reply options.');setError(true);}
@@ -39,7 +39,7 @@ export function ReplyComposer({email,demo,aiReady,onSent}:{email:Email;demo:bool
     if(!notes.trim())return;
     setBusy('polish');setMessage('');setError(false);
     try{
-      const result=await api<{reply:string}>(endpoint(),{id:email.id,action:'polish',tone,notes});
+      const result=await api<{reply:string}>(endpoint(),{id:email.id,accountId:email.accountId,action:'polish',tone,notes});
       setText(result.reply);setOptions([]);setChosen(-1);
       if(demo)setMessage('Polished for the sample inbox. You can still edit it before trying the reply flow.');
     }catch(error){setMessage(error instanceof Error?error.message:'Could not polish your notes into a reply.');setError(true);}
@@ -51,7 +51,7 @@ export function ReplyComposer({email,demo,aiReady,onSent}:{email:Email;demo:bool
     setBusy(action);setMessage('');setError(false);
     try{
       if(demo){setMessage(action==='send'?'Demo reply complete. No email was sent.':'Demo draft saved for this conversation.');if(action==='send'){setSent(text);onSent();}}
-      else{await api('/api/reply',{id:email.id,action,body:text});setMessage(action==='send'?'Reply sent through Gmail.':'Draft saved in Gmail.');if(action==='send'){setSent(text);onSent();}}
+      else{await api('/api/reply',{id:email.id,accountId:email.accountId,action,body:text});setMessage(action==='send'?'Reply sent through Gmail.':'Draft saved in Gmail.');if(action==='send'){setSent(text);onSent();}}
     }catch(error){setMessage(error instanceof Error?error.message:'Could not complete your reply.');setError(true);}
     finally{setBusy('');}
   }
@@ -61,10 +61,13 @@ export function ReplyComposer({email,demo,aiReady,onSent}:{email:Email;demo:bool
     <div className="reply-sent-body"><span>To {email.sender}</span><p>{sent}</p></div>
     <p className="reply-disclaimer">{demo?'Demo mode · This reply was never sent to Gmail — it only updated the sample inbox.':'Delivered to Gmail. You can still send another reply to this conversation.'}</p>
     <button className="button white full" onClick={writeAnother}><FilePenLine size={14}/>Write another reply</button>
-    {!demo&&<a className="gmail-link" href={'https://mail.google.com/mail/u/0/#all/'+encodeURIComponent(email.threadId||email.id)} target="_blank" rel="noreferrer">Open conversation in Gmail <ExternalLink size={12}/></a>}
+    {!demo&&<a className="gmail-link" href={gmailLink(email)} target="_blank" rel="noreferrer">Open conversation in Gmail <ExternalLink size={12}/></a>}
   </div>;
   return <div className="reply-area">
     <span className="reply-label"><Sparkles size={16}/>{demo?'Try a suggested reply':'Reply with a little help'}</span>
+    {/* The sending mailbox is the one this message arrived in, shown so the address is
+        never a surprise when several accounts are connected. */}
+    {!demo&&email.accountEmail&&<span className="reply-sender">Sending as {email.accountEmail}</span>}
     <div className="reply-controls">
       <Tabs value={tone} onValueChange={v=>setTone(String(v))}><TabsList>{['Concise','Friendly','Professional'].map(t=><TabsTrigger key={t} value={t}>{t}</TabsTrigger>)}</TabsList></Tabs>
       <button className="generate-button" disabled={!!busy||!aiReady} onClick={generate}>{busy==='options'?<RefreshCw className="spinning" size={14}/>:<Sparkles size={14}/>} {options.length?'Regenerate options':'Generate options'}</button>
@@ -79,6 +82,6 @@ export function ReplyComposer({email,demo,aiReady,onSent}:{email:Email;demo:bool
     <textarea aria-label="Reply message" placeholder="Generate options, describe what to say, or write a reply in your own words…" value={text} onChange={e=>{setText(e.target.value);setChosen(-1);}} maxLength={20000}/>
     <div className="reply-footer"><button className="button white" onClick={()=>complete('draft')} disabled={!text.trim()||!!busy}><FilePenLine size={14}/>{busy==='draft'?'Saving…':'Save draft'}</button><button className="button blue" onClick={()=>complete('send')} disabled={!text.trim()||!!busy}><Send size={14}/>{busy==='send'?'Sending…':demo?'Try reply':'Send reply'}</button></div>
     <p className="reply-disclaimer">{demo?'Demo mode · Replies are AI-generated drafts for the sample inbox. Nothing is sent to Gmail.':'Generated replies are drafts. Review the wording before sending.'}</p>
-    {!demo&&<a className="gmail-link" href={'https://mail.google.com/mail/u/0/#all/'+encodeURIComponent(email.threadId||email.id)} target="_blank" rel="noreferrer">Open conversation in Gmail <ExternalLink size={12}/></a>}
+    {!demo&&<a className="gmail-link" href={gmailLink(email)} target="_blank" rel="noreferrer">Open conversation in Gmail <ExternalLink size={12}/></a>}
   </div>;
 }

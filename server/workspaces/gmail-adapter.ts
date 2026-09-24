@@ -1,4 +1,3 @@
-import type { Email } from '@/lib/mail';
 import {
   CORPUS_KIND,
   type ArtifactInput,
@@ -7,6 +6,8 @@ import {
 import { HttpError } from '../runtime';
 import { selectedIds } from './processors';
 import { string } from './validation';
+import { parseSnapshot } from '../snapshots';
+import { loadMessage } from '../messages';
 
 /**
  * Explicit bridge from a private Gmail snapshot to a shareable corpus. Only summaries the
@@ -20,27 +21,30 @@ export async function gmailPreview(
 ): Promise<ArtifactInput> {
   const accountId = string(data.accountId, 'Account ID');
   const ids = selectedIds(data.messageIds);
-  if (accountId !== 'default')
-    throw new HttpError(
-      400,
-      'The current Gmail adapter supports the default connected account.',
-    );
+  // Sharing always names one real mailbox. The combined view is not a source of truth,
+  // and the snapshot is read with both identifiers so an account id from the browser
+  // never grants access to a mailbox the signed-in user does not own.
+  if (accountId === 'all')
+    throw new HttpError(400, 'Choose one Gmail account before sharing a summary.');
   const row = await db
-    .prepare('SELECT data, updated FROM snapshots WHERE user_id = ?')
-    .bind(userId)
+    .prepare('SELECT data, updated FROM snapshots WHERE account_id = ? AND user_id = ?')
+    .bind(accountId, userId)
     .first<{ data: string; updated: number }>();
   if (!row)
     throw new HttpError(404, 'Refresh this Gmail account before sharing.');
-  const snapshot = JSON.parse(row.data) as { emails: Email[]; ai?: boolean };
-  const emails = ids.map((id) => {
-    const email = snapshot.emails.find((e) => e.id === id);
+  const snapshot = parseSnapshot(row.data);
+  if (!snapshot)
+    throw new HttpError(409, 'This Gmail cache is damaged. Refresh the mailbox before sharing.');
+  const emails = await Promise.all(ids.map(async(id) => {
+    const email = snapshot.emails.find((e) => e?.id === id)
+      ||await loadMessage(userId,accountId,id,{DB:db} as import('../runtime').Runtime);
     if (!email)
       throw new HttpError(
         409,
         'A selected message is no longer in the snapshot. Refresh your selection.',
       );
     return email;
-  });
+  }));
   const documents = emails.map((e) => ({
     id: e.id,
     title: e.subject,

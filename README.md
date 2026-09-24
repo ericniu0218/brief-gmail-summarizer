@@ -56,7 +56,7 @@ D1 schema is defined in `db/schema.ts`; generated migrations are in `drizzle/`. 
 
 ## Limits and behavior
 
-- Each sync covers the latest 60 inbox messages and indicates when additional mail exists. AI analysis is reused for cached messages, reducing repeated processing. The agent processes up to 20 due accounts per invocation; larger deployments need a queue and pagination.
+- Sync scans received Gmail messages in resumable 100-message pages, including archived mail while excluding Sent, Trash, and Spam. An explicit refresh advances up to three pages and scheduled runs continue the stored cursor. AI analysis is reused for unchanged messages. The agent processes up to 20 due accounts per invocation; larger deployments should move page jobs to a queue.
 - A database lease prevents concurrent refreshes for a user. Gmail failures retain the prior inbox snapshot and record an account-level error. Gemini failures still store current mail with basic Gmail-derived classifications and retry AI analysis on the next refresh.
 - Reconnecting the same Gmail address preserves the cached inbox, unsubscribe history, and send receipts. Changing addresses clears that user's previous mailbox data atomically. If a refresh is active, finish it and retry the connection; expired refreshes cannot overwrite a renewed connection or release a newer refresh's lease.
 - Sending uses a deterministic user/message/action/body fingerprint. Completed retries return the stored receipt. An uncertain send stays pending and asks the user to check Gmail before retrying.
