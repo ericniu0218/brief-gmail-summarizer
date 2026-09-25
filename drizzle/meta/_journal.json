@@ -78,6 +78,27 @@
       "when": 1790302115057,
       "tag": "0010_open_forgotten_one",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1790320955519,
+      "tag": "0011_sender_rule_tombstones",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1790407355519,
+      "tag": "0012_lowercase_sender_rules",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1790493755519,
+      "tag": "0013_operation_timestamps",
+      "breakpoints": true
     }
   ]
 }
