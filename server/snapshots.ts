@@ -1,5 +1,6 @@
 import { HttpError, type Runtime } from './runtime';
 import type { Snapshot } from './sync';
+import { completeStoredEmail } from './messages';
 
 /** Parse persisted mailbox data at its trust boundary instead of assuming valid JSON. */
 export function parseSnapshot(value:string):Snapshot|undefined{
@@ -9,8 +10,11 @@ export function parseSnapshot(value:string):Snapshot|undefined{
     const snapshot=parsed as Snapshot;
     // Persisted JSON is untrusted at runtime. Drop malformed entries once here so every
     // mailbox consumer can iterate without a null or primitive crashing the whole view.
-    return {...snapshot,emails:snapshot.emails.filter(email=>
-      !!email&&typeof email==='object'&&typeof email.id==='string'&&!!email.id)};
+    // Completed rather than merely filtered: a record missing a sender or an address is
+    // repairable, and dropping it would hide mail the user can still read.
+    return {...snapshot,emails:snapshot.emails
+      .map(email=>completeStoredEmail(email))
+      .filter((email):email is NonNullable<typeof email>=>!!email)};
   }catch{return undefined;}
 }
 

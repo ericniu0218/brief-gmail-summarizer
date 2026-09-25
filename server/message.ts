@@ -1,4 +1,5 @@
 import { decode } from './runtime';
+import { normalizeEmailText } from '@/lib/email-text';
 
 /**
  * Gmail-to-application normalization. This module turns nested MIME payloads into a
@@ -95,7 +96,7 @@ export function htmlToText(html:string){
   });
   value=value.replace(/<br\s*\/?>/gi,'\n').replace(/<\/(?:p|div|tr|li|h[1-6]|table|blockquote|section|article)>/gi,'\n');
   value=value.replace(/<li\b[^>]*>/gi,'\n- ');
-  return decodeEntities(stripTags(value)).replace(/\r/g,'').replace(/[ \t ]+/g,' ').replace(/\n{3,}/g,'\n\n').trim();
+  return normalizeEmailText(decodeEntities(stripTags(value)).replace(/[ \t ]+/g,' '));
 }
 
 /** Some senders publish a broken text/plain alternative containing their CSS bundle. */
@@ -221,7 +222,9 @@ export function normalizeMessage(m:GmailMessage):NormalizedMessage{
   // 2. Prefer plain text, safely reduce HTML when needed, and record every reason the
   // normalized content is incomplete instead of silently treating a snippet as complete.
   const incompleteReasons:string[]=[];
-  const plain=found.text.join('\n').trim();
+  // Plain MIME alternatives need the same whitespace cleanup as HTML-derived text.
+  // Bulk-mail generators commonly insert many empty spacer lines into this part.
+  const plain=normalizeEmailText(found.text.join('\n'));
   // multipart/alternative should contain one HTML representation. If malformed mail
   // supplies several, the largest is normally the complete newsletter rather than a
   // signature fragment or quoted footer.
@@ -231,7 +234,7 @@ export function normalizeMessage(m:GmailMessage):NormalizedMessage{
   let raw=brokenPlain?htmlToText(richHtml):plain||(richHtml?htmlToText(richHtml):'');
   const displayHtml=richHtml&&new TextEncoder().encode(richHtml).byteLength<=HTML_DISPLAY_LIMIT?richHtml:undefined;
   if(richHtml&&!displayHtml)incompleteReasons.push('formatted-body-too-large');
-  if(!raw){raw=m.snippet||'';if(raw)incompleteReasons.push('only-snippet-available');}
+  if(!raw){raw=normalizeEmailText(m.snippet||'');if(raw)incompleteReasons.push('only-snippet-available');}
   if(found.deferred)incompleteReasons.push('body-stored-separately-by-gmail');
   if(found.depthLimited)incompleteReasons.push('mime-depth-limit');
   if(found.malformed)incompleteReasons.push('malformed-message-structure');

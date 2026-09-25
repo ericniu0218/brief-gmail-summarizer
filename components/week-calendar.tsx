@@ -88,11 +88,14 @@ export function WeekCalendar({ emails, demo, onSelect }: { emails: Email[]; demo
     return () => document.removeEventListener('keydown', close);
   }, [mode, selected, rangeOpen]);
   const demoAnchor=demo?today?.getTime():undefined;
+  // Gmail arrival times cannot be in the future. Use the real clock here rather than the
+  // end of the day, which used to admit forged messages almost 24 hours early.
+  const arrivalNow=today?.getTime();
   // Connected mail contains absolute dates, so a minute clock tick cannot change this
   // parsing work. Demo relative dates deliberately refresh when their anchor changes.
   const dated=useMemo(()=>emails.filter(email=>email.category!=='noise').map(email=>({
-    email,dates:emailDates(email,demoAnchor===undefined?undefined:new Date(demoAnchor)),
-  })),[emails,demoAnchor]);
+    email,dates:emailDates(email,demoAnchor===undefined?undefined:new Date(demoAnchor),arrivalNow),
+  })),[emails,demoAnchor,arrivalNow]);
   if (!today) return <section className="week-calendar" aria-label="Email calendar"><h2><CalendarDays size={16}/> Calendar</h2></section>;
 
   const focus = cursor || today;
@@ -100,7 +103,7 @@ export function WeekCalendar({ emails, demo, onSelect }: { emails: Email[]; demo
   const week = weekDays(focus);
   // Reuse parsed dates for every day's count and list.
   const matches = (key: string) => dated.filter(item => item.dates.includes(key)).map(item => item.email);
-  const listFor = (key: string) => matches(key).sort(byEventTime(key));
+  const listFor = (key: string) => matches(key).sort(byEventTime(key,today.getTime()));
 
   function shift(direction: number) {
     const next = new Date(focus.getFullYear(), focus.getMonth(), focus.getDate());

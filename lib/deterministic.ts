@@ -20,14 +20,29 @@ export type ClassifiableMessage={
 // over-prioritize mail.
 const SECURITY=/\b(verification code|security alert|one[- ]time (?:code|password)|two[- ]factor|2fa|password reset|reset your password|new sign[- ]?in|unrecognized login|confirm your identity)\b/i;
 const DEADLINE=/\b(due|deadline|closes?|expires?|no later than|submit by|rsvp by|last day)\b/i;
-const MEETING=/\b(meeting|invite|invitation|call|stand[- ]?up|sync|catch[- ]?up|appointment|zoom|google meet|reschedul\w*|cancel\w*)\b/i;
+const MEETING=/\b(meeting|call|stand[- ]?up|sync|catch[- ]?up|appointment|zoom|google meet|reschedul\w*|cancel\w*)\b/i;
 const REQUEST=/\b(please (?:confirm|review|approve|advise|respond|sign)|could you|can you|need your (?:input|decision|approval|signature|response)|approval needed|signature needed|let me know)\b/i;
-const ACTION=/\b(action required|please (?:complete|submit|update|rotate|upload|fill)|rotate your|update your|complete (?:your|the)|submit (?:your|the)|fill out)\b/i;
+const ACTION=/\b(action required|please (?:complete|submit|update|rotate|upload|fill)|rotate your|update your|complete (?:your|the)|submit (?:your|the)|fill out|must (?:complete|submit|respond|attend|finish|renew|provide)|(?:are|is) required to)\b/i;
 const RESEARCH=/\b(paper|preprint|manuscript|abstract|peer review|experiment|dataset|grant|funding call|arxiv|journal|principal investigator|lab (?:meeting|results)|research (?:collaboration|group|proposal)|reproducib\w+|camera[- ]ready|rebuttal)\b/i;
 const MARKETING_STUDY=/\b(a (?:recent|new) study (?:shows|found)|studies show|science[- ]backed)\b/i;
 const PROMOTION=/\b(% off|\d+% off|discount|coupon|promo code|limited time|shop now|buy now|order now|clearance|free shipping|exclusive offer|last chance|your cart|almost sold out|sale ends)\b/i;
 const TRANSACTIONAL=/\b(receipt|invoice|order (?:confirmation|number)|your order|payment (?:received|confirmation)|booking confirmation|itinerary|statement)\b/i;
 const COUNTDOWN=/\b(ends (?:today|tonight|tomorrow|soon)|only \d+ (?:hours?|days?) left|hurry|while supplies last)\b/i;
+// Phrases that make one sentence's own task optional.
+const OPTIONAL=/\boptional\b|\bif you'?d like\b|\bno pressure\b|\bfeel free to\b/i;
+// Being invited says nothing by itself: a job interview and a prize draw are both
+// invitations. What marks one as optional is the incentive attached to it, or wording
+// that states outright that taking part is up to the reader.
+//
+// These are read across the message rather than within one sentence, because the offer
+// and the closing date are usually paragraphs apart: "we invite you to take part" near
+// the top and "the last day to respond is Friday" much further down.
+const INVITATION=/\b(we invite you|you(?:'re| are) invited|invitation to (?:take part|participate))\b/i;
+const INCENTIVE=/\b(chance to win|enter(?:ed)? to win|prize draw(?:ing)?|sweepstakes|raffle|gift card|win a \$)\b/i;
+const VOLUNTARY=/\b(participation is voluntary|entirely voluntary|voluntary survey|completely optional)\b/i;
+// An invitation can still carry a requirement. Explicit wording wins over the framing, so
+// "you are invited to complete the mandatory training" stays required work.
+const MANDATORY=/\b(required|mandatory|you must\b|must (?:complete|submit|respond|attend))\b/i;
 const VAGUE_ONLY=/\b(soon|asap|when you can|at your convenience|no rush)\b/i;
 const DATE_PHRASE=/\b(?:by |before |on |due )?(?:today|tomorrow|(?:this|next) \w+day|\w+day|(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.?\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+20\d{2})?|20\d{2}-\d{2}-\d{2})(?:\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm))?\b/i;
 const CANCELLED=/\b(cancel(?:led|ing|s)?|called off|no longer (?:happening|needed)|won'?t be going ahead)\b/i;
@@ -97,18 +112,23 @@ export function deterministicClassify(message:ClassifiableMessage,userAddress=''
       description:evidence.slice(0,200),
       owner:other?other[1]:'recipient',
       ownerIsUser,
-      required:!/\boptional\b|\bif you'?d like\b|\bno pressure\b/i.test(evidence),
+      required:!OPTIONAL.test(evidence)&&!invitational,
       evidence,
       state:obligationStateOf(evidence,whole),
       ...extra,
     });
   };
 
+  // An invitation with a prize attached is an offer, not an assignment. Its date is still
+  // read and still shown; it simply is not work the reader owes anyone. An invitation with
+  // no incentive — "you are invited to a job interview on Friday" — stays real work.
+  const invitational=((INVITATION.test(current)&&INCENTIVE.test(current))||VOLUNTARY.test(current))&&!MANDATORY.test(current);
   const datePhrase=DATE_PHRASE.exec(current)?.[0]||'';
   const hasRealDate=!!datePhrase&&!VAGUE_ONLY.test(datePhrase);
   // A promotional countdown is not a user deadline.
+  const dated=hasRealDate&&!COUNTDOWN.test(current)?{due:resolveDate(datePhrase,message.receivedAt)}:{};
   if(DEADLINE.test(current)&&hasRealDate&&!COUNTDOWN.test(current)&&promotional<2){
-    push('deadline',DEADLINE,{due:resolveDate(datePhrase,message.receivedAt)});
+    push('deadline',DEADLINE,dated);
   }
   // An attached invitation is stronger evidence than any wording, and it carries the only
   // exact start time the message has. Taking it here means an ICS-only meeting still
@@ -135,9 +155,10 @@ export function deterministicClassify(message:ClassifiableMessage,userAddress=''
     });
   }
   // Wording only adds a meeting when no invitation already described one.
-  if(!obligations.some(o=>o.kind==='meeting')&&MEETING.test(current))push('meeting',MEETING,{meetingState:meetingStateOf(current)});
-  if(REQUEST.test(current)&&promotional<2)push('request',REQUEST);
-  if(ACTION.test(current)&&promotional<2)push('action',ACTION);
+  if(!obligations.some(o=>o.kind==='meeting')&&MEETING.test(current))
+    push('meeting',MEETING,{meetingState:meetingStateOf(current),...dated});
+  if(REQUEST.test(current)&&promotional<2)push('request',REQUEST,dated);
+  if(ACTION.test(current)&&promotional<2)push('action',ACTION,dated);
 
   const junk=spamLabel||(promotional>=2&&!transactional&&!research&&!securityEvent&&obligations.length===0);
   // Conflicting promotional signals become uncertain instead of being silently discarded.

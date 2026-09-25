@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { encrypt, decrypt, encode, mutation, type Runtime } from '../server/runtime';
+import { encrypt, decrypt, encode, inputObject, mutation, type Runtime } from '../server/runtime';
 import { parseMessage, safeUnsubscribe } from '../server/gmail';
 import { POST as reply } from '../app/api/reply/route';
 import { POST as suggest } from '../app/api/suggest/route';
@@ -39,6 +39,12 @@ void test('rejects external-origin mutations and requests without an origin',()=
  assert.throws(()=>mutation(new Request('https://brief.example/api/reply',{method:'POST',headers:{origin:'https://attacker.example'}})));
  assert.throws(()=>mutation(new Request('https://brief.example/api/reply',{method:'POST'})));
  assert.doesNotThrow(()=>mutation(new Request('https://brief.example/api/reply',{method:'POST',headers:{origin:'https://brief.example'}})));
+});
+void test('JSON request bodies are bounded while streaming, without trusting Content-Length',async()=>{
+ const oversized=new Request('https://brief.example/api/test',{method:'POST',body:JSON.stringify({value:'x'.repeat(20000)})});
+ await assert.rejects(inputObject(oversized),(error:unknown)=>{assert.equal((error as {status?:number}).status,413);return true;});
+ const malformed=new Request('https://brief.example/api/test',{method:'POST',body:'{"unfinished"'});
+ await assert.rejects(inputObject(malformed),(error:unknown)=>{assert.equal((error as {status?:number}).status,400);return true;});
 });
 void test('the scheduled agent endpoint requires its secret and records a heartbeat',async()=>{
  const statements:string[]=[];
@@ -224,6 +230,29 @@ void test('a known successful send returns its receipt without sending a duplica
  const original=globalThis.fetch;let sends=0;
  globalThis.fetch=async(input)=>{const url=requestUrl(input);if(url.includes('oauth2.googleapis.com'))return Response.json({access_token:'access'});if(url.includes('messages/send')){sends++;return Response.json({id:'unexpected'});}return Response.json({id:'abc',threadId:'thread',snippet:'Can you review?',internalDate:'1788960000000',labelIds:['INBOX'],payload:{mimeType:'text/plain',headers:[{name:'From',value:'Sender <sender@example.com>'},{name:'Subject',value:'Review'}],body:{data:encode('Can you review?')}}});};
  try{const response=await reply(new Request('https://brief.example/api/reply',{method:'POST',headers:{origin:'https://brief.example','Content-Type':'application/json'},body:JSON.stringify({id:'abc',accountId:'acct-1',action:'send',body:'Thanks, received.'})}));assert.equal(response.status,200);assert.deepEqual(await response.json(),{id:'sent-1',status:'sent'});assert.equal(sends,0);}finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
+});
+void test('an unconfirmed reply retries only after the user confirms they checked Gmail',async()=>{
+ globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
+ const encrypted=await encrypt('refresh','user-a',testEnv);
+ let operation:{status:string;result:string|null;created:number}|null={status:'unconfirmed',result:null,created:Date.now()-120000};
+ const fakeDb={prepare(sql:string){return {bind(){return this;},async first(){
+  if(sql.includes('FROM connections'))return {id:'acct-1',user_id:'user-a',provider_identity:null,email:'a@example.com',token:encrypted,token_version:1,last_sync:null,sync_lock:0,error:null,created:0};
+  if(sql.includes('FROM operations'))return operation;
+  return null;
+ },async run(){
+  if(sql.startsWith('DELETE FROM operations'))operation=null;
+  else if(sql.startsWith('INSERT OR IGNORE INTO operations'))operation={status:'pending',result:null,created:Date.now()};
+  else if(sql.startsWith("UPDATE operations SET status='complete'"))operation={status:'complete',result:'{"id":"draft-1","status":"drafted"}',created:Date.now()};
+  return {meta:{changes:1}};
+ }};}};
+ globalThis.__briefTestEnv={...testEnv,DB:fakeDb as unknown as D1Database,GOOGLE_CLIENT_ID:'client',GOOGLE_CLIENT_SECRET:'secret'};
+ const original=globalThis.fetch;let drafts=0;
+ globalThis.fetch=async(input)=>{const url=requestUrl(input);if(url.includes('oauth2.googleapis.com'))return Response.json({access_token:'access'});if(url.includes('/drafts')){drafts++;return Response.json({id:'draft-1'});}return Response.json({id:'abc',threadId:'thread',snippet:'Can you review?',internalDate:'1788960000000',labelIds:['INBOX'],payload:{mimeType:'text/plain',headers:[{name:'From',value:'Sender <sender@example.com>'},{name:'Subject',value:'Review'}],body:{data:encode('Can you review?')}}});};
+ const request=(confirmUnsent=false)=>new Request('https://brief.example/api/reply',{method:'POST',headers:{origin:'https://brief.example','Content-Type':'application/json'},body:JSON.stringify({id:'abc',accountId:'acct-1',action:'draft',body:'Thanks, received.',confirmUnsent})});
+ try{
+  const blocked=await reply(request());assert.equal(blocked.status,409);assert.equal(drafts,0);
+  const retried=await reply(request(true));assert.equal(retried.status,200);assert.deepEqual(await retried.json(),{id:'draft-1',status:'drafted'});assert.equal(drafts,1);
+ }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
 });
 
 void test('an expired dashboard session returns a usable sign-in destination',async()=>{
@@ -459,7 +488,14 @@ void test('a CSS-filled plain alternative does not replace the readable rich bod
  ]}});
  assert.equal(result.html,rich);
  assert.match(result.text,/Career newsletter/);
- assert.doesNotMatch(result.text,/border-color|a:hover/);
+  assert.doesNotMatch(result.text,/border-color|a:hover/);
+});
+
+void test('sender-supplied plain text collapses excessive spacer lines',()=>{
+ const plain=encode('Opening paragraph.\r\n\r\n\r\n   \r\n\r\nNext paragraph.\n\n\nFooter.');
+ const result=normalizeMessage({id:'spaced',threadId:'t',snippet:'',internalDate:'1789000000000',labelIds:['INBOX'],
+  payload:{mimeType:'text/plain',headers:[{name:'From',value:'Mailer <mail@example.com>'}],body:{data:plain}}});
+ assert.equal(result.text,'Opening paragraph.\n\nNext paragraph.\n\nFooter.');
 });
 
 void test('quoted history is separated from the current message',()=>{
@@ -849,4 +885,126 @@ void test('an oversized calendar part is reported as incomplete content',()=>{
           {mimeType:'text/calendar',body:{attachmentId:'att-1',size:900000}}]}});
  assert.equal(message.contentComplete,false,'the message says its content is incomplete');
  assert.ok(message.incompleteReasons.length>0,'and says why');
+});
+
+// A real message from the Berkeley bulk mailer. It names a genuine date, but taking the
+// survey is an invitation with a prize draw, not a task the reader owes anyone.
+const pulseSurvey={
+ id:'pulse',subject:'Chance at $100 - Take the Pulse Survey by September 25',
+ text:`Dear Berkeley undergraduate student,
+We invite you to take the fall 2026 Student Pulse Survey. These confidential, three-minute Pulse Surveys capture your feedback so UC Berkeley can better support you. As a token of our appreciation, if you complete the survey, you will have a chance to win a $100 gift card of your choice.
+This Pulse Survey asks for your thoughts on your experiences around basic needs, and campus software and hardware. The last day to submit your responses is Friday, September 25, 2026.
+Congratulations to the following recipients of $100 gift cards from the Spring 2026 Pulse Survey.
+Thanking you in advance for your participation in the survey.`,
+ quoted:'',from:{name:"Oliver O'Reilly",address:'communications@berkeley.edu'},
+ to:[{address:'ethan_ko@berkeley.edu'}],cc:[],receivedAt:Date.UTC(2026,8,22,16,0,0),
+ labels:['INBOX'],attachments:[],contentComplete:true,
+};
+
+void test('an invitation with a deadline is not a task the reader owes',()=>{
+ const now=Date.UTC(2026,8,24,12,0,0);
+ const classification=deterministicClassify(pulseSurvey as never,'ethan_ko@berkeley.edu');
+ const email={id:'pulse',accountId:'a',category:'work',priority:'normal',needsReply:false,
+  subject:pulseSurvey.subject,body:pulseSurvey.text,summary:'',receivedAt:pulseSurvey.receivedAt,
+  classification} as unknown as Email;
+
+ // The deadline is real and is read correctly; what changes is whose job it is.
+ const deadline=classification.obligations.find(o=>o.kind==='deadline');
+ assert.ok(deadline,'the stated date is still recognised');
+ assert.equal(deadline.due?.date,'2026-09-25');
+ assert.equal(deadline.required,false,'an invitation is not a requirement');
+
+ // "We invite you" is not a meeting. Nothing here is scheduled.
+ assert.ok(!classification.obligations.some(o=>o.kind==='meeting'),'the word "invite" alone is not a meeting');
+ assert.ok(!effectiveCategories(classification).tags.includes('meetings'));
+
+ // So it stays ordinary mail: readable, filed, tagged — just not demanding attention.
+ assert.equal(isImportantEmail(email,now),false,'it no longer claims a place in Important now');
+ assert.notEqual(effectiveCategories(classification).category,'noise','and it is not junk either');
+ assert.ok(effectiveCategories(classification).tags.includes('deadlines'),'the date is still visible as a deadline');
+});
+
+void test('a genuine institutional deadline is still important',()=>{
+ const now=Date.UTC(2026,8,24,12,0,0);
+ // Same shape of sender and the same closeness of date. The difference is that this one
+ // asks the reader to do something, and says what happens if they do not.
+ const enrolment=deterministicClassify({...pulseSurvey,id:'benefits',
+  subject:'Action required: benefits enrolment closes September 25',
+  text:'Please submit your benefit elections. Open enrolment closes on Friday, September 25, 2026. If you do not respond, your current elections carry over.',
+ } as never,'ethan_ko@berkeley.edu');
+ const email={id:'benefits',accountId:'a',category:'work',priority:'normal',needsReply:false,
+  subject:'Action required',body:'',summary:'',receivedAt:pulseSurvey.receivedAt,
+  classification:enrolment} as unknown as Email;
+ assert.ok(enrolment.obligations.some(o=>o.required),'a real instruction is still required work');
+ assert.equal(isImportantEmail(email,now),true,'and still reaches Important now');
+});
+
+void test('a real meeting is still detected without the word invite',()=>{
+ const meeting=deterministicClassify({...pulseSurvey,id:'sync',
+  subject:'Design review',
+  text:'Can we meet Thursday? I have booked a Zoom meeting for the design review at 10am.',
+ } as never,'ethan_ko@berkeley.edu');
+ assert.ok(meeting.obligations.some(o=>o.kind==='meeting'),'wording that names a meeting still works');
+});
+
+void test('an invitation is judged by what is attached to it, not by the word invited',()=>{
+ const now=Date.UTC(2026,8,24,12,0,0),received=Date.UTC(2026,8,23,9,0,0);
+ const rate=(subject:string,text:string,from='recruiting@acme.example')=>{
+  const classification=deterministicClassify({id:'x',subject,text,quoted:'',from:{name:'R',address:from},
+   to:[{address:'ethan_ko@berkeley.edu'}],cc:[],receivedAt:received,labels:['INBOX'],
+   attachments:[],contentComplete:true} as never,'ethan_ko@berkeley.edu');
+  return {classification,important:isImportantEmail({id:'x',accountId:'a',category:'work',priority:'normal',
+   needsReply:false,subject,body:text,summary:'',receivedAt:received,classification} as unknown as Email,now)};
+ };
+
+ // Being invited says nothing by itself. A job interview is an appointment the reader
+ // has every reason to see, and it must not be quietened by the word "invited".
+ assert.equal(rate('Interview invitation',
+  'You are invited to a job interview for the Software Engineer position on Friday, September 25, 2026 at 10am. Please let me know if that time works.').important,
+  true,'an interview invitation is important');
+ assert.equal(rate('Next steps',
+  'We would like to invite you to interview with our team. Could you confirm your availability by September 25, 2026?').important,
+  true,'however the invitation happens to be phrased');
+
+ // What makes one optional is the incentive attached, or wording that says so outright.
+ const survey=rate('Chance at $100 - Pulse Survey',
+  'We invite you to take the Pulse Survey. You will have a chance to win a $100 gift card. The last day to submit your responses is Friday, September 25, 2026.',
+  'communications@berkeley.edu');
+ assert.equal(survey.important,false,'a prize draw is an offer, not work');
+ assert.ok(survey.classification.obligations.every(o=>!o.required));
+ assert.equal(rate('Feedback survey',
+  'We invite you to share feedback. Participation is voluntary. The survey closes on Friday, September 25, 2026.',
+  'communications@berkeley.edu').important,false,'stated voluntariness is believed');
+
+ // An explicit requirement overrides the invitation framing entirely.
+ assert.equal(rate('Mandatory compliance training',
+  'You are invited to the mandatory compliance training. You must complete it by Friday, September 25, 2026.',
+  'hr@acme.example').important,true,'"you must complete it by Friday" is real work');
+
+ // And nothing here loosened the guard on marketing.
+ assert.equal(rate('Flash sale',
+  'Order now before the deal ends Friday, September 25, 2026. Limited time, 50% off, hurry while supplies last.',
+  'offers@shop.example').important,false,'a countdown is still not a deadline');
+ assert.equal(rate('Weekly digest','Here is your weekly product update. No action needed.',
+  'newsletter@acme.example').important,false,'a newsletter still asks nothing');
+});
+
+void test('a date the message states reaches the obligation it states',()=>{
+ const received=Date.UTC(2026,8,23,9,0,0);
+ // The date used to be attached only when the wording matched the deadline pattern, so
+ // "you must complete it by Friday" produced an action that could never become urgent.
+ const mandatory=deterministicClassify({id:'x',subject:'Training',
+  text:'You must complete the compliance training by Friday, September 25, 2026.',quoted:'',
+  from:{name:'HR',address:'hr@acme.example'},to:[{address:'ethan_ko@berkeley.edu'}],cc:[],
+  receivedAt:received,labels:['INBOX'],attachments:[],contentComplete:true} as never,'ethan_ko@berkeley.edu');
+ const action=mandatory.obligations.find(o=>o.kind==='action');
+ assert.ok(action,'the requirement became an obligation');
+ assert.equal(action.due?.date,'2026-09-25','carrying the date the message gave');
+
+ // A meeting described in plain text carries its date too.
+ const meeting=deterministicClassify({id:'y',subject:'Design review',
+  text:'Can we meet on Friday, September 25, 2026? I have booked a Zoom meeting at 10am.',quoted:'',
+  from:{name:'S',address:'s@acme.example'},to:[{address:'ethan_ko@berkeley.edu'}],cc:[],
+  receivedAt:received,labels:['INBOX'],attachments:[],contentComplete:true} as never,'ethan_ko@berkeley.edu');
+ assert.equal(meeting.obligations.find(o=>o.kind==='meeting')?.due?.date,'2026-09-25');
 });

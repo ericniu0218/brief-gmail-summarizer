@@ -11,7 +11,33 @@ import {
 import type { NormalizedMessage } from './message';
 
 export type JunkPreference='junk'|'not-junk';
-export type SenderRule={address:string;junkPreference:JunkPreference;revision:number};
+export const MAX_SENDER_ADDRESS=320;
+
+/** Canonical sender key accepted by rules. Invalid or synthetic identities are rejected. */
+export function normalizeSenderAddress(value:unknown):string|undefined{
+  if(typeof value!=='string')return undefined;
+  const address=value.trim().toLowerCase();
+  const at=address.indexOf('@');
+  let control=false;
+  for(let index=0;index<address.length;index++){
+    const code=address.charCodeAt(index);
+    if(code<=31||code===127){control=true;break;}
+  }
+  if(!address||address.length>MAX_SENDER_ADDRESS||/\s/.test(address)||control||
+    at<=0||at!==address.lastIndexOf('@')||at===address.length-1)return undefined;
+  return address;
+}
+/**
+ * A saved preference for one sender inside one account. An inactive rule is a cleared
+ * tombstone: it still reports its revision so writes stay ordered, but carries no
+ * preference and has no effect on classification.
+ */
+export type SenderRule={address:string;junkPreference?:JunkPreference;revision:number;active:boolean};
+
+/** The preference a rule actually applies, or nothing when it was cleared. */
+export function activeJunkPreference(rule?:SenderRule):JunkPreference|undefined{
+  return rule?.active?rule.junkPreference:undefined;
+}
 
 /**
  * Persisted user intent for one message. An inactive row is a reset tombstone: it carries
@@ -217,45 +243,84 @@ export function manualCorrectionView(override:Override|undefined){
 }
 
 export async function loadSenderRules(user:string,accountId:string,e:Runtime){
-  const rows=await e.DB.prepare('SELECT address,junk_preference,revision FROM sender_rules WHERE account_id=? AND user_id=?')
-    .bind(accountId,user).all<{address:string;junk_preference:string;revision:number}>();
+  const rows=await e.DB.prepare('SELECT address,junk_preference,revision,active FROM sender_rules WHERE account_id=? AND user_id=?')
+    .bind(accountId,user).all<{address:string;junk_preference:string;revision:number;active:number}>();
   const rules=new Map<string,SenderRule>();
-  for(const row of rows.results||[])if((row.junk_preference==='junk'||row.junk_preference==='not-junk')&&row.address)
-    rules.set(row.address,{address:row.address,junkPreference:row.junk_preference,revision:row.revision});
+  // Cleared rules stay in the map so their revision is still reported to the browser; only
+  // an active row carries a preference, so composition is unaffected by a tombstone.
+  for(const row of rows.results||[]){
+    const address=normalizeSenderAddress(row.address);
+    if(!address)continue;
+    const usable=row.junk_preference==='junk'||row.junk_preference==='not-junk';
+    const active=row.active!==0&&usable;
+    rules.set(address,{address,revision:row.revision,active,
+      junkPreference:active?row.junk_preference as JunkPreference:undefined});
+  }
   return rules;
 }
 
-/** Message intent wins; a sender rule fills only the Junk dimension it did not set. */
-export function withSenderRule(manual:Override|undefined,rule:SenderRule|undefined,messageId:string):Override|undefined{
-  if(!rule)return manual;
-  if(manual?.active!==false&&manual?.junkPreference)return manual;
-  if(!manual||manual.active===false)return {messageId,addTags:[],removeTags:[],junkPreference:rule.junkPreference,source:'rule',createdAt:0,active:true,revision:manual?.revision??0};
-  return {...manual,junkPreference:rule.junkPreference};
+/** Resolve a rule with the same canonical key used for storage and loading. */
+export function senderRuleFor(rules:Map<string,SenderRule>,address:unknown){
+  const normalized=normalizeSenderAddress(address);
+  return normalized?rules.get(normalized):undefined;
 }
 
-export async function saveSenderRule(user:string,accountId:string,address:string,expectedRevision:number,value:JunkPreference|undefined,e:Runtime){
-  const current=await e.DB.prepare('SELECT revision FROM sender_rules WHERE account_id=? AND user_id=? AND address=?')
-    .bind(accountId,user,address).first<{revision:number}>();
-  if((current?.revision??0)!==expectedRevision)throw new HttpError(409,'This sender preference changed in another tab. Reload and try again.');
+/**
+ * Message intent wins; a sender rule fills only the Junk dimension it did not set.
+ *
+ * Two kinds of message-level choice outrank the rule: an explicit Junk or Keep preference,
+ * and routing the message to a section other than Noise. Both are deliberate decisions
+ * about this message, and a rule about its sender is the more general statement.
+ */
+export function withSenderRule(manual:Override|undefined,rule:SenderRule|undefined,messageId:string):Override|undefined{
+  const preference=activeJunkPreference(rule);
+  if(!preference)return manual;
+  const routedOut=!!manual?.category&&manual.category!=='noise';
+  if(manual?.active!==false&&(manual?.junkPreference||routedOut))return manual;
+  if(!manual||manual.active===false)return {messageId,addTags:[],removeTags:[],junkPreference:preference,source:'rule',createdAt:0,active:true,revision:manual?.revision??0};
+  return {...manual,junkPreference:preference};
+}
+
+/**
+ * Save or clear one sender preference under compare-and-swap.
+ *
+ * Clearing writes an inactive tombstone instead of deleting the row. A delete would
+ * restart the revision at zero, which would let a request written before the clear
+ * recreate the very rule it was meant to remove. The cleared revision is returned so the
+ * browser can keep writing in order.
+ */
+export async function saveSenderRule(user:string,accountId:string,address:string,expectedRevision:number,value:JunkPreference|undefined,e:Runtime):Promise<SenderRule>{
+  const normalized=normalizeSenderAddress(address);
+  if(!normalized)throw new HttpError(400,'This message does not have a usable sender address.');
+  address=normalized;
+  const conflict=()=>new HttpError(409,'This sender preference changed in another tab. Reload and try again.');
+  const current=await e.DB.prepare('SELECT junk_preference,revision,active FROM sender_rules WHERE account_id=? AND user_id=? AND address=?')
+    .bind(accountId,user,address).first<{junk_preference:string;revision:number;active:number}>();
+  if((current?.revision??0)!==expectedRevision)throw conflict();
+  const revision=expectedRevision+1,now=Date.now();
+
   if(value===undefined){
-    if(current){
-      const result=await e.DB.prepare('DELETE FROM sender_rules WHERE account_id=? AND user_id=? AND address=? AND revision=?')
-        .bind(accountId,user,address,expectedRevision).run();
-      if(!result.meta.changes)throw new HttpError(409,'This sender preference changed in another tab. Reload and try again.');
-    }
-    return undefined;
+    // Nothing was ever saved for this sender, so there is nothing to clear and no new
+    // revision to report. Staying idempotent here keeps a repeated Undo harmless.
+    if(!current)return {address,revision:expectedRevision,active:false};
+    const result=await e.DB.prepare('UPDATE sender_rules SET active=0,revision=?,updated=? WHERE account_id=? AND user_id=? AND address=? AND revision=?')
+      .bind(revision,now,accountId,user,address,expectedRevision).run();
+    if(!result.meta.changes)throw conflict();
+    return {address,revision,active:false};
   }
-  const revision=expectedRevision+1;
+
   if(current){
-    const result=await e.DB.prepare('UPDATE sender_rules SET junk_preference=?,revision=?,updated=? WHERE account_id=? AND user_id=? AND address=? AND revision=?')
-      .bind(value,revision,Date.now(),accountId,user,address,expectedRevision).run();
-    if(!result.meta.changes)throw new HttpError(409,'This sender preference changed in another tab. Reload and try again.');
+    const result=await e.DB.prepare('UPDATE sender_rules SET junk_preference=?,revision=?,updated=?,active=1 WHERE account_id=? AND user_id=? AND address=? AND revision=?')
+      .bind(value,revision,now,accountId,user,address,expectedRevision).run();
+    if(!result.meta.changes)throw conflict();
   }else{
-    const result=await e.DB.prepare('INSERT INTO sender_rules (user_id,account_id,address,junk_preference,revision,updated) SELECT ?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM connections WHERE id=? AND user_id=?) ON CONFLICT(account_id,address) DO NOTHING')
-      .bind(user,accountId,address,value,revision,Date.now(),accountId,user).run();
-    if(!result.meta.changes)throw new HttpError(409,'This sender preference changed in another tab. Reload and try again.');
+    // The ownership check rides inside the insert so a foreign account id cannot create a
+    // rule, and the conflict clause makes two racing inserts produce one winner.
+    const result=await e.DB.prepare('INSERT INTO sender_rules (user_id,account_id,address,junk_preference,revision,updated,active) SELECT ?,?,?,?,?,?,1 WHERE EXISTS (SELECT 1 FROM connections WHERE id=? AND user_id=?) ON CONFLICT(account_id,address) DO NOTHING')
+      .bind(user,accountId,address,value,revision,now,accountId,user).run();
+    if(!result.meta.changes)throw conflict();
   }
-  return {address,junkPreference:value,revision} satisfies SenderRule;
+  return {address,junkPreference:value,revision,active:true};
 }
 
 /** Apply manual intent to a fresh copy of the automatic result. */
@@ -265,7 +330,8 @@ export function applyOverride(classification:Classification,override?:Override):
     topics:Array.isArray(classification.topics)?[...classification.topics]:[]};
   if(!override||override.active===false)return base;
   const manual=normalizedOverride(override);
-  const next:Classification={...base,override:{source:manual.source,category:manual.category,addTags:[...manual.addTags],removeTags:[...manual.removeTags]}};
+  const next:Classification={...base,override:{source:manual.source,category:manual.category,
+    addTags:[...manual.addTags],removeTags:[...manual.removeTags],junkPreference:manual.junkPreference}};
   if(manual.junkPreference==='not-junk'&&next.disposition==='junk')next.disposition='useful';
   if(manual.junkPreference==='junk'||manual.category==='noise')next.disposition='junk';
   else if(manual.category){next.context=manual.category;if(next.disposition==='junk')next.disposition='useful';}

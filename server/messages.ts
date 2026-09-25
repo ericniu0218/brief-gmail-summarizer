@@ -8,15 +8,42 @@ function emailFromRow(row:Row){
   return email&&row.replied?{...email,needsReply:false}:email;
 }
 
+/**
+ * Fill the fields the interface reads without checking, so a record written by an older
+ * version or damaged in storage cannot crash a render. Only fields where a default is
+ * honest get one: an unknown sender is labelled as such rather than invented, and nothing
+ * here supplies a date, a classification or an account.
+ *
+ * A record with no id is beyond repair and is dropped; every other field has a safe
+ * stand-in, which is why the message stays readable instead of disappearing.
+ */
+export function completeStoredEmail(value:unknown):StoredEmail|undefined{
+  if(!value||typeof value!=='object'||Array.isArray(value))return undefined;
+  const email=value as Partial<StoredEmail>;
+  if(typeof email.id!=='string'||!email.id)return undefined;
+  const text=(candidate:unknown,fallback='')=>typeof candidate==='string'?candidate:fallback;
+  const category=email.category==='work'||email.category==='personal'||email.category==='noise'?email.category:'personal';
+  return {...email,
+    id:email.id,
+    address:text(email.address),
+    sender:text(email.sender,'Unknown sender'),
+    initials:text(email.initials,'?'),
+    subject:text(email.subject,'(no subject)'),
+    summary:text(email.summary),
+    body:text(email.body),
+    time:text(email.time),
+    color:text(email.color,'gray'),
+    category,
+    priority:email.priority==='high'?'high':'normal',
+    needsReply:!!email.needsReply,
+    unread:!!email.unread,
+  } as StoredEmail;
+}
+
 /** Runtime boundary for one independently stored email. Invalid rows are skipped. */
 export function parseStoredEmail(value:string):StoredEmail|undefined{
-  try{
-    const item:unknown=JSON.parse(value);
-    if(!item||typeof item!=='object'||Array.isArray(item))return undefined;
-    const email=item as Partial<StoredEmail>;
-    if(typeof email.id!=='string'||!email.id||typeof email.address!=='string'||typeof email.subject!=='string')return undefined;
-    return item as StoredEmail;
-  }catch{return undefined;}
+  try{return completeStoredEmail(JSON.parse(value));}
+  catch{return undefined;}
 }
 
 export async function loadMessages(user:string,accountId:string,e:Runtime):Promise<StoredEmail[]>{

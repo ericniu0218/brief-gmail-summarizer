@@ -1,7 +1,7 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { demoEmails } from '@/lib/mail';
-import { api, ApiError, loadConnectedInbox, type InboxSnapshot as Snapshot } from '@/lib/inbox-client';
+import { api, ApiError, loadConnectedInbox, syncFailureMessage, type InboxSnapshot as Snapshot } from '@/lib/inbox-client';
 export { api, ApiError } from '@/lib/inbox-client';
 export type GmailAccount={id:string;email:string;lastSync:number|null;error:string|null;reconnectRequired?:boolean};
 export type ConnectionStatus={userId?:string;accounts:GmailAccount[];defaultAccountId:string|null;connected:boolean;configured:boolean;missingSettings?:string[];callbackUrl?:string|null;aiConfigured:boolean;schedulerActive:boolean;intervalMinutes:number};
@@ -83,12 +83,23 @@ export function useInbox(){
   const inFlight=useRef(false);
   // Incrementing this value invalidates callbacks started by an older mailbox lifecycle.
   const generation=useRef(0);
+  // Sync ownership is separate from response freshness. A cached reload may supersede
+  // what a sync is allowed to paint, but the physical Gmail request still owns the mutex
+  // until it settles.
+  const syncGeneration=useRef(0);
+  // A view chosen while a sync holds the mutex is served from the server's cache. The
+  // mailbox itself still needs refreshing, so it is queued here and loaded the moment the
+  // running sync frees the mutex, instead of staying stale until the next poll.
+  const queuedAccount=useRef<string|null>(null);
+  const release=useRef(()=>{});
   const apply=useCallback((data:Snapshot)=>{setEmails(data.emails);setUpdated(data.updated);setAi(data.ai);setHasMore(!!data.hasMore);setSkipped(data.skipped||0);setAccountStates(data.accounts||[]);},[]);
   const resetToDemo=useCallback(()=>{
     // Invalidate connected-account work first, then replace it with the server's current
     // demo snapshot if that request still belongs to this generation.
     const request=++generation.current;
-    inFlight.current=false;setBusy(false);
+    // Discard a mailbox selection queued behind the connected sync. Otherwise releasing
+    // that old sync could start Gmail work after the app has already entered demo mode.
+    queuedAccount.current=null;
     setStatus(previous=>previous?{...previous,connected:false,email:null,accounts:[],defaultAccountId:null,lastSync:null,error:null}:null);
     apply({emails:demoEmails,updated:null,ai:false,hasMore:false});
     void api<Snapshot>('/api/demo').then(data=>{if(generation.current===request)apply(data);}).catch(()=>{});
@@ -99,23 +110,30 @@ export function useInbox(){
     if(inFlight.current)return;
     if(!connected){if(!silent)setNotice('Sample inbox refreshed. Connect Gmail to receive your own email updates.');return;}
     inFlight.current=true;setBusy(true);
+    const syncRequest=++syncGeneration.current;
     const request=++generation.current;
     try{
-      const data=await api<Snapshot>('/api/sync',activeAccountId===ALL_INBOXES?{}:{accountId:activeAccountId});
+      const data=await api<Snapshot>('/api/sync',activeAccountId===ALL_INBOXES?{explicit:!silent}:{accountId:activeAccountId,explicit:!silent});
       if(generation.current!==request)return;
       apply(data);
       const connection=await api<ConnectionStatus>('/api/connection');
       if(generation.current!==request)return;
       setStatus(connection);setSignInUrl(undefined);
-      if(!silent)setNotice('Your inbox is up to date.');
+      // The server answers 200 for a partial refresh, listing per-account failures. Saying
+      // "up to date" without reading them hides a mailbox that did not refresh at all,
+      // and the stale mail still on screen makes that easy to miss.
+      const failure=syncFailureMessage(data);
+      if(failure)setNotice(failure);
+      else if(!silent)setNotice('Your inbox is up to date.');
     }
     catch(error){if(generation.current===request){setNotice(error instanceof Error?error.message:'Could not refresh your inbox.');if(error instanceof ApiError&&error.signInUrl)setSignInUrl(error.signInUrl);}}
-    finally{if(generation.current===request){inFlight.current=false;setBusy(false);}}
+    finally{if(syncGeneration.current===syncRequest)release.current();}
   },[connected,apply,activeAccountId]);
   useEffect(()=>{
     // Initial boot resolves connection state once. Connected accounts stream cached data
     // followed by a refreshed snapshot; disconnected sessions load the shared demo inbox.
     let active=true;
+    let syncRequest=0;
     const request=++generation.current;
     const controller=new AbortController();
     const current=()=>active&&generation.current===request;
@@ -133,16 +151,19 @@ export function useInbox(){
           result.defaultAccountId,
         );
         setSelectedView(restored);
+        syncRequest=++syncGeneration.current;
         inFlight.current=true;setBusy(true);
         apply({emails:[],updated:null,ai:false});
-        await loadConnectedInbox(data=>{if(current())apply(data);},controller.signal,restored===ALL_INBOXES?undefined:restored);
+        const fresh=await loadConnectedInbox(data=>{if(current())apply(data);},controller.signal,restored===ALL_INBOXES?undefined:restored);
         if(!current())return;
+        const partialFailure=syncFailureMessage(fresh);
+        if(partialFailure)setNotice(partialFailure);
         const connection=await api<ConnectionStatus>('/api/connection',undefined,controller.signal);
         if(current())setStatus(connection);
       }
       else{const data=await api<Snapshot>('/api/demo',undefined,controller.signal).catch(()=>null);if(current()&&data)apply(data);}
     }).catch(error=>{if(current()){setNotice(error instanceof Error?error.message:'Connection status is unavailable. Please refresh the page to try again.');if(error instanceof ApiError&&error.signInUrl)setSignInUrl(error.signInUrl);}})
-      .finally(()=>{if(current()){inFlight.current=false;setBusy(false);}});
+      .finally(()=>{if(active&&syncRequest&&syncGeneration.current===syncRequest)release.current();});
     return()=>{active=false;controller.abort();if(noticeTimer!==null)window.clearTimeout(noticeTimer);};
   },[apply]);
   useEffect(()=>{
@@ -162,15 +183,76 @@ export function useInbox(){
    * Switching mailboxes invalidates any in-flight work first, so a slow response for the
    * previous account can never paint over the newly selected one.
    */
+  const loadAccount=useCallback((accountId:string|undefined)=>{
+    const request=++generation.current;
+    inFlight.current=true;setBusy(true);
+    const syncRequest=++syncGeneration.current;
+    void loadConnectedInbox(data=>{if(generation.current===request)apply(data);},undefined,accountId)
+      .then(async fresh=>{
+        if(generation.current!==request)return;
+        const partialFailure=syncFailureMessage(fresh);
+        if(partialFailure)setNotice(partialFailure);
+        const connection=await api<ConnectionStatus>('/api/connection');
+        if(generation.current===request)setStatus(connection);
+      })
+      .catch(error=>{if(generation.current===request)setNotice(error instanceof Error?error.message:'Could not load that mailbox.');})
+      .finally(()=>{if(syncGeneration.current===syncRequest)release.current();});
+  },[apply]);
+
+  useEffect(()=>{
+    release.current=()=>{
+      inFlight.current=false;setBusy(false);
+      const next=queuedAccount.current;
+      queuedAccount.current=null;
+      // Only the view still selected is worth loading; an older queued choice was already
+      // replaced by this one, and the generation check discards anything it started.
+      if(next!==null)loadAccount(next===ALL_INBOXES?undefined:next);
+    };
+  },[loadAccount]);
+
   const selectAccount=useCallback((view:string)=>{
     const request=++generation.current;
-    inFlight.current=false;setBusy(false);
     setSelectedView(view);
     if(userKey)rememberSelection(userKey,view);
     setEmails([]);setUpdated(null);setAi(false);setHasMore(false);setSkipped(0);setAccountStates([]);
-    void loadConnectedInbox(data=>{if(generation.current===request)apply(data);},undefined,view===ALL_INBOXES?undefined:view)
-      .catch(error=>{if(generation.current===request)setNotice(error instanceof Error?error.message:'Could not load that mailbox.');});
-  },[apply,userKey]);
+    const accountId=view===ALL_INBOXES?undefined:view;
+    const cached=accountId?`/api/mailbox?accountId=${encodeURIComponent(accountId)}`:'/api/mailbox';
+    // If another Gmail request is still running, switch views from the server's cache and
+    // leave that request holding the mutex. Starting a second sync would only hit the
+    // server lease and show a false failure for an otherwise healthy mailbox.
+    if(inFlight.current){
+      queuedAccount.current=view;
+      void api<Snapshot>(cached).then(data=>{if(generation.current===request)apply(data);})
+        .catch(error=>{if(generation.current===request)setNotice(error instanceof Error?error.message:'Could not load that mailbox.');});
+      return;
+    }
+    loadAccount(accountId);
+  },[apply,userKey,loadAccount]);
+
+  /**
+   * Re-read the mailbox already stored on the server, without contacting Gmail or the
+   * model. Used after a correction or sender rule changes what messages mean, so counts,
+   * Overview, the brief and the calendar all move together.
+   *
+   * Starting a new generation discards any poll or sync that began before the change:
+   * an older response must never paint the pre-change state back over it. Returns whether
+   * the refresh actually landed, so a caller can tell "saved but not refreshed" from
+   * "not saved" and offer the right retry.
+   */
+  const reloadCached=useCallback(async()=>{
+    if(!connected)return false;
+    // Supersede what the older response may paint, while leaving the sync mutex with the
+    // physical Gmail request until that request actually settles.
+    const request=++generation.current;
+    try{
+      const data=await api<Snapshot>(activeAccountId===ALL_INBOXES?'/api/mailbox':`/api/mailbox?accountId=${encodeURIComponent(activeAccountId)}`);
+      // The list stays visible throughout; it is replaced only if this is still the newest
+      // request and nothing has switched account underneath it.
+      if(generation.current!==request)return false;
+      apply(data);
+      return true;
+    }catch{return false;}
+  },[connected,activeAccountId,apply]);
 
   const setDefaultAccount=useCallback(async(accountId:string)=>{
     await api('/api/default-account',{accountId});
@@ -192,5 +274,5 @@ export function useInbox(){
     setActiveAccountId:selectAccount,
     defaultAccountId:status?.defaultAccountId||null,
     connected,busy,notice,setNotice,signInUrl,updated,ai,hasMore,skipped,refresh,resetToDemo,
-    reload:async()=>{await refresh(true)},setDefaultAccount,disconnectAccount};
+    reload:async()=>{await refresh(true)},reloadCached,setDefaultAccount,disconnectAccount};
 }

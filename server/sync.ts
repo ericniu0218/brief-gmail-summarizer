@@ -1,7 +1,7 @@
 import { accessToken, emailFrom, getOwnedConnection, gmail, safeUnsubscribe } from './gmail';
 import { hydrateDeferredBodies, normalizeMessage, type GmailMessage, type NormalizedMessage } from './message';
 import { classifyMessages } from './classify';
-import { applyOverride, automaticBaseline, contentFingerprint, loadOverrides, loadSenderRules, manualCorrectionView, withSenderRule } from './overrides';
+import { activeJunkPreference, applyOverride, automaticBaseline, contentFingerprint, loadOverrides, loadSenderRules, manualCorrectionView, senderRuleFor, withSenderRule } from './overrides';
 import { parseSnapshot } from './snapshots';
 import { loadMessageMap, loadMessages, parseStoredEmail } from './messages';
 import { deterministicClassify } from '@/lib/deterministic';
@@ -44,13 +44,24 @@ export async function summarizeInbox(emails:Email[],e:Runtime){
 export async function syncInbox(user:string,accountId:string,e:Runtime) {
   const owned=await getOwnedConnection(user,accountId,e);
   const now=Date.now();
-  const leaseUntil=now+600000;
+  let leaseUntil=now+600000;
   // The token returned by this atomic update identifies both the connection and the
   // refresh that acquired the lease. Concurrent refreshes stop here with a conflict.
   // The lease is per account row, so refreshing one mailbox never blocks another.
   const lock=await e.DB.prepare('UPDATE connections SET sync_lock = ? WHERE id = ? AND user_id = ? AND sync_lock < ? RETURNING token, sync_page_token, sync_generation, sync_skipped, sync_full_scan, backfill_complete, last_full_scan, content_version')
     .bind(leaseUntil,accountId,user,now).first<{token:string;sync_page_token:string|null;sync_generation:string|null;sync_skipped:number;sync_full_scan:number;backfill_complete:number;last_full_scan:number|null;content_version:number}>();
   if(!lock)throw new HttpError(409,'This inbox is already being refreshed.');
+  // Long backfills renew their lease at each expensive boundary. The exact previous
+  // expiry and credential must still match, so a stale or reconnected worker cannot
+  // reclaim ownership after another refresh has taken over.
+  const renewLease=async()=>{
+    const checkedAt=Date.now();
+    const next=checkedAt+600000;
+    const renewed=await e.DB.prepare('UPDATE connections SET sync_lock = ? WHERE id = ? AND user_id = ? AND token = ? AND sync_lock = ? AND sync_lock > ?')
+      .bind(next,accountId,user,lock.token,leaseUntil,checkedAt).run();
+    if(!renewed.meta.changes)throw new HttpError(409,'This Gmail refresh expired or the connection changed. Please refresh the inbox again.');
+    leaseUntil=next;
+  };
   try{
     const token=await accessToken(user,accountId,e);
     const account=owned.email;
@@ -72,6 +83,7 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
           .bind(accountId,user,lock.token,leaseUntil).run();
       throw error;
     }
+    await renewLease();
     // The previous snapshot is a classification cache as well as the last visible inbox.
     const previous=await e.DB.prepare('SELECT data, revision FROM snapshots WHERE account_id = ? AND user_id = ?').bind(accountId,user).first<{data:string;revision:number}>();
     const old=previous?parseSnapshot(previous.data):undefined;
@@ -91,6 +103,7 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
     // Keep Gmail requests in small parallel groups so a refresh is fast without sending
     // an unbounded burst of full-message requests.
     for(let i=0;i<refs.length;i+=6){
+      await renewLease();
       const chunk=refs.slice(i,i+6);
       const batch=await Promise.allSettled(chunk.map(async ({id})=>{
         const raw=await gmail<GmailMessage>('messages/'+encodeURIComponent(id)+'?format=full',token);
@@ -115,7 +128,9 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
     };
     const fresh=normalized.filter(message=>!reusable(message));
     // Only new or changed content crosses the model boundary.
+    await renewLease();
     const {results,failures}=await classifyMessages(fresh,account,e);
+    await renewLease();
     const removed=await e.DB.prepare('SELECT address FROM unsubscribed WHERE account_id = ? AND user_id = ?').bind(accountId,user).all<{address:string}>();
     const muted=new Set(removed.results.map(r=>r.address));
     let pending=0;
@@ -135,7 +150,7 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
         // The snapshot retains `classification` as the effective display value for old
         // clients, but `automaticClassification` is the clean cache used by every future
         // sync, mailbox read and reset. Manual intent can never contaminate that cache.
-        const manual=overrides.get(message.id),senderRule=senderRules.get(message.from.address);
+        const manual=overrides.get(message.id),senderRule=senderRuleFor(senderRules,message.from.address);
         const effective=withSenderRule(manual,senderRule,message.id);
         const email=emailFrom(message,applyOverride(classification,effective));
         if(muted.has(email.address))continue;
@@ -144,7 +159,7 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
         pageEmails.push({...email,accountId,accountEmail:account,automaticClassification:classification,
           correctionRevision:manual?.revision??0,manuallyCorrected:manual?.active!==false&&!!manual,
           manualCorrection:manualCorrectionView(manual),
-          senderJunkPreference:senderRule?.junkPreference,senderRuleRevision:senderRule?.revision??0,
+          senderJunkPreference:activeJunkPreference(senderRule),senderRuleRevision:senderRule?.revision??0,
           automaticClassificationAvailable:true,
           fingerprint:contentFingerprint(message),
           analysisVersion:results.has(message.id)?currentAnalysisVersion:stored?cached.get(message.id)!.analysisVersion:'',
@@ -164,11 +179,15 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
     // mail without blanking the inbox during a partial scan.
     // Preserve the last readable copy of a malformed message and mark it seen in this scan.
     for(const id of unreadableIds)if(cached.has(id))pageEmails.push({...cached.get(id)!,syncGeneration:generation});
-    for(let i=0;i<pageEmails.length;i+=50)await e.DB.batch(pageEmails.slice(i,i+50).map(email=>
+    for(let i=0;i<pageEmails.length;i+=50){
+      await renewLease();
+      await e.DB.batch(pageEmails.slice(i,i+50).map(email=>
       // Recheck unsubscribe state inside the write, closing the gap between the earlier
       // sender lookup and this upsert. Preserve a successful reply recorded concurrently.
       e.DB.prepare("INSERT INTO mailbox_messages (user_id,account_id,message_id,data,received_at,scan_generation,replied) SELECT ?,?,?,?,?,?,0 WHERE NOT EXISTS (SELECT 1 FROM unsubscribed WHERE account_id=? AND user_id=? AND address=?) ON CONFLICT(account_id,message_id) DO UPDATE SET data=CASE WHEN mailbox_messages.replied=1 THEN json_set(excluded.data,'$.needsReply',json('false')) ELSE excluded.data END,received_at=excluded.received_at,scan_generation=excluded.scan_generation")
         .bind(user,accountId,email.id,JSON.stringify(email),email.receivedAt||0,generation,accountId,user,email.address)));
+    }
+    await renewLease();
     for(const address of muted)await e.DB.prepare('DELETE FROM mailbox_messages WHERE account_id=? AND user_id=? AND json_extract(data,\'$.address\')=?').bind(accountId,user,address).run();
     if(fullScan&&!list.nextPageToken){
       await e.DB.prepare('DELETE FROM mailbox_messages WHERE account_id=? AND user_id=? AND scan_generation<>?').bind(accountId,user,generation).run();
@@ -184,6 +203,7 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
     // Keep only this bounded page in the legacy snapshot for rolling compatibility. The
     // complete mailbox lives in `mailbox_messages` and is never serialized as one blob.
     const snapshot:Snapshot={emails:pageEmails,ai:pending===0&&!!e.GEMINI_API_KEY,pending,skipped:totalSkipped,analysisVersion:currentAnalysisVersion,updated:Date.now(),limit:totals?.total||0,hasMore:!!list.nextPageToken};
+    await renewLease();
     // Both the lease and the encrypted credential identify this refresh's owner.
     // A reconnect changes the credential even if it renews the same mailbox.
     const writes=await e.DB.batch([

@@ -83,9 +83,18 @@ export const mailboxMessages = sqliteTable('mailbox_messages', {
   replied: integer('replied').notNull().default(0),
 }, table => [primaryKey({columns:[table.accountId,table.messageId]}), index('mailbox_messages_account_received').on(table.accountId,table.receivedAt)]);
 /** A sender rule applies only inside one connected Gmail account. */
+/**
+ * A sender rule applies only inside one connected Gmail account.
+ *
+ * Clearing a rule leaves an inactive tombstone rather than deleting the row, so its
+ * revision keeps counting upward. Deleting would restart it at zero and let a request
+ * written before the clear recreate the rule it was supposed to remove.
+ */
 export const senderRules = sqliteTable('sender_rules', {
   userId:text('user_id').notNull(),accountId:text('account_id').notNull(),address:text('address').notNull(),
   junkPreference:text('junk_preference').notNull(),revision:integer('revision').notNull().default(1),updated:integer('updated').notNull(),
+  // 0 means the rule was cleared; the row survives only to keep its revision monotonic.
+  active:integer('active').notNull().default(1),
 }, table => [primaryKey({columns:[table.accountId,table.address]}),index('sender_rules_user').on(table.userId)]);
 export const operations = sqliteTable('operations', {
   // The id is a fingerprint that includes the account, so the same text sent from two
@@ -95,6 +104,8 @@ export const operations = sqliteTable('operations', {
   accountId: text('account_id').notNull(),
   status: text('status').notNull(),
   result: text('result'),
+  // When the attempt was claimed, so an unconfirmed one can say how long ago it happened.
+  created: integer('created').notNull().default(0),
 }, table => [index('operations_account').on(table.accountId)]);
 export const unsubscribed = sqliteTable('unsubscribed', {
   id: text('id').primaryKey(),

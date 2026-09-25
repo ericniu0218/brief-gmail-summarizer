@@ -5,6 +5,7 @@ import { actionAccountId, type Email } from '@/lib/mail';
 import { SECTIONS, sectionName, tagName, type Section, type Tag } from '@/lib/categories';
 import { appliesToUser, isOverdue, isResolved, obligationCorrectionKey, reviewExplanation } from '@/lib/classification';
 import { api, ApiError } from '@/hooks/use-inbox';
+import { useSenderRule } from '@/hooks/use-sender-rule';
 
 const CORRECTABLE_TAGS:Tag[]=['deadlines','meetings','requests','actions','research','low-priority'];
 
@@ -12,10 +13,11 @@ const CORRECTABLE_TAGS:Tag[]=['deadlines','meetings','requests','actions','resea
  * Full explanation for one message: why it landed where it did, the evidence behind each
  * obligation, and the controls to correct it. Row chips stay compact; detail lives here.
  */
-export function ClassificationDetail({email,demo,onApplied}:{email:Email;demo:boolean;onApplied:(email:Email)=>void}){
+export function ClassificationDetail({email,demo,onApplied,onRefresh}:{email:Email;demo:boolean;onApplied:(email:Email)=>void;onRefresh?:()=>Promise<boolean>}){
   const [open,setOpen]=useState(false);
   const [busy,setBusy]=useState(false);
   const [message,setMessage]=useState('');
+  const senderRule=useSenderRule({email,demo,onApplied,onRefresh});
   const [now]=useState(()=>Date.now());
   const classification=email.classification;
   const tags=email.tags||[];
@@ -84,10 +86,10 @@ export function ClassificationDetail({email,demo,onApplied}:{email:Email;demo:bo
           onClick={()=>void correct(manual?.junkPreference==='junk'?{type:'clear-junk-preference'}:{type:'set-junk-preference',value:'junk'})}>Move to Junk</button>
       </div></div>
       <div className="control-row"><span>This sender</span><div>
-        <button type="button" disabled={busy} data-active={email.senderJunkPreference==='not-junk'||undefined}
-          onClick={()=>void correct(email.senderJunkPreference==='not-junk'?{type:'clear-sender-junk-preference'}:{type:'set-sender-junk-preference',value:'not-junk'})}>Always keep</button>
-        <button type="button" disabled={busy} data-active={email.senderJunkPreference==='junk'||undefined}
-          onClick={()=>void correct(email.senderJunkPreference==='junk'?{type:'clear-sender-junk-preference'}:{type:'set-sender-junk-preference',value:'junk'})}>Always move to Junk</button>
+        <button type="button" disabled={busy||senderRule.pending!==null} data-active={email.senderJunkPreference==='not-junk'||undefined}
+          onClick={()=>void senderRule.save('mark',email.senderJunkPreference==='not-junk'?undefined:'not-junk',{success:email.senderJunkPreference==='not-junk'?'Sender preference removed.':'This sender will always be kept.'})}>Always keep</button>
+        <button type="button" disabled={busy||senderRule.pending!==null} data-active={email.senderJunkPreference==='junk'||undefined}
+          onClick={()=>void (email.senderJunkPreference==='junk'?senderRule.clearRule():senderRule.markJunk())}>Always move to Junk</button>
       </div></div>
       <div className="control-row"><span>Tags</span><div>
         {CORRECTABLE_TAGS.map(tag=>{const added=manual?.addTags.includes(tag),removed=manual?.removeTags.includes(tag),corrected=added||removed;return <button key={tag} type="button" disabled={busy}

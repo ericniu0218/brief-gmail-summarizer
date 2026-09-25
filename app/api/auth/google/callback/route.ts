@@ -65,6 +65,20 @@ export async function GET(request:Request){
       e.DB.prepare('INSERT INTO account_preferences (user_id,default_account_id) VALUES (?,?) ON CONFLICT(user_id) DO NOTHING').bind(user,accountId),
     ]);
     if(!results[0].meta.changes)throw new HttpError(409,'That inbox is still refreshing. Please try connecting Gmail again when it finishes.');
+    // Two callbacks completing at once for the same new mailbox each invent an id, and the
+    // unique index keeps only one row. The token just written may therefore be bound to the
+    // id that lost, which no key can decrypt. Read back the id that is actually stored and
+    // rebind the credential to it. Both racers reach the same stored id, so whichever runs
+    // last still leaves a working connection.
+    const stored=await e.DB.prepare('SELECT id FROM connections WHERE user_id = ? AND email = ?').bind(user,email).first<{id:string}>();
+    if(stored&&stored.id!==accountId){
+      const rebound=await e.DB.prepare('UPDATE connections SET token=?, token_version=? WHERE id=? AND user_id=?')
+        .bind(await encrypt(token.refresh_token,user,e,stored.id),CURRENT_TOKEN_VERSION,stored.id,user).run();
+      if(!rebound.meta.changes)throw new HttpError(409,'That mailbox was connected in another tab. Reload the page to use it.');
+      // The default may have been set to the id that lost, which names no account at all.
+      await e.DB.prepare('UPDATE account_preferences SET default_account_id=? WHERE user_id=? AND default_account_id=?')
+        .bind(stored.id,user,accountId).run();
+    }
     return Response.redirect(origin+'/?connected=1',302);
   }catch(error){
     // Unexpected failures (database, encryption) otherwise leave no trace in the hosting logs.

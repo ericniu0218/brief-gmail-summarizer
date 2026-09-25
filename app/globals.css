@@ -15,7 +15,35 @@
 .email-list-more button{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;background:transparent;border:0;padding:16px 18px;font-size:13px;font-weight:550;color:#5d7fb8;text-align:center}
 .email-list-more button:hover{background:#f7f9fd}
 .email-list-more button:focus-visible{outline:2px solid #3477e8;outline-offset:-2px}
-.email-list-remaining{font-size:11px;font-weight:400;color:#a1a8b2}.secondary-column{display:flex;flex-direction:column;gap:19px}.agent-card{background:white;border:1px solid var(--border);border-radius:12px;padding:20px}.aside-title{display:flex;align-items:center;justify-content:space-between}.agent-orb.large{width:40px;height:40px;border-radius:12px;background:#f0f4ff}.pill{font-size:9px;letter-spacing:.6px;font-weight:500;padding:5px 7px;border-radius:5px;background:#eaf7f0;color:#64a182}.pill.neutral{background:#f2f4f8;color:#94a1b3}.agent-card h2{font-size:21px;line-height:1.45;letter-spacing:-.55px;font-weight:550;margin:20px 0 11px}.agent-card>p{font-size:12px;color:#979fab;line-height:1.85;margin:0 0 19px}.agent-schedule{display:flex;align-items:center;gap:9px;font-size:12px;color:#8591a3;border-top:1px solid #eef0f4;padding:16px 0 20px}.agent-card .button{font-size:12px}.private-note{display:flex;align-items:center;justify-content:center;gap:4px;color:#a8b0ba;font-size:10px;margin:13px 0 0}.noise-card{border:1px solid var(--border);border-radius:12px;padding:21px;background:white}.noise-card h2{font-size:14px;font-weight:580;display:flex;align-items:center;gap:8px;margin:0}.noise-card h2 svg{color:#98a2b2}.soft-count{background:#f0f2f6;color:#919cae;padding:3px 6px;border-radius:5px;font-size:10px}.noise-card>p{color:#9aa2ae;font-size:12px;line-height:1.8;margin:13px 0 20px}.noise-stack{display:flex;align-items:center}.mini-logo{display:flex;align-items:center;justify-content:center;width:29px;height:29px;border-radius:8px;border:2px solid white;font-size:10px;font-weight:600;margin-right:-5px}.senders-label{color:#a2aab6;font-size:10px;margin-left:15px}.noise-rule{height:1px;background:#f0f1f4;margin:20px 0 15px}.text-button{border:0;background:transparent;display:flex;align-items:center;justify-content:space-between;width:100%;padding:0;color:#7d8da5;font-size:11px}.calm-note{padding:17px 20px;display:flex;align-items:center;gap:9px;justify-content:center;flex-wrap:wrap;color:#b7bec8}.calm-line{width:25px;height:1px;background:#e0e4eb}.calm-note p{width:100%;text-align:center;font-size:10px;margin:0;letter-spacing:.2px}.page-footer{border-top:1px solid #e9ecf1;display:flex;align-items:center;justify-content:space-between;padding-top:18px;margin-top:6px;font-size:10px;color:#aab1bd}.page-footer>span:first-child{display:flex;align-items:center;gap:6px}.connection-dialog{padding:30px!important;max-width:450px!important;border-radius:20px!important;gap:17px!important}.connect-hero{margin:6px 0 9px}.connect-hero .brand-icon{width:52px;height:52px;border-radius:15px}.connection-dialog [data-slot=dialog-title]{font-size:24px;letter-spacing:-.5px}.connection-dialog [data-slot=dialog-description]{font-size:14px;line-height:1.7}.setup-note{font-size:13px;color:#7a8699;background:#f4f7fc;padding:14px;border-radius:9px;line-height:1.7}.email-sheet{width:560px!important;max-width:100%!important;padding:25px;gap:25px!important;overflow:auto}.email-sheet [data-slot=sheet-header]{padding:18px 0 0;gap:14px}.email-sheet [data-slot=sheet-title]{font-size:24px;line-height:1.4;letter-spacing:-.6px}.email-sheet [data-slot=sheet-description]{font-size:12px}.message-body{white-space:pre-wrap;line-height:1.9;font-size:14px;padding:22px 0;border-top:1px solid var(--border)}.reply-area{padding:20px;border:1px solid #dfe8f7;background:#f7faff;border-radius:13px;margin-top:auto}.reply-label{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:550;color:#6985b1}.reply-area>p{font-size:13px;color:#919cae;line-height:1.7}
+.email-list-remaining{font-size:11px;font-weight:400;color:#a1a8b2}.secondary-column{display:flex;flex-direction:column;gap:19px}.agent-card{background:white;border:1px solid var(--border);border-radius:12px;padding:20px}.aside-title{display:flex;align-items:center;justify-content:space-between}.agent-orb.large{width:40px;height:40px;border-radius:12px;background:#f0f4ff}.pill{font-size:9px;letter-spacing:.6px;font-weight:500;padding:5px 7px;border-radius:5px;background:#eaf7f0;color:#64a182}.pill.neutral{background:#f2f4f8;color:#94a1b3}.agent-card h2{font-size:21px;line-height:1.45;letter-spacing:-.55px;font-weight:550;margin:20px 0 11px}.agent-card>p{font-size:12px;color:#979fab;line-height:1.85;margin:0 0 19px}.agent-schedule{display:flex;align-items:center;gap:9px;font-size:12px;color:#8591a3;border-top:1px solid #eef0f4;padding:16px 0 20px}.agent-card .button{font-size:12px}.private-note{display:flex;align-items:center;justify-content:center;gap:4px;color:#a8b0ba;font-size:10px;margin:13px 0 0}.noise-card{border:1px solid var(--border);border-radius:12px;padding:21px;background:white}.noise-card h2{font-size:14px;font-weight:580;display:flex;align-items:center;gap:8px;margin:0}.noise-card h2 svg{color:#98a2b2}.soft-count{background:#f0f2f6;color:#919cae;padding:3px 6px;border-radius:5px;font-size:10px}.noise-card>p{color:#9aa2ae;font-size:12px;line-height:1.8;margin:13px 0 20px}.noise-stack{display:flex;align-items:center}.mini-logo{display:flex;align-items:center;justify-content:center;width:29px;height:29px;border-radius:8px;border:2px solid white;font-size:10px;font-weight:600;margin-right:-5px}.senders-label{color:#a2aab6;font-size:10px;margin-left:15px}.noise-rule{height:1px;background:#f0f1f4;margin:20px 0 15px}.text-button{border:0;background:transparent;display:flex;align-items:center;justify-content:space-between;width:100%;padding:0;color:#7d8da5;font-size:11px}.calm-note{padding:17px 20px;display:flex;align-items:center;gap:9px;justify-content:center;flex-wrap:wrap;color:#b7bec8}.calm-line{width:25px;height:1px;background:#e0e4eb}.calm-note p{width:100%;text-align:center;font-size:10px;margin:0;letter-spacing:.2px}.page-footer{border-top:1px solid #e9ecf1;display:flex;align-items:center;justify-content:space-between;padding-top:18px;margin-top:6px;font-size:10px;color:#aab1bd}.page-footer>span:first-child{display:flex;align-items:center;gap:6px}.connection-dialog{padding:30px!important;max-width:450px!important;border-radius:20px!important;gap:17px!important}.connect-hero{margin:6px 0 9px}.connect-hero .brand-icon{width:52px;height:52px;border-radius:15px}.connection-dialog [data-slot=dialog-title]{font-size:24px;letter-spacing:-.5px}.connection-dialog [data-slot=dialog-description]{font-size:14px;line-height:1.7}.setup-note{font-size:13px;color:#7a8699;background:#f4f7fc;padding:14px;border-radius:9px;line-height:1.7}.email-sheet{width:560px!important;max-width:100%!important;padding:25px;gap:25px!important;overflow:auto}.email-sheet [data-slot=sheet-header]{padding:18px 0 0;gap:14px}.email-sheet [data-slot=sheet-title]{font-size:24px;line-height:1.4;letter-spacing:-.6px}.email-sheet [data-slot=sheet-description]{font-size:12px}
+/* The reader's own action row. The sheet's built-in close button is disabled for this
+   sheet and its SheetClose primitive is rendered here instead, so there is exactly one
+   close control and the subject below always has clear space above it. */
+.email-sheet-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;min-height:32px;flex-wrap:nowrap}
+.email-sheet-close{display:flex;align-items:center;justify-content:center;flex-shrink:0;width:32px;height:32px;border:0;background:transparent;border-radius:7px;color:#8a929f;cursor:pointer}
+.email-sheet-close:hover{background:#f1f4f9;color:#5d6675}
+.sender-junk-button{display:flex;align-items:center;gap:6px;min-width:0;min-height:32px;padding:6px 10px;border:1px solid #e3e6eb;background:#fff;border-radius:7px;font-size:12px;font-weight:500;color:#6b7383;cursor:pointer}
+.sender-junk-button:hover:not(:disabled){background:#f7f9fd;color:#4a5568}
+.sender-junk-button:disabled{opacity:.6;cursor:default}
+.sender-junk-button[data-active]{border-color:#e4d2d6;background:#fdf5f6;color:#a9707d}
+.sender-junk-button[data-active]:hover:not(:disabled){background:#fbeef0}
+.sender-junk-button:focus-visible,.email-sheet-close:focus-visible{outline:2px solid #3477e8;outline-offset:2px}
+.sender-junk-label-short{display:none}
+.sender-junk-state{display:block;text-align:right;font-size:11px;color:#a9707d;margin:-4px 0 0}
+.sender-junk-notice{display:flex;align-items:center;gap:10px;justify-content:space-between;border:1px solid #dce7f7;background:#f2f6fd;border-radius:8px;padding:9px 12px;font-size:12px;line-height:1.6;color:#5c7dab}
+.sender-junk-notice.error{border-color:#eedadd;background:#fdf5f6;color:#a9707d}
+.sender-junk-notice button{border:0;background:transparent;font-size:12px;font-weight:550;color:inherit;text-decoration:underline;cursor:pointer;padding:2px 4px;border-radius:5px}
+.sender-junk-notice button:focus-visible{outline:2px solid #3477e8;outline-offset:1px}
+.sender-junk-dialog{max-width:420px!important;padding:24px!important;gap:14px!important}
+.sender-junk-dialog-actions{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap}
+/* Narrow screens keep the full accessible name on the button while shortening the text,
+   and the touch target never drops below the row height. */
+@media(max-width:420px){
+  .sender-junk-label{display:none}
+  .sender-junk-label-short{display:inline}
+  .sender-junk-button{padding:6px 12px}
+  .sender-junk-dialog-actions .button{flex:1}
+}.message-body{white-space:pre-wrap;line-height:1.9;font-size:14px;padding:22px 0;border-top:1px solid var(--border)}.reply-area{padding:20px;border:1px solid #dfe8f7;background:#f7faff;border-radius:13px;margin-top:auto}.reply-label{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:550;color:#6985b1}.reply-area>p{font-size:13px;color:#919cae;line-height:1.7}
 /* Keep everyday labels and message content readable at laptop sizes. */
 .email-text h3{font-size:14px}.email-text p{font-size:12px}.sender-line strong{font-size:13px}.mail-label{font-size:10px}.email-actions time,.quick-reply,.no-action{font-size:11px}.stat small{font-size:12px}.brief-points p{font-size:14px;line-height:1.75}.brief-intro{font-size:14px}.agent-card>p,.noise-card>p{font-size:13px}.eyebrow{font-size:12px}.ai-label{font-size:10px}.brief-time,.private-note,.calm-note p,.page-footer,.senders-label{font-size:12px}.page-footer{gap:20px}.stats-grid .stat>div{flex-wrap:wrap;gap:3px 9px}.inbox-toolbar [data-slot=tabs-trigger],.sort-label,.quick-reply,.text-button{font-size:12px}.secondary-label{font-size:12px}.agent-card .button{font-size:13px}
 @media(min-width:1550px){.dashboard-content{padding-top:50px}.content-columns{grid-template-columns:minmax(0,1fr) 290px;gap:30px}.brief-points>button{padding:12px 1px}.email-row{padding:21px}.stat small{font-size:13px}.brand-block{padding-top:40px!important}}
@@ -230,6 +258,14 @@
 .dark .inbox-toolbar [data-slot=tabs-trigger][data-active]{background:var(--surface);color:var(--text-strong)}
 .dark .email-row,.dark .email-fold,.dark .sender-group,.dark .folded-email,.dark .group-emails button{border-color:var(--line)}
 .dark .email-list-more{border-color:var(--line)}
+.dark .sender-junk-button{background:var(--surface-soft);border-color:var(--line);color:var(--text)}
+.dark .sender-junk-button:hover:not(:disabled){background:var(--muted)}
+.dark .sender-junk-button[data-active]{background:var(--muted);border-color:var(--line);color:var(--text-strong)}
+.dark .email-sheet-close{color:var(--text-soft)}
+.dark .email-sheet-close:hover{background:var(--muted);color:var(--text)}
+.dark .sender-junk-notice{background:var(--surface-soft);border-color:var(--line);color:var(--text)}
+.dark .sender-junk-notice.error{background:var(--muted);border-color:var(--line);color:var(--text-strong)}
+.dark .sender-junk-state{color:var(--text-soft)}
 .dark .calendar-range:hover,.dark .calendar-range:hover .calendar-range-caret{color:var(--primary)}
 .dark .calendar-range-caret{color:var(--text-soft)}
 .dark .calendar-range-menu{background:var(--surface);border-color:var(--line);box-shadow:0 6px 18px #00000059}
@@ -318,12 +354,26 @@
 .conversation-tags{display:flex;flex-wrap:wrap;gap:6px}
 .conversation-tags .mail-label.section{background:#e4ebf8;color:#4777c1;font-weight:550}
 .dark .conversation-tags .mail-label.section{background:var(--accent);color:var(--primary)}
+.message-body{overflow-wrap:anywhere;word-break:break-word;min-width:0}
+.message-link{color:var(--primary);text-decoration:underline;text-decoration-color:color-mix(in srgb,var(--primary) 45%,transparent);text-underline-offset:2px}
+.message-link:hover{text-decoration-color:currentColor}
+.message-link:focus-visible{outline:2px solid var(--primary);outline-offset:2px;border-radius:2px}
 .formatted-email{border-top:1px solid var(--border);padding-top:14px}
+.formatted-email .message-body{border-top:0;padding-top:12px}
+.email-reader-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}
+.email-view-toggle{display:inline-flex;margin:0;padding:3px;border:1px solid var(--border);border-radius:8px;background:var(--muted)}
+.email-view-toggle button,.email-expand{border:0;border-radius:6px;background:transparent;color:var(--muted-foreground);padding:5px 9px;cursor:pointer;font-size:11px}
+.email-view-toggle button[data-active]{background:var(--card);color:var(--foreground);box-shadow:0 1px 3px #00000012}
+.email-expand{margin-left:auto;border:1px solid var(--border);background:var(--card);color:var(--foreground)}
+.email-view-toggle button:hover,.email-expand:hover{color:var(--primary)}
+.email-view-toggle button:focus-visible,.email-expand:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
 .email-image-controls{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px;color:var(--muted-foreground);font-size:11px}
 .email-image-controls button{border:1px solid var(--border);border-radius:7px;background:var(--card);color:var(--foreground);padding:5px 8px;cursor:pointer;font-size:11px}
 .email-image-controls button:hover{border-color:var(--primary);color:var(--primary)}
 .email-image-controls button:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
 .email-document{display:block;width:100%;height:min(70vh,760px);min-height:480px;border:1px solid var(--border);border-radius:10px;background:white}
+.email-document.expanded{height:calc(100vh - 96px);max-height:1200px;min-height:760px}
+@media(max-width:600px){.email-reader-toolbar{align-items:flex-start}.email-document{height:62vh;min-height:360px}.email-document.expanded{height:85vh;min-height:600px}}
 .classification-detail{border-top:1px solid var(--border);padding:20px 0;display:flex;flex-direction:column;gap:14px}
 .classification-summary{display:flex;gap:9px;align-items:flex-start;font-size:13px;line-height:1.7;color:#6d7787}
 .classification-summary svg{margin-top:3px;flex-shrink:0;color:#8b96a8}

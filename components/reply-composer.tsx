@@ -2,7 +2,7 @@
 import { useState } from 'react';
 import { Sparkles, Send, FilePenLine, RefreshCw, ExternalLink, Wand2, Check, CheckCircle2 } from 'lucide-react';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { api } from '@/hooks/use-inbox';
+import { api, ApiError } from '@/hooks/use-inbox';
 import { actionAccountId, gmailLink, type Email } from '@/lib/mail';
 
 /**
@@ -21,6 +21,7 @@ export function ReplyComposer({email,demo,aiReady,onSent}:{email:Email;demo:bool
   const [error,setError]=useState(false);
   const [variation,setVariation]=useState(0);
   const [sent,setSent]=useState('');
+  const [unconfirmed,setUnconfirmed]=useState<'send'|'draft'|null>(null);
   function endpoint(){return demo?'/api/suggest':'/api/reply';}
   async function generate(){
     // Regeneration increments a bounded variation number so the server can request a
@@ -45,14 +46,14 @@ export function ReplyComposer({email,demo,aiReady,onSent}:{email:Email;demo:bool
     }catch(error){setMessage(error instanceof Error?error.message:'Could not polish your notes into a reply.');setError(true);}
     finally{setBusy('');}
   }
-  async function complete(action:'send'|'draft'){
+  async function complete(action:'send'|'draft',confirmUnsent=false){
     // Demo mode exercises the interface locally. Connected mode is the only branch that
     // calls the Gmail-changing reply endpoint.
-    setBusy(action);setMessage('');setError(false);
+    setBusy(action);setMessage('');setError(false);setUnconfirmed(null);
     try{
       if(demo){setMessage(action==='send'?'Demo reply complete. No email was sent.':'Demo draft saved for this conversation.');if(action==='send'){setSent(text);onSent();}}
-      else{await api('/api/reply',{id:email.id,accountId:actionAccountId(email),action,body:text});setMessage(action==='send'?'Reply sent through Gmail.':'Draft saved in Gmail.');if(action==='send'){setSent(text);onSent();}}
-    }catch(error){setMessage(error instanceof Error?error.message:'Could not complete your reply.');setError(true);}
+      else{await api('/api/reply',{id:email.id,accountId:actionAccountId(email),action,body:text,confirmUnsent});setMessage(action==='send'?'Reply sent through Gmail.':'Draft saved in Gmail.');if(action==='send'){setSent(text);onSent();}}
+    }catch(error){setMessage(error instanceof Error?error.message:'Could not complete your reply.');setError(true);if(error instanceof ApiError&&error.status===409&&error.message.includes('still unconfirmed'))setUnconfirmed(action);}
     finally{setBusy('');}
   }
   function writeAnother(){setSent('');setText('');setOptions([]);setChosen(-1);setNotes('');setMessage('');setError(false);}
@@ -73,7 +74,7 @@ export function ReplyComposer({email,demo,aiReady,onSent}:{email:Email;demo:bool
       <button className="generate-button" disabled={!!busy||!aiReady} onClick={generate}>{busy==='options'?<RefreshCw className="spinning" size={14}/>:<Sparkles size={14}/>} {options.length?'Regenerate options':'Generate options'}</button>
     </div>
     {!aiReady&&<p>Suggested replies need the AI service connected in the Site settings. You can still write your own reply.</p>}
-    {message&&<output className={`action-message${error?' error':''}`} aria-live="assertive">{message}</output>}
+    {message&&<output className={`action-message${error?' error':''}`} aria-live="assertive">{message}{unconfirmed&&<button type="button" className="button white" disabled={!!busy} onClick={()=>complete(unconfirmed,true)}>I checked Gmail — try again</button>}</output>}
     {!!options.length&&<div className="reply-options">{options.map((option,index)=><button key={index} className="reply-option" data-active={chosen===index||undefined} disabled={!!busy} onClick={()=>choose(index)}><span className="reply-option-index">{chosen===index?<Check size={12}/>:index+1}</span><p>{option}</p></button>)}</div>}
     <div className="reply-describe">
       <button className="reply-describe-toggle" onClick={()=>setDescribing(v=>!v)} aria-expanded={describing}><Wand2 size={13}/>{describing?'Hide':'Or describe what you want to say, and let AI write it'}</button>

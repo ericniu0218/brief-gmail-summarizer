@@ -1,6 +1,7 @@
 import type {
   Artifact,
   ArtifactSummary,
+  Json,
   Member,
   Page,
   Role,
@@ -8,7 +9,7 @@ import type {
   WorkspaceEvent,
 } from '@/lib/workspaces/contracts';
 import { CORPUS_KIND, FOLD_KIND } from '@/lib/workspaces/contracts';
-import { HttpError } from '../runtime';
+import { HttpError , parseStoredJson} from '../runtime';
 import {
   artifactInput,
   canonical,
@@ -54,6 +55,15 @@ type ArtifactRow = {
 };
 const META_COLUMNS =
   'id, workspace_id, kind, schema_version, title, summary, provenance, parent_ids, created_by, author_name, created, checksum';
+function isJson(value:unknown):value is Json{
+  if(value===null||['string','number','boolean'].includes(typeof value))return true;
+  if(Array.isArray(value))return value.every(isJson);
+  return typeof value==='object'&&Object.values(value as Record<string,unknown>).every(isJson);
+}
+function isJsonRecord(value:unknown):value is Record<string,Json>{
+  return !!value&&typeof value==='object'&&!Array.isArray(value)&&Object.values(value).every(isJson);
+}
+function isStringArray(value:unknown):value is string[]{return Array.isArray(value)&&value.every(item=>typeof item==='string');}
 function metadata(r: ArtifactRow): ArtifactSummary {
   return {
     id: r.id,
@@ -62,8 +72,10 @@ function metadata(r: ArtifactRow): ArtifactSummary {
     schemaVersion: r.schema_version,
     title: r.title,
     summary: r.summary,
-    provenance: JSON.parse(r.provenance),
-    parentIds: JSON.parse(r.parent_ids),
+    // Stored JSON is a trust boundary: a damaged row reports itself rather than
+    // collapsing the whole request into a generic 500.
+    provenance: parseStoredJson(r.provenance,'artifact record',isJsonRecord),
+    parentIds: parseStoredJson(r.parent_ids,'artifact record',isStringArray),
     createdBy: r.created_by,
     authorName: r.author_name,
     created: r.created,
@@ -71,7 +83,7 @@ function metadata(r: ArtifactRow): ArtifactSummary {
   };
 }
 function artifact(r: ArtifactRow): Artifact {
-  return { ...metadata(r), content: JSON.parse(r.content!) };
+  return { ...metadata(r), content: parseStoredJson(r.content,'artifact content',isJsonRecord) };
 }
 
 /** One instance per request. All authorization and persistence crosses this module. */
