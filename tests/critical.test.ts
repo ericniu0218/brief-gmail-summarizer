@@ -5,7 +5,7 @@ import { parseMessage, safeUnsubscribe } from '../server/gmail';
 import { POST as reply } from '../app/api/reply/route';
 import { POST as suggest } from '../app/api/suggest/route';
 import { generate } from '../server/ai';
-import { demoEmails, emailKey, senderKey, gmailThreadUrl, type Email } from '../lib/mail';
+import { actionAccountId, demoEmails, emailKey, senderKey, gmailThreadUrl, type Email } from '../lib/mail';
 import { GET as demoDigest } from '../app/api/demo/route';
 import { POST as runScheduledAgent } from '../app/api/agent/route';
 import { summarizeInbox } from '../server/sync';
@@ -16,7 +16,7 @@ import { collectBatch, evidenceSupported, validateItem } from '../server/classif
 import { applyOverride, contentFingerprint } from '../server/overrides';
 import { deterministicClassify } from '../lib/deterministic';
 import { resolveDate } from '../lib/dates';
-import { derivePriority, effectiveCategories, isOverdue, isOverviewMessage, needsReview, upcomingMeetings, type Classification, type Obligation } from '../lib/classification';
+import { derivePriority, effectiveCategories, isOverdue, needsReview, upcomingMeetings, type Classification, type Obligation } from '../lib/classification';
 import { FIXTURES, DEV_FIXTURES, HELDOUT_FIXTURES } from './eval-set';
 
 declare global { var __briefTestEnv: Runtime; var __briefTestHeaders: Headers; }
@@ -66,19 +66,24 @@ void test('security and account-access mail is important even without Gmail Impo
  const parsed=parseMessage({id:'security',threadId:'thread',snippet:'Use code 482917 to finish signing in.',internalDate:'1788960000000',labelIds:['INBOX'],payload:{mimeType:'text/plain',headers:[{name:'From',value:'GitHub <noreply@github.com>'},{name:'Subject',value:'Your GitHub verification code'}],body:{data:encode('Use code 482917 to finish signing in.')}}});
  assert.equal(parsed.priority,'high');
  assert.equal(parsed.label,'Important');
- assert.equal(isImportantEmail(parsed),true);
+ // Judged at a fixed instant just after the message arrived. A verification code matters
+ // when it lands; the same message weeks later is history, and reading the real clock here
+ // would make this test mean something different every day it runs.
+ const arrived=1788960000000;
+ assert.equal(isImportantEmail(parsed,arrived+3600000),true);
+ assert.equal(isImportantEmail(parsed,arrived+30*86400000),false,'an old sign-in code is not urgent');
 });
 void test('reply-needed mail ranks first and routine mail stays at the bottom',()=>{
  const routine={...demoEmails[3],id:'routine',priority:'normal' as const,needsReply:false};
  const security={...demoEmails[3],id:'security',sender:'GitHub',address:'noreply@github.com',subject:'Security alert: new sign-in',priority:'high' as const,needsReply:false};
  const replyNeeded={...demoEmails[3],id:'reply',priority:'normal' as const,needsReply:true};
- assert.deepEqual(sortInboxEmails([routine,security,replyNeeded]).map(email=>email.id),['reply','security','routine']);
+ assert.deepEqual(sortInboxEmails([routine,security,replyNeeded],Date.UTC(2026,8,14)).map(email=>email.id),['reply','security','routine']);
 });
 void test('related important company notifications fold without pulling routine mail into the group',()=>{
  const verification={...demoEmails[3],id:'verify',sender:'GitHub',address:'noreply@github.com',subject:'Your GitHub verification code',summary:'Use this code to sign in.',priority:'high' as const,needsReply:false};
  const setup={...demoEmails[3],id:'setup',sender:'GitHub Security',address:'security@github.com',subject:'Complete your two-factor setup',summary:'Finish account security setup.',priority:'high' as const,needsReply:true};
  const routine={...demoEmails[3],id:'routine',sender:'GitHub',address:'news@github.com',subject:'This month on GitHub',summary:'A product roundup.',priority:'normal' as const,needsReply:false};
- const rows=buildInboxRows([routine,verification,setup]);
+ const rows=buildInboxRows([routine,verification,setup],Date.UTC(2026,8,14));
  assert.equal(rows[0].kind,'fold');
  if(rows[0].kind!=='fold')throw new Error('Expected a folded company row');
  assert.equal(rows[0].company,'GitHub');
@@ -392,7 +397,7 @@ void test('urgent personal mail stays personal and reaches Overview',()=>{
  const urgent=demoById('54');
  assert.equal(urgent.category,'personal');
  assert.equal(classifyEmail(urgent).category,'personal');
- assert.ok(isImportantEmail(urgent),'urgent personal mail must qualify for Overview');
+ assert.ok(isImportantEmail(urgent,Date.UTC(2026,8,14)),'urgent personal mail must qualify for Overview');
  assert.ok(!emailTags(urgent).includes('low-priority'));
 });
 
@@ -440,9 +445,21 @@ void test('HTML-only mail is read as text rather than from the snippet',()=>{
  const result=normalizeMessage({id:'h1',threadId:'t',snippet:'Please approve',internalDate:'1789000000000',labelIds:['INBOX'],
   payload:{mimeType:'text/html',headers:[{name:'From',value:'A <a@b.example>'},{name:'Subject',value:'Doc'}],body:{data:html}}});
  assert.equal(result.htmlOnly,true);
+ assert.equal(result.html,'<html><body><p>Please approve the <a href="https://x.example/doc">launch doc</a>.</p><script>alert(1)</script></body></html>');
  assert.match(result.text,/Please approve the launch doc \(https:\/\/x\.example\/doc\)\./);
  assert.ok(!result.text.includes('alert'),'script content must not survive');
  assert.equal(result.receivedAt,1789000000000,'the original timestamp must be preserved');
+});
+
+void test('a CSS-filled plain alternative does not replace the readable rich body',()=>{
+ const plain=encode('table.button table td {\nbackground: #003580;\nborder-color: #003580;\ncolor: white;\n}\na:hover { color: #19498c; }\na:active { color: #19498c; }');
+ const rich='<html><head><style>table{color:#003580}</style></head><body><h1>Career newsletter</h1><p>Meet with a career educator.</p></body></html>';
+ const result=normalizeMessage({id:'css-leak',threadId:'t',snippet:'',internalDate:'1789000000000',labelIds:['INBOX'],payload:{mimeType:'multipart/alternative',headers:[{name:'From',value:'Career <career@example.com>'}],parts:[
+  {mimeType:'text/plain',body:{data:plain}},{mimeType:'text/html',body:{data:encode(rich)}},
+ ]}});
+ assert.equal(result.html,rich);
+ assert.match(result.text,/Career newsletter/);
+ assert.doesNotMatch(result.text,/border-color|a:hover/);
 });
 
 void test('quoted history is separated from the current message',()=>{
@@ -587,7 +604,8 @@ void test('priority comes from evidence, not from the word urgent',()=>{
  const old=classification({obligations:[obligation({kind:'deadline',due:{phrase:'January 1, 2020',date:'2020-01-01',ambiguous:false}})]});
  assert.equal(derivePriority(old,now),'normal','an old deadline is overdue, not newly urgent');
  assert.equal(isOverdue(old.obligations[0],now),true);
- assert.equal(isOverviewMessage(old,now),true,'an unresolved overdue item remains visible');
+ // Overview uses the message-aware importance policy, tested in importance.test.ts; a
+ // classification alone has no arrival date and must not maintain a second policy.
 });
 
 void test('a corrupt stored classification without obligations degrades safely',()=>{
@@ -601,7 +619,6 @@ void test('cancelled meetings stay as history but leave upcoming events',()=>{
  const cancelled=classification({obligations:[obligation({kind:'meeting',meetingState:'cancelled',state:'cancelled'})]});
  assert.ok(effectiveCategories(cancelled).tags.includes('meetings'),'still filed under Meetings');
  assert.equal(upcomingMeetings(cancelled).length,0,'but not an upcoming event');
- assert.equal(isOverviewMessage(cancelled,Date.UTC(2026,8,14)),false);
 });
 
 void test('somebody else’s task does not become the user’s tag',()=>{
@@ -772,6 +789,17 @@ void test('the same message id in two mailboxes has distinct keys',()=>{
  assert.notEqual(senderKey(a),senderKey(b),'unsubscribing in one mailbox is not the other');
 });
 
+void test('a message-specific action refuses to run without a real mailbox',()=>{
+ // The combined view is a way of looking at mail, not an account that can act.
+ assert.throws(()=>actionAccountId({accountId:'all'}),/Refresh your inbox/);
+ // An unattributed message reached the browser damaged; guessing an account here is how a
+ // reply leaves from the wrong address, so it is refused with a recoverable instruction.
+ assert.throws(()=>actionAccountId({accountId:undefined}),/Refresh your inbox/);
+ assert.throws(()=>actionAccountId({accountId:''}),/Refresh your inbox/);
+ // A genuine mailbox passes through untouched.
+ assert.equal(actionAccountId({accountId:'acct-2'}),'acct-2');
+});
+
 void test('Gmail links name the mailbox instead of assuming the first account',()=>{
  const link=gmailThreadUrl('second@example.com','thread-1');
  assert.ok(link.includes('authuser=second%40example.com'));
@@ -781,4 +809,44 @@ void test('Gmail links name the mailbox instead of assuming the first account',(
 void test('the combined view is never accepted as a sending account',async()=>{
  const {ALL_INBOXES}=await import('../server/gmail');
  assert.equal(ALL_INBOXES,'all');
+});
+
+void test('an attached invitation survives an AI outage and a cancellation',()=>{
+ const base={id:'m1',subject:'Attachment',text:'See the file.',quoted:'',from:{name:'S',address:'s@org.example'},
+  to:[{address:'me@org.example'}],cc:[],receivedAt:Date.UTC(2026,8,24),labels:['INBOX'],attachments:[],contentComplete:true};
+ // The deterministic classifier is the fallback when the model is unavailable. Without
+ // reading the invitation, an ICS-only meeting would simply disappear until the next
+ // successful classification.
+ const invited=deterministicClassify({...base,calendar:{method:'REQUEST',summary:'Design review',
+  start:'2026-10-14T16:00:00Z',status:'CONFIRMED',uid:'u1'}} as never,'me@org.example');
+ const meeting=invited.obligations.find(o=>o.kind==='meeting');
+ assert.ok(meeting,'the invitation became a meeting obligation');
+ assert.equal(meeting.due?.time,'2026-10-14T16:00:00.000Z','with the exact start it states');
+ assert.equal(meeting.due?.ambiguous,false,'an invitation is never an ambiguous date');
+ assert.equal(meeting.meetingState,'confirmed');
+ assert.equal(meeting.required,true);
+
+ const cancelled=deterministicClassify({...base,calendar:{method:'CANCEL',summary:'Design review',
+  start:'2026-10-14T16:00:00Z',status:'CANCELLED',uid:'u1'}} as never,'me@org.example');
+ const off=cancelled.obligations.find(o=>o.kind==='meeting');
+ assert.equal(off?.state,'cancelled');
+ assert.equal(off?.meetingState,'cancelled');
+ assert.equal(off?.required,false,'a called-off meeting is not required work');
+
+ // A malformed start invents nothing, and wording still works without an invitation.
+ const broken=deterministicClassify({...base,calendar:{summary:'x',start:'not-a-date'}} as never,'me@org.example');
+ assert.ok(!broken.obligations.some(o=>o.kind==='meeting'),'an unreadable start creates no meeting');
+ const worded=deterministicClassify({...base,text:'Are you free for a meeting on Friday?'} as never,'me@org.example');
+ assert.ok(worded.obligations.some(o=>o.kind==='meeting'),'wording alone still detects a meeting');
+});
+
+void test('an oversized calendar part is reported as incomplete content',()=>{
+ // Gmail stores large bodies separately. A deferred invitation that is never fetched must
+ // mark the message incomplete rather than leaving it looking complete with no meeting.
+ const message=normalizeMessage({id:'c',threadId:'t',snippet:'',internalDate:'1790000000000',labelIds:['INBOX'],
+  payload:{mimeType:'multipart/mixed',headers:[{name:'From',value:'S <s@org.example>'},{name:'Subject',value:'Invite'}],
+   parts:[{mimeType:'text/plain',body:{data:encode('See attached.')}},
+          {mimeType:'text/calendar',body:{attachmentId:'att-1',size:900000}}]}});
+ assert.equal(message.contentComplete,false,'the message says its content is incomplete');
+ assert.ok(message.incompleteReasons.length>0,'and says why');
 });

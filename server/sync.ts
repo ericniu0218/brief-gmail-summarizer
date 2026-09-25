@@ -48,8 +48,8 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
   // The token returned by this atomic update identifies both the connection and the
   // refresh that acquired the lease. Concurrent refreshes stop here with a conflict.
   // The lease is per account row, so refreshing one mailbox never blocks another.
-  const lock=await e.DB.prepare('UPDATE connections SET sync_lock = ? WHERE id = ? AND user_id = ? AND sync_lock < ? RETURNING token, sync_page_token, sync_generation, sync_skipped, sync_full_scan, backfill_complete, last_full_scan')
-    .bind(leaseUntil,accountId,user,now).first<{token:string;sync_page_token:string|null;sync_generation:string|null;sync_skipped:number;sync_full_scan:number;backfill_complete:number;last_full_scan:number|null}>();
+  const lock=await e.DB.prepare('UPDATE connections SET sync_lock = ? WHERE id = ? AND user_id = ? AND sync_lock < ? RETURNING token, sync_page_token, sync_generation, sync_skipped, sync_full_scan, backfill_complete, last_full_scan, content_version')
+    .bind(leaseUntil,accountId,user,now).first<{token:string;sync_page_token:string|null;sync_generation:string|null;sync_skipped:number;sync_full_scan:number;backfill_complete:number;last_full_scan:number|null;content_version:number}>();
   if(!lock)throw new HttpError(409,'This inbox is already being refreshed.');
   try{
     const token=await accessToken(user,accountId,e);
@@ -60,7 +60,7 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
     const generation=lock.sync_generation||`${now.toString(36)}-${crypto.randomUUID()}`;
     // After the first complete backfill, ordinary refreshes scan only a two-day overlap.
     // A monthly full reconciliation removes messages deleted outside the application.
-    const fullScan=pageToken?lock.sync_full_scan!==0:!lock.backfill_complete||!lock.last_full_scan||now-lock.last_full_scan>=30*86400000;
+    const fullScan=pageToken?lock.sync_full_scan!==0:lock.content_version<1||!lock.backfill_complete||!lock.last_full_scan||now-lock.last_full_scan>=30*86400000;
     const query=encodeURIComponent(`${fullScan?'':'newer_than:2d '}-in:sent -in:trash -in:spam -in:drafts`);
     let list:{messages?:{id:string}[];nextPageToken?:string};
     try{list=await gmail(`messages?maxResults=100&q=${query}${pageToken?`&pageToken=${encodeURIComponent(pageToken)}`:''}`,token);}
@@ -193,10 +193,10 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
       previous
         ?e.DB.prepare('UPDATE snapshots SET data=?, updated=?, revision=revision+1 WHERE account_id=? AND user_id=? AND revision=? AND EXISTS (SELECT 1 FROM connections WHERE id=? AND user_id=? AND token=? AND sync_lock=? AND sync_lock>?)').bind(JSON.stringify(snapshot),snapshot.updated,accountId,user,previous.revision,accountId,user,lock.token,leaseUntil,snapshot.updated)
         :e.DB.prepare('INSERT INTO snapshots (account_id,user_id,data,updated,revision) SELECT ?,?,?,?,0 WHERE EXISTS (SELECT 1 FROM connections WHERE id=? AND user_id=? AND token=? AND sync_lock=? AND sync_lock>?) ON CONFLICT(account_id) DO NOTHING').bind(accountId,user,JSON.stringify(snapshot),snapshot.updated,accountId,user,lock.token,leaseUntil,snapshot.updated),
-      e.DB.prepare('UPDATE connections SET last_sync=?,sync_lock=0,error=NULL,sync_page_token=?,sync_generation=?,sync_skipped=?,sync_full_scan=?,backfill_complete=?,last_full_scan=? WHERE id=? AND user_id=? AND token=? AND sync_lock=? AND sync_lock>?')
+      e.DB.prepare('UPDATE connections SET last_sync=?,sync_lock=0,error=NULL,sync_page_token=?,sync_generation=?,sync_skipped=?,sync_full_scan=?,backfill_complete=?,last_full_scan=?,content_version=? WHERE id=? AND user_id=? AND token=? AND sync_lock=? AND sync_lock>?')
         .bind(snapshot.updated,list.nextPageToken||null,list.nextPageToken?generation:null,list.nextPageToken?totalSkipped:0,fullScan?1:0,
           fullScan&&!list.nextPageToken?1:lock.backfill_complete,fullScan&&!list.nextPageToken?snapshot.updated:lock.last_full_scan,
-          accountId,user,lock.token,leaseUntil,snapshot.updated),
+          fullScan&&!list.nextPageToken?1:lock.content_version,accountId,user,lock.token,leaseUntil,snapshot.updated),
     ]);
     if(!writes[0].meta.changes)throw new HttpError(409,'This Gmail connection or refresh changed. Please refresh the inbox again.');
     return {...snapshot,emails:await loadMessages(user,accountId,e)};

@@ -20,6 +20,8 @@ export type NormalizedMessage={
   /** Quoted replies kept as separate context so old requests are not read as new tasks. */
   quoted:string;
   signature:string;
+  /** Original rich body for isolated display. Never use this untrusted HTML for sorting. */
+  html?:string;
   labels:string[];
   headers:Record<string,string>;
   calendar?:CalendarInvite;
@@ -35,6 +37,8 @@ export type GmailMessage={id:string;threadId:string;snippet:string;internalDate:
 type Part=GmailPart;
 
 const TEXT_LIMIT=20000;
+// Keep a single stored message comfortably below D1's row limit after JSON encoding.
+const HTML_DISPLAY_LIMIT=750_000;
 const MAX_MIME_DEPTH=20;
 const MAX_DEFERRED_BODIES=8;
 const MAX_DEFERRED_BYTES=2_000_000;
@@ -92,6 +96,13 @@ export function htmlToText(html:string){
   value=value.replace(/<br\s*\/?>/gi,'\n').replace(/<\/(?:p|div|tr|li|h[1-6]|table|blockquote|section|article)>/gi,'\n');
   value=value.replace(/<li\b[^>]*>/gi,'\n- ');
   return decodeEntities(stripTags(value)).replace(/\r/g,'').replace(/[ \t ]+/g,' ').replace(/\n{3,}/g,'\n\n').trim();
+}
+
+/** Some senders publish a broken text/plain alternative containing their CSS bundle. */
+function looksLikeLeakedCss(value:string){
+  const rules=value.match(/(?:^|\n)\s*[^\n{}]{1,100}\{[^{}]{1,2000}\}/g)||[];
+  const declarations=value.match(/(?:^|[;{\n]\s*)(?:background|border(?:-color)?|color|font(?:-family|-size|-weight)?|margin|padding|width|height)\s*:/gim)||[];
+  return rules.length>=2&&declarations.length>=4;
 }
 
 const QUOTE_HEADER=[
@@ -170,7 +181,7 @@ function collect(part:Part|null|undefined,into:{text:string[];html:string[];atta
     else if(mime==='text/calendar'||mime==='application/ics')into.calendar.push(decoded);
   }else if(part.body?.data!==undefined&&typeof part.body.data!=='string'){
     into.malformed=true;
-  }else if(part.body?.attachmentId&&!isAttachment&&(mime==='text/plain'||mime==='text/html')){
+  }else if(part.body?.attachmentId&&!isAttachment&&(mime==='text/plain'||mime==='text/html'||mime==='text/calendar'||mime==='application/ics')){
     // Gmail stores oversized bodies separately; this needs a second fetch to read.
     into.deferred=true;
   }
@@ -211,8 +222,15 @@ export function normalizeMessage(m:GmailMessage):NormalizedMessage{
   // normalized content is incomplete instead of silently treating a snippet as complete.
   const incompleteReasons:string[]=[];
   const plain=found.text.join('\n').trim();
-  const htmlOnly=!plain&&found.html.length>0;
-  let raw=plain||(found.html.length?htmlToText(found.html.join('\n')):'');
+  // multipart/alternative should contain one HTML representation. If malformed mail
+  // supplies several, the largest is normally the complete newsletter rather than a
+  // signature fragment or quoted footer.
+  const richHtml=found.html.reduce((best,value)=>value.length>best.length?value:best,'');
+  const htmlOnly=!plain&&!!richHtml;
+  const brokenPlain=!!(plain&&richHtml&&looksLikeLeakedCss(plain));
+  let raw=brokenPlain?htmlToText(richHtml):plain||(richHtml?htmlToText(richHtml):'');
+  const displayHtml=richHtml&&new TextEncoder().encode(richHtml).byteLength<=HTML_DISPLAY_LIMIT?richHtml:undefined;
+  if(richHtml&&!displayHtml)incompleteReasons.push('formatted-body-too-large');
   if(!raw){raw=m.snippet||'';if(raw)incompleteReasons.push('only-snippet-available');}
   if(found.deferred)incompleteReasons.push('body-stored-separately-by-gmail');
   if(found.depthLimited)incompleteReasons.push('mime-depth-limit');
@@ -241,7 +259,7 @@ export function normalizeMessage(m:GmailMessage):NormalizedMessage{
     receivedAt:Number.isFinite(receivedAt)?receivedAt:Date.now(),
     from,to:parseParties(headers.to||''),cc:parseParties(headers.cc||''),
     subject:headers.subject||'(No subject)',
-    text,quoted:quotedText,signature,
+    text,quoted:quotedText,signature,html:displayHtml,
     labels:m.labelIds||[],headers,
     calendar:found.calendar.length?parseCalendar(found.calendar.join('\n')):undefined,
     attachments:found.attachments,

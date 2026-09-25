@@ -8,7 +8,11 @@ import { GmailSetupNote } from '../components/connection-panel';
 import { DailyBrief } from '../components/daily-brief';
 import { resolveSelection, requestGate, type ConnectionStatus } from '../hooks/use-inbox';
 import { AccountList } from '../components/connection-panel';
-import { demoEmails } from '../lib/mail';
+import { demoEmails, emailKey, type Email } from '../lib/mail';
+import { SidebarProvider } from '../components/ui/sidebar';
+import { CategoryNav } from '../components/category-nav';
+import { PriorityEmailList } from '../components/priority-email-list';
+import { buildEmailDocument, EmailBody } from '../components/email-body';
 import {
   api,
   ApiError,
@@ -34,6 +38,35 @@ void test('the dashboard exposes Connect Gmail without opening settings', () => 
     ),
     'The initial dashboard must contain a visible Connect Gmail action',
   );
+  assert.match(html,/class="[^"]*briefing-card/,'the daily brief is present in server HTML');
+  assert.match(html,/class="email-list"/,'the inbox list is present in server HTML');
+  assert.match(html,/The website launch is ready for your sign-off/,'server HTML contains useful email content');
+  assert.doesNotMatch(html,/>0<small>work conversations<\/small>/,
+    'server HTML does not temporarily report zero important work conversations');
+});
+
+void test('formatted email is sandboxed and remote images require an explicit choice',()=>{
+  const source='<base href="https://tracker.example/"><script>top.location="https://bad.example"</script><form action="https://bad.example"><input name="secret"></form><img src="https://images.example/banner.png"><p>Hello</p>';
+  const blocked=buildEmailDocument(source);
+  assert.match(blocked,/script-src 'none'/);
+  assert.match(blocked,/img-src data: blob:/);
+  assert.doesNotMatch(blocked,/<script|<form|<input|tracker\.example/);
+  const allowed=buildEmailDocument(source,true);
+  assert.match(allowed,/img-src https: data: blob:/);
+  const email={...demoEmails[0],html:'<p>Formatted message</p>'};
+  const markup=renderToStaticMarkup(createElement(EmailBody,{email}));
+  // Popups are granted so a reader can follow a link the document sends to a new tab, and
+  // the opened page escapes the sandbox so the destination is an ordinary tab rather than
+  // an opaque, script-less one. Everything that would let the message act on its own —
+  // scripts, same-origin access, forms, top-level navigation — stays withheld, so only a
+  // real click can navigate.
+  const sandbox=/sandbox="([^"]*)"/.exec(markup)?.[1]??'';
+  assert.deepEqual(sandbox.split(' ').sort(),['allow-popups','allow-popups-to-escape-sandbox']);
+  for(const denied of ['allow-scripts','allow-same-origin','allow-forms','allow-modals','allow-top-navigation'])
+    assert.ok(!sandbox.includes(denied),`${denied} must not be granted`);
+  assert.match(markup,/Remote images are blocked/);
+  assert.match(markup,/Load images/);
+  assert.match(markup,/Always load from this sender/);
 });
 
 void test('Connect Gmail uses a top-level OAuth navigation and resumes after platform sign-in', () => {
@@ -66,6 +99,7 @@ void test('the daily brief displays personal Gmail summaries without requiring w
   const html = renderToStaticMarkup(
     createElement(DailyBrief, {
       emails: [email],
+      now: Date.now(),
       connected: true,
       ai: true,
       aiConfigured: true,
@@ -85,6 +119,7 @@ void test('the first Gmail sync displays progress instead of claiming the inbox 
   const html = renderToStaticMarkup(
     createElement(DailyBrief, {
       emails: [],
+      now: Date.now(),
       connected: true,
       ai: false,
       aiConfigured: true,
@@ -239,4 +274,225 @@ void test('the settings list shows every mailbox with its own actions', () => {
   assert.ok(html.includes('action=add'), 'offers adding another mailbox');
   assert.ok(html.includes('Set as default'), 'offers promoting the non-default account');
   assert.ok(html.includes('Disconnect'), 'offers per-account disconnect');
+});
+
+/** Renders the sidebar navigation inside the provider that supplies its layout context. */
+function navMarkup(options: {
+  view: string;
+  allInboxes: boolean;
+  emails?: Email[];
+  onSelect?: (view: string) => void;
+  onSelectAllInboxes?: () => void;
+}) {
+  return renderToStaticMarkup(
+    createElement(
+      SidebarProvider,
+      null,
+      createElement(CategoryNav, {
+        emails: options.emails ?? [],
+        view: options.view,
+        allInboxes: options.allInboxes,
+        onSelect: options.onSelect ?? (() => {}),
+        onSelectAllInboxes: options.onSelectAllInboxes ?? (() => {}),
+      }),
+    ),
+  );
+}
+
+/** A minimal message shaped for list rendering, scoped to one mailbox. */
+function listEmail(id: string, accountId: string, accountEmail: string, subject: string) {
+  return {
+    ...demoEmails[0],
+    id,
+    accountId,
+    accountEmail,
+    subject,
+    category: 'work',
+    tags: [],
+  } as unknown as Email;
+}
+
+void test('the sidebar offers All inboxes directly above the single-account Inbox', () => {
+  const html = navMarkup({ view: 'inbox', allInboxes: true });
+  const combined = html.indexOf('All inboxes');
+  const single = html.indexOf('>Inbox<');
+  assert.ok(combined > -1, 'the combined entry is present in the sidebar');
+  assert.ok(single > -1, 'the existing Inbox entry is preserved');
+  assert.ok(combined < single, 'All inboxes sits above Inbox');
+  // It must be reachable by keyboard, so it stays a real button rather than a div.
+  assert.match(
+    html,
+    /<button\b(?:(?!<\/button>)[\s\S])*All inboxes/,
+    'All inboxes is a focusable button element',
+  );
+});
+
+/**
+ * Counts the navigation rows rendered as selected.
+ *
+ * The rendered class list contains Tailwind variants named `data-active:…`, so only the
+ * real `data-active=""` attribute may be counted; matching the bare string would report
+ * every row as active.
+ */
+function activeRows(html: string) {
+  return html.split('<button').filter(part => part.split('>')[0].includes('data-active=""'));
+}
+
+void test('the combined scope and a single mailbox never look selected at the same time', () => {
+  // Combined scope on the top-level inbox: only All inboxes is highlighted.
+  const combined = navMarkup({ view: 'inbox', allInboxes: true });
+  const combinedRows = activeRows(combined);
+  assert.equal(combinedRows.length, 1, 'exactly one navigation row is active');
+  assert.ok(combinedRows[0].includes('All inboxes'), 'the active row is All inboxes');
+
+  // A single account on the same view highlights the ordinary Inbox instead.
+  const single = navMarkup({ view: 'inbox', allInboxes: false });
+  const singleRows = activeRows(single);
+  assert.equal(singleRows.length, 1, 'exactly one navigation row is active');
+  assert.ok(!singleRows[0].includes('All inboxes'), 'All inboxes is not highlighted');
+
+  // Choosing a category inside the combined scope moves the highlight off All inboxes
+  // without implying a single mailbox is selected.
+  const category = navMarkup({ view: 'work', allInboxes: true });
+  const categoryRows = activeRows(category);
+  assert.equal(categoryRows.length, 1, 'exactly one navigation row is active');
+  assert.ok(categoryRows[0].includes('Work'), 'the chosen category is highlighted');
+});
+
+void test('a combined total is reported only while combined mail is loaded', () => {
+  const emails = [
+    listEmail('m1', 'acct-1', 'first@example.com', 'From the first mailbox'),
+    listEmail('m2', 'acct-2', 'second@example.com', 'From the second mailbox'),
+  ];
+  const combined = navMarkup({ view: 'inbox', allInboxes: true, emails });
+  const row = combined.slice(combined.indexOf('All inboxes'));
+  assert.match(row.slice(0, 120), /nav-count/, 'the combined row reports its total');
+
+  // A single-account snapshot cannot describe mailboxes it never read, so the combined
+  // row stays unnumbered rather than showing one account's count as if it were the total.
+  const single = navMarkup({ view: 'inbox', allInboxes: false, emails });
+  const singleRow = single.slice(single.indexOf('All inboxes'));
+  assert.ok(
+    !singleRow.slice(0, 120).includes('nav-count'),
+    'no total is claimed while a single mailbox is in scope',
+  );
+});
+
+void test('category expand arrows stay separate controls from category navigation', () => {
+  const html = navMarkup({ view: 'inbox', allInboxes: true });
+  // The arrow is its own button with its own label and disclosure state, so activating it
+  // cannot also trigger the parent category's navigation.
+  assert.match(html, /class="nav-arrow"[^>]*aria-expanded="false"/);
+  assert.match(html, /aria-label="Expand Work subcategories"/);
+  assert.match(html, /id="nav-submenu-work"[^>]*hidden/);
+  // Noise has no subcategories and therefore offers no arrow.
+  assert.ok(!html.includes('Noise subcategories'), 'Noise exposes no disclosure control');
+});
+
+void test('the combined list labels each row with the mailbox that received it', () => {
+  const emails = [
+    listEmail('m1', 'acct-1', 'first@example.com', 'From the first mailbox'),
+    listEmail('m2', 'acct-2', 'second@example.com', 'From the second mailbox'),
+  ];
+  const labelled = renderToStaticMarkup(
+    createElement(PriorityEmailList, {
+      emails,
+      now: Date.now(),
+      busy: false,
+      showAccount: true,
+      emptyTitle: 'All clear.',
+      emptyBody: 'Nothing here.',
+      onSelect: () => {},
+    }),
+  );
+  assert.ok(labelled.includes('first@example.com'), 'the first mailbox is identified');
+  assert.ok(labelled.includes('second@example.com'), 'the second mailbox is identified');
+
+  // A single-account view keeps its existing layout with no redundant label.
+  const plain = renderToStaticMarkup(
+    createElement(PriorityEmailList, {
+      emails,
+      now: Date.now(),
+      busy: false,
+      emptyTitle: 'All clear.',
+      emptyBody: 'Nothing here.',
+      onSelect: () => {},
+    }),
+  );
+  assert.ok(!plain.includes('email-account'), 'no account label in the single-account layout');
+});
+
+void test('messages sharing a Gmail id in different mailboxes both stay visible', () => {
+  // Gmail ids are unique per mailbox, not across mailboxes. Keying rows by the raw id
+  // would make React treat these as one row and drop the second message.
+  const emails = [
+    listEmail('shared-id', 'acct-1', 'first@example.com', 'Invoice for the first mailbox'),
+    listEmail('shared-id', 'acct-2', 'second@example.com', 'Invoice for the second mailbox'),
+  ];
+  assert.notEqual(emailKey(emails[0]), emailKey(emails[1]), 'composite identities differ');
+  const html = renderToStaticMarkup(
+    createElement(PriorityEmailList, {
+      emails,
+      now: Date.now(),
+      busy: false,
+      showAccount: true,
+      emptyTitle: 'All clear.',
+      emptyBody: 'Nothing here.',
+      onSelect: () => {},
+    }),
+  );
+  assert.ok(html.includes('Invoice for the first mailbox'), 'the first message renders');
+  assert.ok(html.includes('Invoice for the second mailbox'), 'the second message renders');
+});
+
+void test('a view restored on load opens the groups that contain it', () => {
+  // Nothing has been clicked here: this is the first render after a remembered
+  // subcategory is restored. Both levels must already be open, or the highlighted row
+  // would be sealed inside a collapsed group with nothing appearing selected.
+  const restored = navMarkup({ view: 'work:deadlines', allInboxes: false });
+  assert.match(
+    restored,
+    /id="nav-submenu-sections"(?![^>]*hidden)/,
+    'the section group is open',
+  );
+  assert.match(
+    restored,
+    /id="nav-submenu-work"(?![^>]*hidden)/,
+    'and so is the subcategory it belongs to',
+  );
+  assert.equal(activeRows(restored).length, 0, 'no section row claims the selection');
+  assert.match(restored, /nav-subitem[^>]*data-active[^>]*>\s*<span>Deadlines/, 'the subcategory is current');
+
+  // A plain top-level view leaves both closed, which is what keeps the sidebar quiet.
+  const plain = navMarkup({ view: 'inbox', allInboxes: false });
+  assert.match(plain, /id="nav-submenu-sections"[^>]*hidden/, 'the group rests closed');
+  assert.match(plain, /id="nav-submenu-work"[^>]*hidden/, 'and so do the subcategories');
+});
+
+void test('links in a formatted email are followable, and unsafe schemes are not', () => {
+  const html = [
+    '<a href="https://vendor.example/order">Order now</a>',
+    '<a href="http://plain.example">Plain</a>',
+    '<a href="mailto:someone@example.com">Mail</a>',
+    '<a href="javascript:alert(1)">Script</a>',
+    '<a href="  java\nscript:alert(1)  ">Obfuscated</a>',
+    '<a href="data:text/html,<b>x</b>">Data</a>',
+    '<a href=\'vbscript:msgbox(1)\'>VB</a>',
+    '<a href=/relative/path>Relative</a>',
+  ].join('');
+  const document = buildEmailDocument(html);
+  // A real destination survives, so "Order now" and verification links actually go somewhere.
+  assert.match(document, /href="https:\/\/vendor\.example\/order"/);
+  assert.match(document, /href="http:\/\/plain\.example"/);
+  assert.match(document, /href="mailto:someone@example\.com"/);
+  // Everything else loses its href and stays as inert text rather than a live link.
+  assert.doesNotMatch(document, /javascript:/i);
+  assert.doesNotMatch(document, /vbscript:/i);
+  assert.doesNotMatch(document, /href="data:/i);
+  assert.doesNotMatch(document, /href=\/relative/i);
+  // The link text is still readable; only the destination was removed.
+  for (const label of ['Script', 'Obfuscated', 'Data', 'VB', 'Relative'])
+    assert.ok(document.includes(label), `${label} is still shown as text`);
+  // Links still open away from the application rather than inside the reading panel.
+  assert.match(document, /<base href="about:blank" target="_blank">/);
 });

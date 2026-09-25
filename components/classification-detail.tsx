@@ -1,7 +1,7 @@
 'use client';
 import { useState } from 'react';
 import { Info, Quote, RotateCcw, ShieldQuestion } from 'lucide-react';
-import type { Email } from '@/lib/mail';
+import { actionAccountId, type Email } from '@/lib/mail';
 import { SECTIONS, sectionName, tagName, type Section, type Tag } from '@/lib/categories';
 import { appliesToUser, isOverdue, isResolved, obligationCorrectionKey, reviewExplanation } from '@/lib/classification';
 import { api, ApiError } from '@/hooks/use-inbox';
@@ -26,7 +26,7 @@ export function ClassificationDetail({email,demo,onApplied}:{email:Email;demo:bo
     setBusy(true);
     try{
       const result=await api<{updated:boolean;email?:Email}>('/api/classification',{
-        messageId:email.id,accountId:email.accountId,expectedRevision:email.correctionRevision||0,
+        messageId:email.id,accountId:actionAccountId(email),expectedRevision:email.correctionRevision||0,
         expectedSenderRevision:email.senderRuleRevision||0,action,
       });
       if(result.email)onApplied(result.email);

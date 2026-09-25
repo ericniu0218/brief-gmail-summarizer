@@ -10,6 +10,8 @@ export type Email = {
   tags?: Tag[];
   /** Quoted history, kept separate so old requests are not read as new tasks. */
   quoted?: string;
+  /** Original untrusted rich body, displayed only inside the sandboxed email frame. */
+  html?: string;
   contentComplete?: boolean;
   incompleteReasons?: string[];
   classification?: Classification;
@@ -101,6 +103,28 @@ export const demoEmails: Email[] = [
 
 export function emailKey(email: Email): string { return JSON.stringify([email.accountId || 'demo', email.id]); }
 export function senderKey(email: Email): string { return JSON.stringify([email.accountId || 'demo', email.address]); }
+
+/** Mirrors the server's reserved combined-view selection; it is never a real mailbox. */
+const COMBINED_VIEW = 'all';
+
+/**
+ * The mailbox a message-specific action must be sent through.
+ *
+ * Replying, correcting, unsubscribing and sharing all act on one Gmail account. In the
+ * combined view the message on screen may belong to any connected mailbox, so the account
+ * has to come from the message itself and never from the current selection.
+ *
+ * A message with no attribution, or one carrying the combined-view id, has no account to
+ * act through. This refuses instead of letting the request go out unattributed, where it
+ * would be rejected by the server with a message about choosing an account that the user
+ * has no way to act on. Asking for a refresh is the recoverable answer.
+ */
+export function actionAccountId(email: Pick<Email, 'accountId'>): string {
+  const accountId = email.accountId;
+  if (!accountId || accountId === COMBINED_VIEW)
+    throw new Error('This message is not linked to a Gmail account yet. Refresh your inbox and try again.');
+  return accountId;
+}
 /**
  * Deep link to a thread in a named mailbox. `authuser` selects the right account when
  * several Google accounts are signed in; a hardcoded `/u/0/` opens whichever mailbox is

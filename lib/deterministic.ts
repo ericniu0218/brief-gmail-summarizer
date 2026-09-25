@@ -12,6 +12,8 @@ export type ClassifiableMessage={
   from:{name:string;address:string};to:{address:string}[];cc:{address:string}[];
   receivedAt:number;labels:string[];attachments:{filename:string}[];
   contentComplete:boolean;
+  /** Parsed iCalendar invitation, when the message carried one. */
+  calendar?:{method?:string;summary?:string;start?:string;end?:string;status?:string;uid?:string};
 };
 
 // Signal patterns are intentionally narrow because false positives can hide or
@@ -108,7 +110,32 @@ export function deterministicClassify(message:ClassifiableMessage,userAddress=''
   if(DEADLINE.test(current)&&hasRealDate&&!COUNTDOWN.test(current)&&promotional<2){
     push('deadline',DEADLINE,{due:resolveDate(datePhrase,message.receivedAt)});
   }
-  if(MEETING.test(current))push('meeting',MEETING,{meetingState:meetingStateOf(current)});
+  // An attached invitation is stronger evidence than any wording, and it carries the only
+  // exact start time the message has. Taking it here means an ICS-only meeting still
+  // becomes an obligation while the model is unavailable, instead of vanishing until the
+  // next successful classification.
+  const invite=message.calendar;
+  const inviteStart=typeof invite?.start==='string'?Date.parse(invite.start):Number.NaN;
+  if(invite&&Number.isFinite(inviteStart)){
+    const status=String(invite.status||'').toUpperCase();
+    const method=String(invite.method||'').toUpperCase();
+    const cancelled=status==='CANCELLED'||method==='CANCEL';
+    obligations.push({
+      id:`${message.id}:calendar`,kind:'meeting',
+      description:(invite.summary||message.subject||'Calendar invitation').slice(0,200),
+      owner:'recipient',
+      // The invitation reached this mailbox, so it is the user's unless they were only copied.
+      ownerIsUser:onlyCopied?null:true,
+      required:!cancelled,
+      evidence:`Calendar invitation: ${invite.summary||message.subject||'(no title)'}`,
+      state:cancelled?'cancelled':'open',
+      meetingState:cancelled?'cancelled':status==='CONFIRMED'||method==='REQUEST'?'confirmed':'proposed',
+      // The invitation states an exact instant, so it is never ambiguous.
+      due:{phrase:invite.start!,time:new Date(inviteStart).toISOString(),ambiguous:false},
+    });
+  }
+  // Wording only adds a meeting when no invitation already described one.
+  if(!obligations.some(o=>o.kind==='meeting')&&MEETING.test(current))push('meeting',MEETING,{meetingState:meetingStateOf(current)});
   if(REQUEST.test(current)&&promotional<2)push('request',REQUEST);
   if(ACTION.test(current)&&promotional<2)push('action',ACTION);
 

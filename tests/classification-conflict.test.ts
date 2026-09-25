@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  effectiveClassification, effectiveCategories, derivePriority, isOverviewMessage,
+  effectiveClassification, effectiveCategories, derivePriority,
   junkConflict, protectiveObligations, applyPolicy, reviewExplanation, isResolved,
   type Classification, type Obligation,
 } from '../lib/classification';
@@ -60,7 +60,10 @@ void test('A: a junk prediction carrying an open request stays out of Noise', ()
   assert.notEqual(result.category, 'noise');
   assert.ok(!result.tags.includes('junk'));
   assert.equal(result.inOverview, true);
-  assert.equal(result.priority, 'high', 'priority follows the obligation, not the review state');
+  // Priority tracks what the obligation says, not the review state. This request names no
+  // date, so nothing is imminent and the label stays ordinary; it is Overview that keeps
+  // the message in front of the user, which the assertion above already checks.
+  assert.equal(result.priority, 'normal', 'review state alone does not raise priority');
 });
 
 void test('A: a payment obligation with a stated deadline survives a junk prediction', () => {
@@ -262,12 +265,17 @@ void test('a quoted historical request does not by itself protect a junk predict
 });
 
 void test('derivePriority and Overview agree with the effective classification', () => {
-  const conflicted = junkWith(obligation());
+  // Priority is earned by a date, never by a request existing: an undated request stays
+  // ordinary no matter how long it waits, which is what stops old mail being permanently
+  // urgent. A live due date is what makes this one high.
+  const soon = { phrase: 'tomorrow', date: '2026-09-21', ambiguous: false };
+  const conflicted = junkWith(obligation({ due: soon }));
   assert.equal(derivePriority(conflicted, NOW), 'high');
-  assert.equal(isOverviewMessage(conflicted, NOW), true);
-  const genuine = junkWith(obligation({ ownerIsUser: false }));
+  assert.equal(outcome(conflicted).inOverview, true);
+  assert.equal(derivePriority(junkWith(obligation()), NOW), 'normal', 'an undated request is not urgent by itself');
+  const genuine = junkWith(obligation({ ownerIsUser: false, due: soon }));
   assert.equal(derivePriority(genuine, NOW), 'normal');
-  assert.equal(isOverviewMessage(genuine, NOW), false);
+  assert.equal(outcome(genuine).inOverview, false);
 });
 
 // ── End-to-end through the real message pipeline ─────────────────────────────
@@ -289,7 +297,9 @@ void test('a Gmail message predicted junk with a real request is built as visibl
   assert.ok(!(email.tags || []).includes('junk'));
   assert.equal(email.classification?.processingStatus, 'needs_review');
   assert.equal(email.classification?.proposedDisposition, 'junk');
-  assert.equal(email.label, 'Important');
+  // The request names no resolvable date, so it is ordinary Work rather than urgent. The
+  // point of this test is that it was built as visible mail at all.
+  assert.equal(email.label, 'Work');
   assert.equal(isImportantEmail(email, NOW), true, 'the dashboard shows it in Overview');
   // A genuine junk message with nobody's obligation still lands in Noise.
   const genuine = emailFrom(message, junkWith(obligation({ ownerIsUser: false })), NOW);

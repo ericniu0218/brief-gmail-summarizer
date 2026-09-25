@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { Sparkles, Send, FilePenLine, RefreshCw, ExternalLink, Wand2, Check, CheckCircle2 } from 'lucide-react';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { api } from '@/hooks/use-inbox';
-import { gmailLink, type Email } from '@/lib/mail';
+import { actionAccountId, gmailLink, type Email } from '@/lib/mail';
 
 /**
  * Review-first reply workflow. Users may generate or polish text, edit it locally, then
@@ -28,7 +28,7 @@ export function ReplyComposer({email,demo,aiReady,onSent}:{email:Email;demo:bool
     setBusy('options');setMessage('');setError(false);
     const attempt=options.length?variation+1:0;
     try{
-      const result=await api<{options:string[]}>(endpoint(),{id:email.id,accountId:email.accountId,action:'options',tone,variation:attempt});
+      const result=await api<{options:string[]}>(endpoint(),{id:email.id,accountId:demo?undefined:actionAccountId(email),action:'options',tone,variation:attempt});
       setOptions(result.options);setChosen(-1);setVariation(attempt);
       if(demo)setMessage('Written for the sample inbox. Pick an option, then edit it before trying the reply flow.');
     }catch(error){setMessage(error instanceof Error?error.message:'Could not generate reply options.');setError(true);}
@@ -39,7 +39,7 @@ export function ReplyComposer({email,demo,aiReady,onSent}:{email:Email;demo:bool
     if(!notes.trim())return;
     setBusy('polish');setMessage('');setError(false);
     try{
-      const result=await api<{reply:string}>(endpoint(),{id:email.id,accountId:email.accountId,action:'polish',tone,notes});
+      const result=await api<{reply:string}>(endpoint(),{id:email.id,accountId:demo?undefined:actionAccountId(email),action:'polish',tone,notes});
       setText(result.reply);setOptions([]);setChosen(-1);
       if(demo)setMessage('Polished for the sample inbox. You can still edit it before trying the reply flow.');
     }catch(error){setMessage(error instanceof Error?error.message:'Could not polish your notes into a reply.');setError(true);}
@@ -51,7 +51,7 @@ export function ReplyComposer({email,demo,aiReady,onSent}:{email:Email;demo:bool
     setBusy(action);setMessage('');setError(false);
     try{
       if(demo){setMessage(action==='send'?'Demo reply complete. No email was sent.':'Demo draft saved for this conversation.');if(action==='send'){setSent(text);onSent();}}
-      else{await api('/api/reply',{id:email.id,accountId:email.accountId,action,body:text});setMessage(action==='send'?'Reply sent through Gmail.':'Draft saved in Gmail.');if(action==='send'){setSent(text);onSent();}}
+      else{await api('/api/reply',{id:email.id,accountId:actionAccountId(email),action,body:text});setMessage(action==='send'?'Reply sent through Gmail.':'Draft saved in Gmail.');if(action==='send'){setSent(text);onSent();}}
     }catch(error){setMessage(error instanceof Error?error.message:'Could not complete your reply.');setError(true);}
     finally{setBusy('');}
   }

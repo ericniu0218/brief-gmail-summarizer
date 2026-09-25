@@ -118,13 +118,62 @@ export function openObligations(classification:Classification){
 }
 
 const DAY=86400000;
+const HOUR=3600000;
+
+/**
+ * Windows shared with the importance policy in `lib/importance.ts`, which holds the full
+ * table. They live here because this module is the lower layer and cannot import it.
+ */
+export const DUE_SOON_MS=72*HOUR;
+export const MEETING_SOON_MS=24*HOUR;
+
+/**
+ * When an obligation falls due, in epoch milliseconds, or undefined when the message gave
+ * no date that could be resolved. An ambiguous date counts as no date: review exists for
+ * those, and guessing is what manufactures urgency.
+ *
+ * A date-only deadline ends at 23:59:59 UTC on that date. The policy is stated in one
+ * place so a message cannot be urgent on the server and routine in the browser. Timed
+ * obligations are absolute instants here; importance compares their elapsed time to now,
+ * while the calendar deliberately displays that instant on the viewer's local day.
+ */
+export function obligationDueAt(obligation:Obligation):number|undefined{
+  const due=obligation?.due;
+  if(!due||typeof due!=='object'||due.ambiguous)return undefined;
+  if(due.time){
+    const parsed=Date.parse(due.time);
+    if(!Number.isFinite(parsed))return undefined;
+    const match=/^(\d{4})-(\d{2})-(\d{2})T/.exec(due.time);
+    const hasNumericOffset=/[+-]\d{2}:?\d{2}$/.test(due.time);
+    // JavaScript silently rolls impossible dates forward. Validate UTC and local wall-clock
+    // dates, while preserving explicit numeric offsets whose UTC date may legitimately differ.
+    if(match&&!hasNumericOffset){
+      const year=Number(match[1]),month=Number(match[2])-1,day=Number(match[3]);
+      const check=new Date(parsed),utc=/z$/i.test(due.time);
+      const actualYear=utc?check.getUTCFullYear():check.getFullYear();
+      const actualMonth=utc?check.getUTCMonth():check.getMonth();
+      const actualDay=utc?check.getUTCDate():check.getDate();
+      if(actualYear!==year||actualMonth!==month||actualDay!==day)return undefined;
+    }
+    return parsed;
+  }
+  if(!due.date)return undefined;
+  const match=/^(\d{4})-(\d{2})-(\d{2})$/.exec(due.date);
+  if(!match)return undefined;
+  const year=Number(match[1]),month=Number(match[2])-1,day=Number(match[3]);
+  const at=Date.UTC(year,month,day,23,59,59);
+  // Date.parse rolls an impossible date forward — 30 February silently becomes 2 March —
+  // so the parts are compared back. A date the message cannot have meant yields nothing
+  // rather than a deadline in a month it never named.
+  const check=new Date(at);
+  if(check.getUTCFullYear()!==year||check.getUTCMonth()!==month||check.getUTCDate()!==day)return undefined;
+  return at;
+}
 
 /** Days until the obligation is due, or undefined when no supported date exists. */
 export function daysUntilDue(obligation:Obligation,now:number){
-  const iso=obligation.due?.time||obligation.due?.date;
-  if(!iso||!obligation.due||obligation.due.ambiguous)return undefined;
-  const due=Date.parse(obligation.due.time?iso:`${iso}T23:59:59Z`);
-  return Number.isFinite(due)?Math.floor((due-now)/DAY):undefined;
+  const due=obligationDueAt(obligation);
+  return due===undefined?undefined:Math.floor((due-now)/DAY);
 }
 
 /** An unresolved dated obligation whose due date has already passed. */
@@ -143,19 +192,18 @@ export function derivePriority(input:Classification,now:number):'high'|'normal'{
   if(classification.securityEvent)return 'high';
   for(const obligation of openObligations(classification)){
     if(!obligation.required)continue;
-    const days=daysUntilDue(obligation,now);
-    if(days!==undefined&&days>=0&&days<=3)return 'high';
-    if(obligation.kind==='meeting'&&obligation.meetingState==='confirmed'&&days!==undefined&&days>=0&&days<=1)return 'high';
-    if(obligation.kind==='request'&&obligation.ownerIsUser===true)return 'high';
+    const due=obligationDueAt(obligation);
+    if(due===undefined)continue;
+    const until=due-now;
+    // Exact elapsed time, not a count of calendar dates: "within 72 hours" must not
+    // quietly become "within four dates" because of where midnight falls.
+    if(until>=0&&until<=DUE_SOON_MS)return 'high';
+    if(obligation.kind==='meeting'&&obligation.meetingState==='confirmed'&&until>=0&&until<=MEETING_SOON_MS)return 'high';
   }
+  // A direct request used to return 'high' here with no date test at all, which is what
+  // kept months-old requests permanently urgent. Recency is time-dependent, so it belongs
+  // to the importance policy, which can see the message's own timestamp.
   return 'normal';
-}
-
-/** Overview shows unresolved obligations and security events, never cancelled work. */
-export function isOverviewMessage(input:Classification,now:number){
-  const classification=effectiveClassification(input);
-  if(classification.disposition==='junk')return false;
-  return classification.securityEvent||derivePriority(classification,now)==='high'||openObligations(classification).some(o=>o.required);
 }
 
 /** Upcoming-event lists exclude cancelled and superseded meetings but keep them as history. */

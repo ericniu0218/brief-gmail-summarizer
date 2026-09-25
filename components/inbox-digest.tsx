@@ -5,8 +5,10 @@ import type { Email } from '@/lib/mail';
 import { isImportantEmail, sortInboxEmails } from '@/lib/inbox-priority';
 
 /** Read-only summary that places reply-required mail before other important messages. */
-export function InboxDigest({open,onOpenChange,emails,ai,connected,onSelect}:{open:boolean;onOpenChange:(open:boolean)=>void;emails:Email[];ai:boolean;connected:boolean;onSelect:(email:Email)=>void}){
-  const important=sortInboxEmails(emails.filter(isImportantEmail));
+export function InboxDigest({open,onOpenChange,emails,now,ai,connected,onSelect}:{open:boolean;onOpenChange:(open:boolean)=>void;emails:Email[];now:number|null;ai:boolean;connected:boolean;onSelect:(email:Email)=>void}){
+  // One instant, supplied by the caller, so the digest cannot list a message as important
+  // and then rank it as routine — and so rendering stays pure.
+  const important=sortInboxEmails(emails.filter(email=>isImportantEmail(email,now)),now);
   const needsReply=important.filter(m=>m.needsReply);
   const informational=important.filter(m=>!m.needsReply);
   function open_(email:Email){onSelect(email);onOpenChange(false);}
