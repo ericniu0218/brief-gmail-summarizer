@@ -7,7 +7,7 @@ import { decryptToken, googleClient, HttpError, runtime, type Runtime } from './
 export type Connection = {
   id:string; user_id:string; provider_identity:string|null; email:string; token:string;
   token_version:number; last_sync:number|null; sync_lock:number; error:string|null; created:number;
-  sync_page_token:string|null; sync_generation:string|null; sync_skipped:number;sync_full_scan:number;backfill_complete:number;last_full_scan:number|null;
+  sync_page_token:string|null; sync_generation:string|null; sync_skipped:number;sync_full_scan:number;backfill_complete:number;last_full_scan:number|null;content_version:number;
 };
 
 /** The reserved selection for the combined view. It is never a credential-bearing account. */
@@ -74,7 +74,7 @@ export function emailFrom(n:NormalizedMessage,proposed:Classification,now=Date.n
     initials:sender.split(/\s+/).slice(0,2).map(part=>part[0]).join('').toUpperCase(),
     subject:n.subject,
     summary:classification.summary||n.text.replace(/\s+/g,' ').trim().slice(0,140),
-    body:n.text,quoted:n.quoted,
+    body:n.text,quoted:n.quoted,html:n.html,
     time:new Date(n.receivedAt).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}),
     receivedAt:n.receivedAt,
     category,tags,priority,

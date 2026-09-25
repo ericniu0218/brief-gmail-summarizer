@@ -1,7 +1,8 @@
 'use client';
 import { ArrowUpRight, Check, ShieldCheck, Sparkles } from 'lucide-react';
 import { demoEmails, emailKey, type Email } from '@/lib/mail';
-import { sortInboxEmails } from '@/lib/inbox-priority';
+import { isImportantEmail, sortInboxEmails } from '@/lib/inbox-priority';
+
 
 /**
  * Presents at most three high-value inbox highlights and explains whether the content is
@@ -9,6 +10,7 @@ import { sortInboxEmails } from '@/lib/inbox-priority';
  */
 export function DailyBrief({
   emails,
+  now,
   connected,
   ai,
   aiConfigured,
@@ -19,6 +21,8 @@ export function DailyBrief({
   onSelect,
 }: {
   emails: Email[];
+  /** The dashboard's shared clock; null until the browser supplies one. */
+  now: number | null;
   connected: boolean;
   ai: boolean;
   aiConfigured: boolean;
@@ -31,6 +35,7 @@ export function DailyBrief({
   // Noise is excluded before sorting so promotions never consume a highlight slot.
   const highlights = sortInboxEmails(
     emails.filter((email) => email.category !== 'noise'),
+    now,
   ).slice(0, 3);
   const preparing = connected && !updated && busy;
   const lastSync = updated
@@ -85,7 +90,7 @@ export function DailyBrief({
               highlights.map((email) => (
                 <button key={emailKey(email)} onClick={() => onSelect(email)}>
                   <span
-                    className={`point-dot ${email.priority === 'high' ? 'urgent' : ''}`}
+                    className={`point-dot ${isImportantEmail(email, now) ? 'urgent' : ''}`}
                   />
                   <p>
                     <strong>{email.subject}.</strong> {email.summary}

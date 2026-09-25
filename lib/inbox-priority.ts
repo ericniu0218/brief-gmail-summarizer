@@ -1,5 +1,5 @@
 import type { Email } from './mail';
-import { isOverviewMessage } from './classification';
+import { cachedImportance, evaluateImportance, receivedAtOf } from './importance';
 
 const SECURITY_OR_ACCESS = /\b(verification code|verify (?:your|this)|security alert|security code|one[- ]time (?:code|password)|otp|two[- ]factor|2fa|password reset|reset your password|new (?:sign[- ]in|login|device)|unrecognized (?:sign[- ]in|login)|confirm your (?:email|account|identity)|activate your account)\b/i;
 const DIRECT_ACTION = /\b(action required|approval (?:needed|required)|response (?:needed|required)|complete (?:your|the) setup|finish (?:your|the) setup|setup incomplete|due (?:today|tomorrow)|deadline|urgent)\b/i;
@@ -13,6 +13,8 @@ export type InboxFoldRow = {
   company:string;
   emails:Email[];
   needsReplyCount:number;
+  /** The message that earned the group its position, shown so it is not buried. */
+  lead:Email;
 };
 export type InboxRow = InboxEmailRow | InboxFoldRow;
 
@@ -26,24 +28,54 @@ export function hasImportantSignal(subject:string,content:string) {
 }
 
 /**
- * Messages carrying a structured classification are judged by the shared policy, so the
- * dashboard cannot hide one just because the classifier's original guess was Junk.
- * The keyword rule remains only for messages that have no classification, such as the
- * sample workspace and snapshots predating structured results.
+ * Whether a message belongs in Important now, decided by the shared time-based policy.
+ *
+ * Keyword matching plays no part: a sender writing "urgent" is not evidence, and neither
+ * is a message being unread. Both were previously able to promote a message on their own.
  */
-export function isImportantEmail(email:Email,now=Date.now()) {
-  if(email.classification)return isOverviewMessage(email.classification,now);
-  return email.category!=='noise'&&(email.needsReply||email.priority==='high'||hasImportantSignal(email.subject,`${email.summary} ${email.body}`));
+export function isImportantEmail(email:Email,now:number|null) {
+  // `null` means the clock is not known yet; see `cachedImportance`.
+  return now===null?cachedImportance(email):evaluateImportance(email,now).important;
 }
 
-export function sortInboxEmails(emails:Email[]) {
-  return emails.map((email,index)=>({email,index})).sort((a,b)=>
-    Number(b.email.needsReply)-Number(a.email.needsReply)||
-    Number(isImportantEmail(b.email))-Number(isImportantEmail(a.email))||
-    Number(b.email.priority==='high')-Number(a.email.priority==='high')||
-    Number(b.email.unread)-Number(a.email.unread)||
-    a.index-b.index,
-  ).map(({email})=>email);
+/** `newest` orders purely by arrival; `importance` applies the policy below. */
+export type SortMode='importance'|'newest';
+
+const identityOf=(email:Email)=>`${email.accountId||''}:${email.id}`;
+
+/**
+ * Deterministic ordering.
+ *
+ * In importance mode: current obligations first, then recent direct requests, then
+ * recently overdue work, then older unresolved items, then routine mail. Inside a tier the
+ * earliest supported due time wins, then the most recent arrival, then the composite
+ * identity — so the order never depends on the input order or on a clock tick mid-sort.
+ *
+ * Importance is evaluated once per message rather than inside the comparator, which would
+ * otherwise re-derive every classification on each of O(n log n) comparisons.
+ */
+export function sortInboxEmails(emails:Email[],now:number|null,mode:SortMode='importance') {
+  // With no clock there is no time-based policy to apply, so arrival order is the only
+  // honest ordering — and it makes the server render and the first client paint identical.
+  const ordering=now===null?'newest':mode;
+  const scored=emails.map((email,index)=>({
+    email,index,received:receivedAtOf(email),
+    importance:now===null?undefined:evaluateImportance(email,now),
+  }));
+  scored.sort((a,b)=>{
+    if(ordering==='importance'&&a.importance&&b.importance){
+      if(a.importance.rank!==b.importance.rank)return a.importance.rank-b.importance.rank;
+      // Unknown due times sort last within a tier without ever producing NaN, because
+      // two equal infinities are compared for equality rather than subtracted.
+      const aDue=a.importance.dueAt??Infinity,bDue=b.importance.dueAt??Infinity;
+      if(aDue!==bDue)return aDue-bDue;
+    }
+    // Newest first. An unknown timestamp sorts last rather than jumping the queue.
+    const aAt=a.received??-Infinity,bAt=b.received??-Infinity;
+    if(aAt!==bAt)return bAt-aAt;
+    return identityOf(a.email).localeCompare(identityOf(b.email))||a.index-b.index;
+  });
+  return scored.map(({email})=>email);
 }
 
 function organizationKey(email:Email) {
@@ -63,27 +95,41 @@ function companyName(email:Email,key:string) {
 }
 
 function isFoldableOperationalEmail(email:Email) {
-  return isImportantEmail(email)&&FOLDABLE_OPERATIONAL.test(searchable(email));
+  return FOLDABLE_OPERATIONAL.test(searchable(email));
 }
 
-export function buildInboxRows(emails:Email[]):InboxRow[] {
-  const sorted=sortInboxEmails(emails);
+/**
+ * Rows for the inbox list, with operational mail from one organisation folded together.
+ *
+ * A group takes the position of its most important member and shows that member as its
+ * heading, so an urgent message is never hidden under a routine preview or under a
+ * sibling that merely happens to be older.
+ */
+export function buildInboxRows(emails:Email[],now:number|null,mode:SortMode='importance'):InboxRow[] {
+  const sorted=sortInboxEmails(emails,now,mode);
   const buckets=new Map<string,Email[]>();
+  const keyOf=new Map<Email,string>();
   for(const email of sorted){
     if(!isFoldableOperationalEmail(email))continue;
     const key=organizationKey(email);
-    buckets.set(key,[...(buckets.get(key)||[]),email]);
+    keyOf.set(email,key);
+    const bucket=buckets.get(key);
+    if(bucket)bucket.push(email);
+    else buckets.set(key,[email]);
   }
-  const folded=new Map<string,Email[]>();
-  for(const [key,items] of buckets)if(items.length>1)folded.set(key,items);
   const emitted=new Set<string>();
   const rows:InboxRow[]=[];
   for(const email of sorted){
-    const key=organizationKey(email);const group=folded.get(key);
-    if(group?.includes(email)){
+    // Membership is answered by the map built above rather than by scanning a group, and
+    // a bucket of one is simply not a group.
+    const key=keyOf.get(email);
+    const group=key===undefined?undefined:buckets.get(key);
+    if(key!==undefined&&group&&group.length>1){
       if(emitted.has(key))continue;
       emitted.add(key);
-      rows.push({kind:'fold',id:`fold:${key}`,company:companyName(group[0],key),emails:group,needsReplyCount:group.filter(item=>item.needsReply).length});
+      // `group` follows the sorted order, so its first member is the one that placed it.
+      rows.push({kind:'fold',id:`fold:${key}`,company:companyName(group[0],key),emails:group,
+        needsReplyCount:group.filter(item=>item.needsReply).length,lead:group[0]});
       continue;
     }
     rows.push({kind:'email',email});

@@ -324,6 +324,7 @@ void test('mailbox scans resume through Gmail pages and retain earlier pages',as
   assert.deepEqual(new Set(second.emails.map(email=>email.id)),new Set(['newer','older']));
   assert.ok(!second.emails.some(email=>email.id==='cached'),'a completed scan removes mail it never saw');
   assert.equal(row('connections')!.sync_page_token,null);
+  assert.equal(row('connections')!.content_version,1,'the rich-body backfill is complete only after the last page');
 });
 
 void test('a corrupt override row falls back to empty tags without aborting sync', async () => {
@@ -979,5 +980,121 @@ void test('disconnecting the last mailbox clears the default', async () => {
       .prepare('SELECT * FROM account_preferences WHERE user_id=?')
       .get('user-a'),
     undefined,
+  );
+});
+
+// ── Section 5: the combined "All inboxes" view ──────────────────────────────
+
+/** Replaces an account's stored mail so a test can describe the exact combined input. */
+function seedMail(
+  account: string,
+  mail: { id: string; address: string; receivedAt: number; subject: string }[],
+  user = 'user-a',
+) {
+  storage.sql
+    .prepare('UPDATE snapshots SET data=? WHERE account_id=? AND user_id=?')
+    .run(
+      JSON.stringify({ emails: mail, ai: false, updated: 123 }),
+      account,
+      user,
+    );
+}
+
+void test('the combined view merges both mailboxes and keeps each message attributed', async () => {
+  await seed('user-a', 'first@example.com', 0, 'acct-1');
+  await seed('user-a', 'second@example.com', 0, 'acct-2');
+  // The same Gmail id exists in both mailboxes: ids are unique per mailbox, not globally.
+  seedMail('acct-1', [
+    { id: 'shared', address: 'billing@vendor.example', receivedAt: 300, subject: 'First copy' },
+    { id: 'only-1', address: 'a@vendor.example', receivedAt: 100, subject: 'Older first-account mail' },
+  ]);
+  seedMail('acct-2', [
+    { id: 'shared', address: 'billing@vendor.example', receivedAt: 200, subject: 'Second copy' },
+  ]);
+
+  const response = await mailbox(mailboxRequest());
+  assert.equal(response.status, 200);
+  const view = (await response.json()) as InboxSnapshot;
+
+  // Every message survives: a shared Gmail id must not collapse two mailboxes into one.
+  assert.equal(view.emails.length, 3, 'no message is dropped by a colliding Gmail id');
+  assert.deepEqual(
+    view.emails.map((email) => `${email.accountId}:${email.id}`),
+    ['acct-1:shared', 'acct-2:shared', 'acct-1:only-1'],
+    'newest first, with the composite identity breaking ties',
+  );
+  // Attribution is what lets every later action reach the right Gmail account.
+  const shared = view.emails.filter((email) => email.id === 'shared');
+  assert.deepEqual(
+    shared.map((email) => email.accountEmail).sort((a, b) => String(a).localeCompare(String(b))),
+    ['first@example.com', 'second@example.com'],
+    'each copy names the mailbox that received it',
+  );
+  assert.deepEqual(
+    (view.accounts || []).map((account) => account.email).sort((a, b) => a.localeCompare(b)),
+    ['first@example.com', 'second@example.com'],
+    'both mailboxes are reported individually',
+  );
+});
+
+void test('a failing mailbox is identified without hiding the healthy one', async () => {
+  await seed('user-a', 'first@example.com', 0, 'acct-1');
+  await seed('user-a', 'second@example.com', 0, 'acct-2');
+  seedMail('acct-1', [
+    { id: 'kept', address: 'a@vendor.example', receivedAt: 100, subject: 'Still readable' },
+  ]);
+  seedMail('acct-2', [
+    { id: 'saved', address: 'b@vendor.example', receivedAt: 50, subject: 'Saved before the failure' },
+  ]);
+  storage.sql
+    .prepare('UPDATE connections SET error=? WHERE id=?')
+    .run('Reconnect Gmail', 'acct-2');
+
+  const view = (await (await mailbox(mailboxRequest())).json()) as InboxSnapshot;
+  // A refresh failure must not discard mail that was already saved for that account.
+  assert.deepEqual(
+    view.emails.map((email) => email.id),
+    ['kept', 'saved'],
+    'the failing account keeps contributing its saved mail',
+  );
+  const failing = (view.accounts || []).find((account) => account.id === 'acct-2');
+  assert.equal(failing?.error, 'Reconnect Gmail', 'the affected account is named');
+  const healthy = (view.accounts || []).find((account) => account.id === 'acct-1');
+  assert.equal(healthy?.error, null, 'the healthy account is not blamed for it');
+});
+
+void test('disconnecting a mailbox removes its messages from the combined view', async () => {
+  await seed('user-a', 'first@example.com', 0, 'acct-1');
+  await seed('user-a', 'second@example.com', 0, 'acct-2');
+  seedMail('acct-1', [
+    { id: 'stays', address: 'a@vendor.example', receivedAt: 100, subject: 'Kept mail' },
+  ]);
+  seedMail('acct-2', [
+    { id: 'goes', address: 'b@vendor.example', receivedAt: 200, subject: 'Removed mail' },
+  ]);
+  const before = (await (await mailbox(mailboxRequest())).json()) as InboxSnapshot;
+  assert.deepEqual(before.emails.map((email) => email.id), ['goes', 'stays']);
+
+  const provider = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({});
+  try {
+    assert.equal(
+      (await disconnectAccount(disconnectRequest({ accountId: 'acct-2' }))).status,
+      200,
+    );
+  } finally {
+    globalThis.fetch = provider;
+  }
+
+  const after = (await (await mailbox(mailboxRequest())).json()) as InboxSnapshot;
+  assert.deepEqual(
+    after.emails.map((email) => email.id),
+    ['stays'],
+    'the disconnected mailbox no longer contributes mail',
+  );
+  assert.deepEqual(
+    (after.accounts || []).map((account) => account.id),
+    ['acct-1'],
+    'and is no longer listed as part of the combined view',
   );
 });

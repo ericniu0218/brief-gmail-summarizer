@@ -40,6 +40,8 @@ export const connections = sqliteTable('connections', {
   syncFullScan: integer('sync_full_scan').notNull().default(1),
   backfillComplete: integer('backfill_complete').notNull().default(0),
   lastFullScan: integer('last_full_scan'),
+  // Version 1 means a completed full scan stored rich HTML for formatted display.
+  contentVersion: integer('content_version').notNull().default(0),
   error: text('error'),
   created: integer('created').notNull(),
 }, table => [
