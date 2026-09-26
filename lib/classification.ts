@@ -65,7 +65,18 @@ export type Classification={
    * `category` records a deliberate user choice of section, which is the only thing
    * allowed to bypass automatic conflict protection.
    */
-  override?:{source:'message'|'rule';category?:Section;addTags?:Tag[];removeTags?:Tag[]};
+  override?:{
+    source:'message'|'rule';
+    category?:Section;
+    addTags?:Tag[];
+    removeTags?:Tag[];
+    /**
+     * Explicit Junk or Keep intent, from a correction on this message or a saved rule for
+     * its sender. It is recorded here so the conflict policy can tell a decision the user
+     * made from a guess the classifier made.
+     */
+    junkPreference?:'junk'|'not-junk';
+  };
 };
 
 /**
@@ -285,7 +296,12 @@ export function protectiveObligations(classification:Classification):Obligation[
  * file the message under Noise is always honoured and is never treated as a conflict.
  */
 export function junkConflict(classification:Classification):string|undefined{
-  if(classification.override?.category==='noise')return undefined;
+  // A deliberate user choice is always honoured: filing the message under Noise, or
+  // confirming a Junk rule for this message or its sender. The safeguard exists to stop an
+  // automatic prediction burying a request, not to overrule a person who was asked and
+  // said yes. Clearing that intent restores the safeguard, because the composition runs
+  // again from the untouched automatic baseline.
+  if(classification.override?.category==='noise'||classification.override?.junkPreference==='junk')return undefined;
   if(proposedDisposition(classification)!=='junk')return undefined;
   if(protectiveObligations(classification).length)return 'junk-with-open-obligation';
   // A claimed security event is worth a look, but being kept out of Junk is not a

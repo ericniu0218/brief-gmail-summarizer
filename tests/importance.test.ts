@@ -264,7 +264,7 @@ void test('an unusable received date is unknown, never today', () => {
   const values: unknown[] = [undefined, null, Number.NaN, 0, -1, 'yesterday'];
   for (const value of values) {
     const broken = withObligations(`broken-${String(value)}`, [obligation()], { receivedAt: value as number });
-    assert.equal(receivedAtOf(broken), undefined, `${String(value)} is not a usable timestamp`);
+    assert.equal(receivedAtOf(broken,NOW), undefined, `${String(value)} is not a usable timestamp`);
     const rated = evaluateImportance(broken, NOW);
     assert.ok(Number.isFinite(rated.rank), 'ranking stays a real number');
     assert.equal(rated.reasonCode, 'undated-direct-request', 'the unaged rule applies');
@@ -272,6 +272,21 @@ void test('an unusable received date is unknown, never today', () => {
   // An unknown date must not let an old message claim to be new.
   const order = sortInboxEmails([withObligations('unknown', [obligation()], { receivedAt: undefined }), todayRequest], NOW);
   assert.equal(order[0].id, 'today', 'a message with a real recent timestamp comes first');
+});
+
+void test('a far-future arrival cannot create importance or jump ahead of real mail',()=>{
+  const forged=withObligations('future',[obligation()],{receivedAt:ahead(400*DAY)});
+  const recent=withObligations('recent',[obligation()],{receivedAt:ago(HOUR)});
+  assert.equal(receivedAtOf(forged,NOW),undefined,'the future timestamp is not a usable arrival');
+  const rated=evaluateImportance(forged,NOW);
+  assert.equal(rated.important,false);
+  assert.equal(rated.reasonCode,'future-received-date');
+  assert.deepEqual(sortInboxEmails([forged,recent],NOW).map(item=>item.id),['recent','future']);
+
+  const drift=withObligations('clock-drift',[obligation()],{receivedAt:ahead(IMPORTANCE.futureSkew)});
+  assert.equal(evaluateImportance(drift,NOW).important,true,'the tolerance boundary remains usable');
+  assert.equal(receivedAtOf({...drift,receivedAt:ahead(IMPORTANCE.futureSkew+1)},NOW),undefined,
+    'one millisecond beyond the tolerance is rejected');
 });
 
 void test('a deadline earlier today is overdue, not upcoming', () => {
@@ -346,7 +361,10 @@ void test('newest-first really means newest first', () => {
 void test('untimed calendar mail with an unknown arrival sorts after known arrivals',()=>{
   const unknown=email('unknown-arrival',{receivedAt:undefined});
   const known=email('known-arrival',{receivedAt:ago(DAY)});
-  assert.deepEqual([unknown,known].sort(byEventTime('2026-10-14')).map(item=>item.id),['known-arrival','unknown-arrival']);
+  const future=email('future-arrival',{receivedAt:ahead(400*DAY)});
+  assert.deepEqual([future,unknown,known].sort(byEventTime('2026-10-14',NOW)).map(item=>item.id),
+    ['known-arrival','future-arrival','unknown-arrival'],
+    'the explicit clock prevents a forged future arrival from becoming a valid tie-breaker');
 });
 
 void test('the next event uses live importance instead of a stale cached priority',()=>{
@@ -414,24 +432,23 @@ void test('an unknown clock withholds urgency rather than inventing a 1970 one',
   assert.equal(isImportantEmail(flagged, null), true, 'a stored flag is still honoured');
   assert.equal(isImportantEmail({ ...flagged, category: 'noise' } as Email, null), false, 'Noise is still excluded');
 
-  // The point of keeping `null` rather than flattening it to a number: an epoch-zero
-  // "now" dates every message from 1970, which reads a ten-month-old request as fresh and
-  // a deadline an hour away as distant — the inversion this policy exists to prevent.
-  assert.equal(evaluateImportance(novemberRequest, 0).important, true, 'epoch-zero revives the old bug');
+  // The future-date guard now contains one half of that bad placeholder outcome, while
+  // the explicit null path is still required so real deadlines are not dated from 1970.
+  assert.equal(evaluateImportance(novemberRequest, 0).important, false, 'a future arrival cannot manufacture recency');
   assert.equal(evaluateImportance(soon, 0).important, false, 'and buries the genuinely urgent one');
   assert.equal(evaluateImportance(novemberRequest, NOW).important, false, 'the real clock gets both right');
   assert.equal(evaluateImportance(soon, NOW).important, true);
 });
 
-void test('an unknown clock orders by arrival, never by a placeholder policy', () => {
+void test('an unknown clock preserves the server order instead of trusting a future date', () => {
   const oldUrgent = withObligations('old-urgent', [deadline(ahead(HOUR))], { receivedAt: ago(300 * DAY) });
   const freshRoutine = email('fresh', { receivedAt: ago(HOUR), classification: classification({ obligations: [] }) });
-  // With a clock the live deadline wins; without one the list falls back to newest first
-  // rather than ranking on arithmetic against a time that is not real.
+  const forged = email('forged',{receivedAt:ahead(400*DAY),classification:classification({obligations:[]})});
+  // With a clock the live deadline wins. Without one, preserve the already validated
+  // server order so a timestamp that cannot yet be checked cannot jump to the top.
   assert.deepEqual(sortInboxEmails([freshRoutine, oldUrgent], NOW).map(m => m.id), ['old-urgent', 'fresh']);
-  assert.deepEqual(sortInboxEmails([oldUrgent, freshRoutine], null).map(m => m.id), ['fresh', 'old-urgent']);
-  // And it stays deterministic whichever way the input arrives.
-  assert.deepEqual(sortInboxEmails([freshRoutine, oldUrgent], null).map(m => m.id), ['fresh', 'old-urgent']);
+  assert.deepEqual(sortInboxEmails([freshRoutine,oldUrgent,forged],null).map(m=>m.id),
+    ['fresh','old-urgent','forged']);
 });
 
 // ── Calendar extraction shares the validated date policy ───────────────────
@@ -470,6 +487,13 @@ void test('a date-only obligation still appears, without the body repeating it',
   assert.equal(nextEmailEvent([dated], new Date(NOW), false)?.date, day);
   // The UTC end-of-day the resolver gives it must not push it onto the following day.
   assert.equal(day, '2026-10-15');
+});
+
+void test('the next-event panel keeps legitimate long-range dates but rejects absurd ones',()=>{
+  const within=calendarEmail([inviteAt(new Date(Date.UTC(2027,9,24,12)).toISOString())],{id:'within'});
+  const distant=calendarEmail([inviteAt('9999-01-01T12:00:00Z')],{id:'distant'});
+  assert.equal(nextEmailEvent([distant,within],new Date(NOW),false)?.email.id,'within');
+  assert.equal(nextEmailEvent([distant],new Date(NOW),false),undefined);
 });
 
 void test('an email listing several times is placed by its earliest', () => {

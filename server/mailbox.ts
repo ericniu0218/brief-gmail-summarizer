@@ -1,9 +1,10 @@
-import { automaticBaseline, composeClassification, loadOverrides, loadSenderRules, manualCorrectionView, withSenderRule } from './overrides';
+import { activeJunkPreference, automaticBaseline, composeClassification, loadOverrides, loadSenderRules, manualCorrectionView, senderRuleFor, withSenderRule } from './overrides';
 import { parseSnapshot } from './snapshots';
 import { loadMessages } from './messages';
 import { ALL_INBOXES, getOwnedConnection, ownedConnections } from './gmail';
 import type { Runtime } from './runtime';
 import type { StoredEmail } from './sync';
+import { receivedAtOf } from '@/lib/importance';
 
 /**
  * Builds the mail view for one mailbox, or the combined view across every connected
@@ -40,7 +41,7 @@ export async function readMailbox(user:string,requested:string,e:Runtime){
       const source={...email,accountId:c.id,accountEmail:c.email};
       if(!email.classification&&!email.automaticClassification){emails.push(source);continue;}
       const automatic=automaticBaseline(email.automaticClassification)??automaticBaseline(email.classification);
-      const manual=overrides.get(email.id),senderRule=senderRules.get(email.address);
+      const manual=overrides.get(email.id),senderRule=senderRuleFor(senderRules,email.address);
       const effective=withSenderRule(manual,senderRule,email.id);
       // A legacy corrected snapshot has no recoverable automatic baseline. Keep its last
       // visible result until sync reclassifies it, and tell reset that recovery is needed.
@@ -51,7 +52,7 @@ export async function readMailbox(user:string,requested:string,e:Runtime){
       emails.push({...source,automaticClassification:automatic,classification,category,tags,priority,label,
         correctionRevision:manual?.revision??0,manuallyCorrected:manual?.active!==false&&!!manual,
         manualCorrection:manualCorrectionView(manual),
-        senderJunkPreference:senderRule?.junkPreference,senderRuleRevision:senderRule?.revision??0,
+        senderJunkPreference:activeJunkPreference(senderRule),senderRuleRevision:senderRule?.revision??0,
         automaticClassificationAvailable:true});
     }
     pending+=snapshot?.pending||0;skipped+=snapshot?.skipped||0;
@@ -60,6 +61,10 @@ export async function readMailbox(user:string,requested:string,e:Runtime){
   }
   // Stable order: newest first, with the composite identity breaking ties so the list
   // never reshuffles between renders when two messages share a timestamp.
-  emails.sort((a,b)=>(b.receivedAt||0)-(a.receivedAt||0)||`${a.accountId}:${a.id}`.localeCompare(`${b.accountId}:${b.id}`));
+  emails.sort((a,b)=>{
+    const aAt=receivedAtOf(a,now)??-Infinity,bAt=receivedAtOf(b,now)??-Infinity;
+    if(aAt!==bAt)return bAt-aAt;
+    return `${a.accountId}:${a.id}`.localeCompare(`${b.accountId}:${b.id}`);
+  });
   return {emails,accounts,ai,updated,pending,skipped,hasMore};
 }

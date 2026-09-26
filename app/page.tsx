@@ -4,9 +4,10 @@ import { useState, useEffect } from 'react';
 import { Inbox, Sparkles, Layers3, Settings2, ChevronDown, ArrowUpRight, ArrowRight, RefreshCw, Check, Sun, X } from 'lucide-react';
 import { SidebarProvider, Sidebar, SidebarHeader, SidebarContent, SidebarFooter, SidebarTrigger } from '@/components/ui/sidebar';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet';
+import { Sheet, SheetClose, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet';
 import { emailKey, senderKey, type Email } from '@/lib/mail';
-import { useInbox } from '@/hooks/use-inbox';
+import { api, useInbox, type ConnectionStatus } from '@/hooks/use-inbox';
+import { syncFailureMessage, type InboxSnapshot } from '@/lib/inbox-client';
 import { useMailTools } from '@/hooks/use-mail-tools';
 import { ReplyComposer } from '@/components/reply-composer';
 import { ConnectionPanel } from '@/components/connection-panel';
@@ -22,6 +23,7 @@ import { isImportantEmail } from '@/lib/inbox-priority';
 
 import { CategoryNav } from '@/components/category-nav';
 import { ClassificationDetail } from '@/components/classification-detail';
+import { SenderJunkButton } from '@/components/sender-junk-button';
 import { emailTags, parseView, selectEmails, sectionName, tagName } from '@/lib/categories';
 import { useTheme } from '@/hooks/use-theme';
 import { ThemePrompt } from '@/components/theme-prompt';
@@ -94,8 +96,11 @@ export default function Dashboard() {
     inbox.setEmails(previous=>previous.map(current=>{
       if(emailKey(current)!==emailKey(updated))return current;
       if((current.correctionRevision||0)>(updated.correctionRevision||0))return current;
+      if((current.senderRuleRevision||0)>(updated.senderRuleRevision||0))return current;
       return {...current,classification:updated.classification,automaticClassificationAvailable:updated.automaticClassificationAvailable,
         correctionRevision:updated.correctionRevision,manuallyCorrected:updated.manuallyCorrected,
+        manualCorrection:updated.manualCorrection,
+        senderJunkPreference:updated.senderJunkPreference,senderRuleRevision:updated.senderRuleRevision,
         category:updated.category,tags:updated.tags,priority:updated.priority,label:updated.label,needsReply:updated.needsReply};
     }));
   }
@@ -142,8 +147,8 @@ export default function Dashboard() {
         <footer className="page-footer"><span><span className="small-dot"/> {connected?(lastSync?`Last synced ${lastSync} · Refreshes every 30 minutes while open`:'Gmail connected · Preparing your first brief'):'Sample emails · Connect Gmail to make it yours'}</span><span>Made for a little more headspace.</span></footer>
       </main>
     </div>
-    <ConnectionPanel signInUrl={inbox.signInUrl} open={connect} onOpenChange={setConnect} status={status} darkMode={darkMode} onDarkModeChange={setDarkMode} defaultAccountId={inbox.defaultAccountId} onSetDefault={inbox.setDefaultAccount} onDisconnectAccount={async id=>{await inbox.disconnectAccount(id);setSelected(null);}} onDisconnect={()=>{inbox.resetToDemo();setSelected(null);}}/>
+    <ConnectionPanel signInUrl={inbox.signInUrl} open={connect} onOpenChange={setConnect} status={status} darkMode={darkMode} onDarkModeChange={setDarkMode} defaultAccountId={inbox.defaultAccountId} onSetDefault={inbox.setDefaultAccount} onRetry={async id=>{const result=await api<InboxSnapshot>('/api/sync',{accountId:id,explicit:true});const problem=syncFailureMessage(result);if(problem)throw new Error(problem);inbox.setStatus(await api<ConnectionStatus>('/api/connection'));await inbox.reloadCached();}} onDisconnectAccount={async id=>{await inbox.disconnectAccount(id);setSelected(null);}} onDisconnect={()=>{inbox.resetToDemo();setSelected(null);}}/>
     <ThemePrompt open={showThemePrompt} onChoose={setDarkMode}/>
-    <Sheet open={!!selectedEmail} onOpenChange={o=>!o&&setSelected(null)}><SheetContent className="email-sheet"><SheetHeader><span className="eyebrow">CONVERSATION</span><SheetTitle>{selectedEmail?.subject}</SheetTitle><SheetDescription>{selectedEmail?.sender} · {selectedEmail?.address}{selectedEmail?.accountEmail&&<> · To {selectedEmail.accountEmail}</>}</SheetDescription>{selectedEmail&&<div className="conversation-tags"><span className="mail-label section">{sectionName(selectedEmail.category)}</span>{emailTags(selectedEmail).filter(t=>t!=='junk').map(t=><span key={t} className="mail-label">{tagName(t)}</span>)}</div>}</SheetHeader>{selectedEmail&&<EmailBody key={emailKey(selectedEmail)} email={selectedEmail}/>} {selectedEmail&&<ClassificationDetail email={selectedEmail} demo={!connected} onApplied={applyCorrection}/>} {selectedEmail?.quoted&&<details className="quoted-history"><summary>Quoted history</summary><div className="message-body">{selectedEmail.quoted}</div></details>}{selectedEmail&&<ReplyComposer key={selectedEmail?emailKey(selectedEmail):'none'} email={selectedEmail!} demo={!connected} aiReady={!!status?.aiConfigured} onSent={markReplied}/>}</SheetContent></Sheet>
+    <Sheet open={!!selectedEmail} onOpenChange={o=>!o&&setSelected(null)}><SheetContent className="email-sheet" showCloseButton={false}><div className="email-sheet-actions">{selectedEmail&&<SenderJunkButton email={selectedEmail} demo={!connected} onApplied={applyCorrection} onRefresh={inbox.reloadCached}/>}<SheetClose className="email-sheet-close" aria-label="Close"><X size={16}/></SheetClose></div><SheetHeader><span className="eyebrow">CONVERSATION</span><SheetTitle>{selectedEmail?.subject}</SheetTitle><SheetDescription>{selectedEmail?.sender} · {selectedEmail?.address}{selectedEmail?.accountEmail&&<> · To {selectedEmail.accountEmail}</>}</SheetDescription>{selectedEmail&&<div className="conversation-tags"><span className="mail-label section">{sectionName(selectedEmail.category)}</span>{emailTags(selectedEmail).filter(t=>t!=='junk').map(t=><span key={t} className="mail-label">{tagName(t)}</span>)}</div>}</SheetHeader>{selectedEmail&&<EmailBody key={emailKey(selectedEmail)} email={selectedEmail}/>} {selectedEmail&&<ClassificationDetail email={selectedEmail} demo={!connected} onApplied={applyCorrection} onRefresh={inbox.reloadCached}/>} {selectedEmail?.quoted&&<details className="quoted-history"><summary>Quoted history</summary><div className="message-body">{selectedEmail.quoted}</div></details>}{selectedEmail&&<ReplyComposer key={selectedEmail?emailKey(selectedEmail):'none'} email={selectedEmail!} demo={!connected} aiReady={!!status?.aiConfigured} onSent={markReplied}/>}</SheetContent></Sheet>
   </SidebarProvider>;
 }

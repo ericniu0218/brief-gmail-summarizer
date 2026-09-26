@@ -1,12 +1,12 @@
 import { getOwnedConnection, accessToken, gmail, parseMessage, safeUnsubscribe, type GmailMessage } from '@/server/gmail';
-import { failure, HttpError, json, mutation, runtime, userId } from '@/server/runtime';
+import { failure, HttpError, json, mutation, runtime, userId , inputObject} from '@/server/runtime';
 import { gmailThreadUrl } from '@/lib/mail';
 import { mutateSnapshot } from '@/server/snapshots';
 
 /** Performs a verified one-click unsubscribe or sends the user to Gmail as a fallback. */
 export async function POST(request:Request){
   try{
-    mutation(request);const user=await userId();const e=runtime();const {id,accountId}=await request.json() as {id:string;accountId?:string};
+    mutation(request);const user=await userId();const e=runtime();const {id,accountId}=await inputObject(request) as {id:string;accountId?:string};
     if(!id||!/^[a-zA-Z0-9_-]{1,150}$/.test(id))throw new HttpError(400,'Choose a valid sender.');
     // Unsubscribing uses the mailbox the message arrived in, so the endpoint comes from
     // that account's copy of the message and the record is kept per mailbox.

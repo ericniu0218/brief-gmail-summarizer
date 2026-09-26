@@ -30,6 +30,8 @@ export const IMPORTANCE = {
   agingRequest: 30 * DAY,
   /** A missed deadline is shown as overdue for this long, then it stops being urgent. */
   overdueGrace: 7 * DAY,
+  /** Allow ordinary clock drift without trusting timestamps far in the future. */
+  futureSkew: 5 * 60 * 1000,
 } as const;
 
 export type ImportanceTier = 'due-now' | 'recent-request' | 'overdue' | 'aging' | 'routine';
@@ -66,9 +68,16 @@ export { obligationDueAt } from './classification';
  * Never substituted with the current time: doing so is what makes an old message look
  * newly arrived, and an unknown age should withhold urgency rather than invent it.
  */
-export function receivedAtOf(email: Pick<Email, 'receivedAt'>): number | undefined {
+export function receivedAtOf(email: Pick<Email, 'receivedAt'>, now:number|null): number | undefined {
   const value = email?.receivedAt;
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+  if(typeof value!=='number'||!Number.isFinite(value)||value<=0)return undefined;
+  if(now!==null&&Number.isFinite(now)&&value>now+IMPORTANCE.futureSkew)return undefined;
+  return value;
+}
+
+function hasFutureReceivedAt(email:Pick<Email,'receivedAt'>,now:number){
+  const value=email?.receivedAt;
+  return typeof value==='number'&&Number.isFinite(value)&&value>now+IMPORTANCE.futureSkew;
 }
 
 /**
@@ -84,7 +93,7 @@ export function isUpcomingMeeting(obligation: Obligation, now: number, windowMs:
 }
 
 /** Rates one live obligation. Callers filter out resolved and other people's work first. */
-function rateObligation(obligation: Obligation, received: number | undefined, now: number): Importance {
+function rateObligation(obligation: Obligation, received: number | undefined, now: number, futureReceived=false): Importance {
   const due = obligationDueAt(obligation);
   const meeting = obligation.kind === 'meeting';
 
@@ -113,6 +122,8 @@ function rateObligation(obligation: Obligation, received: number | undefined, no
 
   // No supported date, so recency is the only evidence of current relevance.
   if (received === undefined) {
+    if(futureReceived)
+      return at('routine',false,'future-received-date','Arrival date is too far in the future to establish recency.');
     // The age cannot be assessed at all, so the unaged rule applies rather than a guess
     // in either direction: a direct request still counts, anything weaker waits. An
     // unknown timestamp is not evidence of staleness, and substituting one would be the
@@ -141,7 +152,9 @@ function rateObligation(obligation: Obligation, received: number | undefined, no
 function legacyImportance(email: Email, now: number): Importance {
   const flagged = email?.category !== 'noise' && (!!email?.needsReply || email?.priority === 'high');
   if (!flagged) return at('routine', false, 'legacy-routine', 'Nothing marks this for attention.');
-  const received = receivedAtOf(email);
+  const received = receivedAtOf(email,now);
+  if(hasFutureReceivedAt(email,now))
+    return at('routine',false,'legacy-future-date','Arrival date is too far in the future to establish recency.');
   if (received === undefined)
     return at('recent-request', true, 'legacy-undated', 'Marked for attention.');
   if (now - received <= IMPORTANCE.recentRequest)
@@ -180,7 +193,8 @@ export function evaluateImportance(email: Email, now: number): Importance {
   if (classification.disposition === 'junk')
     return at('routine', false, 'noise', 'Filed as Noise.');
 
-  const received = receivedAtOf(email);
+  const received = receivedAtOf(email,now);
+  const futureReceived=hasFutureReceivedAt(email,now);
   const live = (Array.isArray(classification.obligations) ? classification.obligations : [])
     .filter(obligation => obligation && typeof obligation === 'object'
       && obligation.required && appliesToUser(obligation) && !isResolved(obligation));
@@ -189,7 +203,7 @@ export function evaluateImportance(email: Email, now: number): Importance {
   // Rated per obligation, not per message: an email holding a stale deadline *and* a
   // meeting tomorrow must surface for the meeting.
   for (const obligation of live) {
-    const candidate = rateObligation(obligation, received, now);
+    const candidate = rateObligation(obligation, received, now, futureReceived);
     const better = !best || candidate.rank < best.rank
       || (candidate.rank === best.rank && (candidate.dueAt ?? Infinity) < (best.dueAt ?? Infinity));
     if (better) best = candidate;

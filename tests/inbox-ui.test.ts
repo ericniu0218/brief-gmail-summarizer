@@ -12,7 +12,8 @@ import { demoEmails, emailKey, type Email } from '../lib/mail';
 import { SidebarProvider } from '../components/ui/sidebar';
 import { CategoryNav } from '../components/category-nav';
 import { PriorityEmailList } from '../components/priority-email-list';
-import { buildEmailDocument, EmailBody } from '../components/email-body';
+import { buildEmailDocument, EmailBody, PlainEmailBody } from '../components/email-body';
+import { emailTextParts, normalizeEmailText } from '../lib/email-text';
 import {
   api,
   ApiError,
@@ -53,6 +54,8 @@ void test('formatted email is sandboxed and remote images require an explicit ch
   assert.doesNotMatch(blocked,/<script|<form|<input|tracker\.example/);
   const allowed=buildEmailDocument(source,true);
   assert.match(allowed,/img-src https: data: blob:/);
+  assert.match(allowed,/name="viewport"/,'formatted mail scales to the reading pane');
+  assert.match(allowed,/table\{max-width:100%!important\}/,'wide newsletter tables are constrained');
   const email={...demoEmails[0],html:'<p>Formatted message</p>'};
   const markup=renderToStaticMarkup(createElement(EmailBody,{email}));
   // Popups are granted so a reader can follow a link the document sends to a new tab, and
@@ -67,6 +70,23 @@ void test('formatted email is sandboxed and remote images require an explicit ch
   assert.match(markup,/Remote images are blocked/);
   assert.match(markup,/Load images/);
   assert.match(markup,/Always load from this sender/);
+  assert.match(markup,/Formatted/);
+  assert.match(markup,/Plain text/);
+  assert.match(markup,/Expand view/);
+});
+
+void test('plain email removes spacer walls and presents tracking URLs compactly',()=>{
+  const tracking=`https://u42153126.ct.sendgrid.net/ls/click?upn=${'x'.repeat(300)}`;
+  const body=`First paragraph\r\n\r\n\r\n   \r\nSecond paragraph\nTake the survey (${tracking}).`;
+  assert.equal(normalizeEmailText(body).split(/\n{2,}/).length,2,'many blank lines become one paragraph break');
+  const link=emailTextParts(body).find(part=>part.kind==='link');
+  assert.ok(link&&link.label==='u42153126.ct.sendgrid.net/…');
+  const markup=renderToStaticMarkup(createElement(PlainEmailBody,{body}));
+  assert.doesNotMatch(markup.replace(/<[^>]*>/g,''),new RegExp('x{80}'),
+    'the tracking query is not printed as visible message copy');
+  assert.match(markup,/Open link to u42153126\.ct\.sendgrid\.net/);
+  assert.match(markup,/target="_blank"/);
+  assert.match(markup,/rel="noreferrer"/);
 });
 
 void test('Connect Gmail uses a top-level OAuth navigation and resumes after platform sign-in', () => {
@@ -495,4 +515,11 @@ void test('links in a formatted email are followable, and unsafe schemes are not
     assert.ok(document.includes(label), `${label} is still shown as text`);
   // Links still open away from the application rather than inside the reading panel.
   assert.match(document, /<base href="about:blank" target="_blank">/);
+});
+
+void test('formatted email strips inline handlers and SVG link surfaces',()=>{
+  const document=buildEmailDocument('<p onclick="top.location=\'https://bad.example\'">Hello</p><img src="data:image/png;base64,x" onerror=alert(1)><svg><a xlink:href="javascript:alert(1)">bad</a></svg>');
+  assert.doesNotMatch(document,/\son[a-z][\w:-]*\s*=/i);
+  assert.doesNotMatch(document,/<\/?svg\b|xlink:href/i);
+  assert.match(document,/>Hello<\/p>/,'ordinary email content remains');
 });

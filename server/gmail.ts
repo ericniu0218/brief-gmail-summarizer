@@ -54,7 +54,13 @@ export async function accessToken(user:string,accountId:string,e=runtime()) {
 }
 export async function gmail<T>(path:string, token:string, init:RequestInit={}) {
   const result=await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${path}`,{...init,headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},signal:AbortSignal.timeout(20000)});
-  if(!result.ok) throw new HttpError(result.status===400?400:result.status===429?429:502,result.status===429?'Gmail is busy. Please try again in a minute.':'Gmail could not complete that request. Please try again.');
+  if(!result.ok){
+    const status=[400,401,403,429].includes(result.status)?result.status:502;
+    const message=result.status===429?'Gmail is busy. Please try again in a minute.'
+      :result.status===401||result.status===403?'Your Gmail connection needs to be renewed. Reconnect in settings.'
+      :'Gmail could not complete that request. Please try again.';
+    throw new HttpError(status,message);
+  }
   return await result.json() as T;
 }
 export type { GmailMessage } from './message';

@@ -1,5 +1,6 @@
 import { failure, HttpError, json, mutation, runtime, userId } from '@/server/runtime';
 import {
+  activeJunkPreference,
   applyCorrection,
   automaticBaseline,
   composeClassification,
@@ -8,9 +9,12 @@ import {
   loadOverride,
   loadSenderRules,
   manualCorrectionView,
+  normalizeSenderAddress,
   saveSenderRule,
+  senderRuleFor,
   withSenderRule,
   type CorrectionAction,
+  type JunkPreference,
 } from '@/server/overrides';
 import { getOwnedConnection } from '@/server/gmail';
 import { obligationCorrectionKey } from '@/lib/classification';
@@ -110,15 +114,22 @@ export async function POST(request:Request){
     }
 
     let manual=await loadOverride(user,owned.id,messageId,e);
-    let senderRule=(await loadSenderRules(user,owned.id,e)).get(source.address);
+    const senderAddress=normalizeSenderAddress(source.address);
+    let senderRule=senderAddress?senderRuleFor(await loadSenderRules(user,owned.id,e),senderAddress):undefined;
     if(senderAction){
       const sender=rawAction as Record<string,unknown>;
-      if(Object.keys(sender).some(key=>!['type','value'].includes(key)))throw new HttpError(400,'A sender preference contains unsupported fields.');
+      const setting=sender.type==='set-sender-junk-preference';
+      const allowed=setting?['type','value']:['type'];
+      if(Object.keys(sender).some(key=>!allowed.includes(key)))throw new HttpError(400,'A sender preference contains unsupported fields.');
+      if(!senderAddress)throw new HttpError(409,'This message does not have a usable sender address.');
       const expectedSenderRevision=body.expectedSenderRevision;
       if(!Number.isSafeInteger(expectedSenderRevision)||Number(expectedSenderRevision)<0)throw new HttpError(400,'Reload this message before saving a sender preference.');
-      const value=sender.type==='clear-sender-junk-preference'?undefined:sender.value;
-      if(value!==undefined&&value!=='junk'&&value!=='not-junk')throw new HttpError(400,'Choose whether to keep this sender or move it to Junk.');
-      senderRule=await saveSenderRule(user,owned.id,source.address,Number(expectedSenderRevision),value,e);
+      let value:JunkPreference|undefined;
+      if(setting){
+        if(sender.value!=='junk'&&sender.value!=='not-junk')throw new HttpError(400,'Choose whether to keep this sender or move it to Junk.');
+        value=sender.value;
+      }
+      senderRule=await saveSenderRule(user,owned.id,senderAddress,Number(expectedSenderRevision),value,e);
     }else manual=await applyCorrection(user,owned.id,messageId,Number(expectedRevision),action!,e);
     // A sync may have published newer source content while the correction was being
     // saved. Re-read the snapshot and compose against its automatic baseline so the
@@ -136,10 +147,11 @@ export async function POST(request:Request){
       automaticClassification:latestAutomatic,classification,category,tags,priority,label,
       correctionRevision:manual?.revision??0,manuallyCorrected:manual?.active!==false&&!!manual,
       manualCorrection:manualCorrectionView(manual),
-      senderJunkPreference:senderRule?.junkPreference,senderRuleRevision:senderRule?.revision??0,
+      senderJunkPreference:activeJunkPreference(senderRule),senderRuleRevision:senderRule?.revision??0,
       automaticClassificationAvailable:true};
     // Return only the affected record. Replacing a whole inbox from this response could
     // overwrite a newer background refresh or the mailbox currently visible in the UI.
-    return json({updated:true,email,revision:manual?.revision??0,senderRuleRevision:senderRule?.revision??0});
+    return json({updated:true,email,revision:manual?.revision??0,senderRuleRevision:senderRule?.revision??0,
+      senderJunkPreference:activeJunkPreference(senderRule)??null});
   }catch(error){return failure(error);}
 }

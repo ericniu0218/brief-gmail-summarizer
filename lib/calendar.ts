@@ -1,5 +1,5 @@
 import { emailKey, type Email } from './mail';
-import { evaluateImportance, obligationDueAt, receivedAtOf } from './importance';
+import { evaluateImportance, IMPORTANCE, obligationDueAt, receivedAtOf } from './importance';
 import { isResolved, type Obligation } from './classification';
 
 /**
@@ -77,7 +77,7 @@ export function eventMinutes(email: Email, key: string): number | undefined {
  * rest by when they arrived. Dates found in text have no time, so arrival order is the
  * closest to chronological the available data supports, and it keeps the list stable.
  */
-export function byEventTime(key: string) {
+export function byEventTime(key: string,now:number) {
   return (a: Email, b: Email) => {
     const first = eventMinutes(a, key);
     const second = eventMinutes(b, key);
@@ -86,7 +86,7 @@ export function byEventTime(key: string) {
       if (second === undefined) return -1;
       return first - second;
     }
-    const aReceived=receivedAtOf(a),bReceived=receivedAtOf(b);
+    const aReceived=receivedAtOf(a,now),bReceived=receivedAtOf(b,now);
     if(aReceived!==bReceived){
       if(aReceived===undefined)return 1;
       if(bReceived===undefined)return -1;
@@ -97,11 +97,16 @@ export function byEventTime(key: string) {
 }
 
 // Resolve relative dates against the message's date, never the refresh date.
-export function emailDates(email: Email, demoDate?: Date): string[] {
+export function emailDates(email: Email, demoDate?: Date, now?: number): string[] {
   let text = `${email.subject}\n${email.body}`;
   const dates = new Set<string>();
   const anchor = email.receivedAt !== undefined ? new Date(email.receivedAt) : demoDate;
-  const validAnchor = anchor && !Number.isNaN(anchor.getTime()) ? anchor : undefined;
+  // "Tomorrow" means nothing without a trustworthy arrival date. An implausibly future
+  // timestamp would otherwise invent an event a year out, so relative phrases are refused
+  // rather than anchored to it. Dates the message states outright are unaffected.
+  const plausible = !!anchor && !Number.isNaN(anchor.getTime())
+    && (now === undefined || anchor.getTime() <= now + IMPORTANCE.futureSkew);
+  const validAnchor = plausible ? anchor : undefined;
   const add = (year: number, month: number, day: number) => {
     // Dates can silently roll into another month, so compare the parts to reject inputs
     // such as February 31.
@@ -149,13 +154,18 @@ export function emailDates(email: Email, demoDate?: Date): string[] {
 export function nextEmailEvent(emails: Email[], today: Date, demo = false): { email: Email; date: string } | undefined {
   // Ignore Noise, keep today or later, then use the same live importance policy as Inbox.
   const current = dateKey(today);
+  const horizonDate=new Date(today);
+  // Long-range academic and renewal notices can legitimately arrive more than a year
+  // early. Five years preserves those while still excluding absurd sentinel dates.
+  horizonDate.setFullYear(horizonDate.getFullYear()+5);
+  const horizon=dateKey(horizonDate);
   const now=today.getTime();
   const event=emails.filter(email => email.category !== 'noise')
     // Score once per email before expanding its dates; the comparator can run O(n log n)
     // times and must remain a cheap comparison of values already derived.
     .map(email=>({email,rank:evaluateImportance(email,now).rank,
-      dates:emailDates(email,demo?today:undefined)}))
-    .flatMap(item => item.dates.filter(date => date >= current).map(date => ({ email:item.email, date, rank:item.rank })))
+      dates:emailDates(email,demo?today:undefined,now)}))
+    .flatMap(item => item.dates.filter(date => date >= current&&date<=horizon).map(date => ({ email:item.email, date, rank:item.rank })))
     .sort((a, b) => a.date.localeCompare(b.date)
       ||a.rank-b.rank
       ||emailKey(a.email).localeCompare(emailKey(b.email)))[0];

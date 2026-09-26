@@ -27,11 +27,51 @@ export function mutation(request: Request) {
   const expected = appUrl() || new URL(request.url).origin;
   if (!origin || origin !== expected) throw new HttpError(403, 'Please use this action from your dashboard.');
 }
-export async function inputObject(request:Request):Promise<Record<string,unknown>> {
+/** Default ceiling for a request body. Reply text needs more and asks for it explicitly. */
+export const MAX_REQUEST_BYTES=16384;
+
+/**
+ * Read one JSON object, refusing an oversized body before it is parsed.
+ *
+ * A declared Content-Length is checked first so an obvious flood costs nothing, and the
+ * decoded text is measured again because that header is not trustworthy on its own.
+ */
+export async function inputObject(request:Request,limit=MAX_REQUEST_BYTES):Promise<Record<string,unknown>> {
+  const declared=Number(request.headers.get('content-length'));
+  if(Number.isFinite(declared)&&declared>limit)throw new HttpError(413,'That request is too large.');
+  // Read the stream in bounded chunks. Checking only after `request.text()` would still
+  // let an undeclared oversized body consume memory before it was rejected.
+  const chunks:Uint8Array[]=[];
+  let length=0;
+  try{
+    const reader=request.body?.getReader();
+    if(reader){
+      while(true){
+        const {done,value}=await reader.read();
+        if(done)break;
+        length+=value.byteLength;
+        if(length>limit){try{await reader.cancel();}catch{/* rejection still wins */}throw new HttpError(413,'That request is too large.');}
+        chunks.push(value);
+      }
+    }
+  }catch(error){if(error instanceof HttpError)throw error;throw new HttpError(400,'Provide a valid JSON request.');}
+  const bytes=new Uint8Array(length);
+  let offset=0;
+  for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.byteLength;}
+  const text=new TextDecoder().decode(bytes);
   let value:unknown;
-  try{value=await request.json();}catch{throw new HttpError(400,'Provide a valid JSON request.');}
+  try{value=JSON.parse(text);}catch{throw new HttpError(400,'Provide a valid JSON request.');}
   if(!value||typeof value!=='object'||Array.isArray(value))throw new HttpError(400,'Provide a valid JSON object.');
   return value as Record<string,unknown>;
+}
+
+/** Persisted JSON is a trust boundary: a damaged row must not become a generic 500. */
+export function parseStoredJson<T>(value:string|null|undefined,what:string,valid:(value:unknown)=>value is T):T{
+  try{
+    const parsed:unknown=JSON.parse(value??'');
+    if(!valid(parsed))throw new Error('invalid shape');
+    return parsed;
+  }catch{throw new HttpError(409,`That ${what} could not be read. Refresh and try again.`);}
 }
 export function json(data: unknown, status=200) {
   // Mailbox and workspace data must not be cached by shared browsers or proxies.

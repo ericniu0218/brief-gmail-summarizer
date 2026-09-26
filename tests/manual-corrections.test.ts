@@ -8,6 +8,9 @@ import {
   composeClassification,
   loadOverride,
   loadSenderRules,
+  saveSenderRule,
+  withSenderRule,
+  type SenderRule,
   reduceOverride,
   type Override,
 } from '../server/overrides';
@@ -19,6 +22,7 @@ import {
 import type { Runtime } from '../server/runtime';
 import type { Email } from '../lib/mail';
 import { mutateSnapshot, parseSnapshot } from '../server/snapshots';
+import { readMailbox } from '../server/mailbox';
 
 declare global { var __briefTestEnv:Runtime; var __briefTestHeaders:Headers; }
 
@@ -207,8 +211,53 @@ void test('sender Junk preferences persist and can be cleared without changing m
   assert.equal((await loadSenderRules('user-a','acct-1',env)).get('sender@example.com')?.junkPreference,'not-junk');
   const cleared=await correctMessage(request({accountId:'acct-1',messageId:'m1',expectedRevision:0,expectedSenderRevision:1,action:{type:'clear-sender-junk-preference'}}));
   assert.equal(cleared.status,200);
-  assert.equal((await loadSenderRules('user-a','acct-1',env)).size,0);
+  // Clearing leaves an inactive tombstone rather than deleting the row. It carries no
+  // preference, so classification is unaffected, but its revision keeps counting up.
+  const tombstone=(await loadSenderRules('user-a','acct-1',env)).get('sender@example.com');
+  assert.equal(tombstone?.active,false,'the rule no longer applies');
+  assert.equal(tombstone?.junkPreference,undefined,'and carries no preference');
+  assert.equal(tombstone?.revision,2,'while its revision advanced past the cleared one');
+  // The cleared revision reaches the browser, so the next write is not sent against zero.
+  const body=await cleared.json() as {senderRuleRevision:number;senderJunkPreference:string|null};
+  assert.equal(body.senderRuleRevision,2);
+  assert.equal(body.senderJunkPreference,null);
+  // A request written before the clear cannot recreate the rule it was meant to remove.
+  const stale=await correctMessage(request({accountId:'acct-1',messageId:'m1',expectedRevision:0,expectedSenderRevision:1,action:{type:'set-sender-junk-preference',value:'junk'}}));
+  assert.equal(stale.status,409,'a stale write is refused rather than resurrecting the rule');
+  assert.equal((await loadSenderRules('user-a','acct-1',env)).get('sender@example.com')?.active,false);
   assert.equal(await loadOverride('user-a','acct-1','m1',env),undefined);
+});
+
+void test('sender actions require exact fields and never clear by omission',async()=>{
+  seedAccount('acct-1');
+  seedMessage('acct-1','m1','sender@example.com');
+  const initial=await correctMessage(request({accountId:'acct-1',messageId:'m1',expectedRevision:0,
+    expectedSenderRevision:0,action:{type:'set-sender-junk-preference',value:'junk'}}));
+  assert.equal(initial.status,200);
+
+  const missing=await correctMessage(request({accountId:'acct-1',messageId:'m1',expectedRevision:0,
+    expectedSenderRevision:1,action:{type:'set-sender-junk-preference'}}));
+  assert.equal(missing.status,400,'set must name the intended value');
+  const extra=await correctMessage(request({accountId:'acct-1',messageId:'m1',expectedRevision:0,
+    expectedSenderRevision:1,action:{type:'clear-sender-junk-preference',value:'junk'}}));
+  assert.equal(extra.status,400,'clear accepts no hidden value');
+  const unchanged=(await loadSenderRules('user-a','acct-1',env)).get('sender@example.com');
+  assert.equal(unchanged?.junkPreference,'junk');
+  assert.equal(unchanged?.revision,1,'rejected actions do not advance or clear the rule');
+});
+
+void test('sender rules reject unusable and oversized stored addresses',async()=>{
+  seedAccount('acct-1');
+  for(const [index,address] of ['', '   ', 'missing-at.example', 'sender\u0000@example.com', `${'a'.repeat(321)}@example.com`].entries()){
+    const id=`bad-${index}`;
+    seedMessage('acct-1',id,address);
+    const response=await correctMessage(request({accountId:'acct-1',messageId:id,expectedRevision:0,
+      expectedSenderRevision:0,action:{type:'set-sender-junk-preference',value:'junk'}}));
+    assert.equal(response.status,409,`stored address ${JSON.stringify(address)} is refused`);
+  }
+  assert.equal((await loadSenderRules('user-a','acct-1',env)).size,0,'invalid identities create no rules');
+  await assert.rejects(saveSenderRule('user-a','acct-1','not-an-address',0,'junk',env),
+    /usable sender address/,'the persistence boundary validates callers too');
 });
 
 void test('correction body limit is enforced without trusting Content-Length',async()=>{
@@ -229,4 +278,180 @@ void test('concurrent snapshot mutations preserve both successful actions',async
   const parsed=JSON.parse(saved.data) as {emails:Email[]};
   assert.deepEqual(parsed.emails.map(email=>email.id),['a']);
   assert.equal(saved.revision,2);
+});
+
+void test('mailbox output puts an invalid future arrival after real mail',async()=>{
+  seedAccount('acct-1');
+  seedMessage('acct-1','recent','recent@example.com');
+  seedMessage('acct-1','future','future@example.com');
+  const row=storage.sql.prepare('SELECT data FROM snapshots WHERE account_id=?').get('acct-1') as {data:string};
+  const snapshot=JSON.parse(row.data) as {emails:Email[];updated:number};
+  snapshot.emails=snapshot.emails.map(email=>({...email,
+    receivedAt:email.id==='future'?Date.now()+400*86400000:Date.now()-3600000}));
+  storage.sql.prepare('UPDATE snapshots SET data=? WHERE account_id=?').run(JSON.stringify(snapshot),'acct-1');
+  const mailbox=await readMailbox('user-a','acct-1',env);
+  assert.deepEqual(mailbox.emails.map(email=>email.id),['recent','future'],
+    'the server order used by the first paint has already rejected the future timestamp');
+});
+
+// ── Sender rules: precedence against the automatic junk safeguard ───────────
+
+const withObligation=()=>automatic({obligations:[obligation()]});
+const senderRule=(junkPreference:'junk'|'not-junk'):SenderRule=>
+  ({address:'sender@example.com',junkPreference,revision:1,active:true});
+const compose=(manual:Override|undefined,rule?:SenderRule)=>
+  composeClassification(withObligation(),withSenderRule(manual,rule,'m1'),NOW);
+
+void test('a confirmed sender junk rule is intent, and an automatic guess is not',()=>{
+  // The safeguard exists so an automatic Junk prediction cannot bury a real request.
+  const predicted={...withObligation(),disposition:'junk' as const};
+  const automaticGuess=composeClassification(predicted,undefined,NOW);
+  assert.notEqual(automaticGuess.category,'noise','an automatic prediction is still held for review');
+  assert.equal(automaticGuess.classification.reviewReason,'junk-with-open-obligation');
+
+  // A rule the user was asked about and confirmed is a decision, not a guess.
+  const confirmed=compose(undefined,senderRule('junk'));
+  assert.equal(confirmed.category,'noise','a confirmed sender rule moves the message to Noise');
+  assert.equal(confirmed.classification.reviewReason,undefined,'and leaves no stale review note');
+  assert.equal(confirmed.classification.override?.junkPreference,'junk','the intent is recorded, not invented');
+});
+
+void test('message intent outranks a sender rule, and unrelated corrections do not',()=>{
+  // Explicitly keeping one message is an exception to its sender's rule.
+  const kept=reduceOverride(blank(),'m1',{type:'set-junk-preference',value:'not-junk'},NOW);
+  assert.notEqual(compose(kept,senderRule('junk')).category,'noise','a kept message stays out of Noise');
+
+  // A tag correction says nothing about Junk, so the sender rule still applies.
+  const tagged=reduceOverride(blank(),'m1',{type:'add-tag',tag:'research'},NOW);
+  assert.equal(compose(tagged,senderRule('junk')).category,'noise','an unrelated tag does not suppress the rule');
+
+  // Routing a message to Work is an explicit exception and is preserved.
+  const routed=reduceOverride(blank(),'m1',{type:'set-section',section:'work'},NOW);
+  assert.notEqual(compose(routed,senderRule('junk')).category,'noise','explicit routing keeps it out of Noise');
+});
+
+void test('clearing a sender rule restores automatic behaviour and its protection',()=>{
+  const cleared=senderRule('junk');
+  // An inactive tombstone carries no preference, so composition runs as if it never existed.
+  const undone=compose(undefined,{...cleared,active:false,junkPreference:undefined});
+  assert.notEqual(undone.category,'noise','the message returns to automatic sorting');
+  assert.equal(undone.classification.override?.junkPreference,undefined,'no stale intent is left behind');
+
+  // A message the user separately marked Junk stays in Noise after the sender rule goes.
+  const markedJunk=reduceOverride(blank(),'m1',{type:'set-junk-preference',value:'junk'},NOW);
+  assert.equal(compose(markedJunk,{...cleared,active:false,junkPreference:undefined}).category,'noise',
+    'a message-specific Junk correction survives removing the sender rule');
+
+  // Composing the same inputs again gives the same answer, so a second render or a repeated
+  // save cannot drift the result.
+  const once=compose(undefined,senderRule('junk'));
+  const again=compose(undefined,senderRule('junk'));
+  assert.equal(again.category,once.category,'repeated composition is stable');
+  assert.deepEqual(again.tags,once.tags);
+  assert.equal(again.classification.reviewReason,once.classification.reviewReason);
+});
+
+// ── Sender rules: scope, concurrency and cleanup ───────────────────────────
+
+/** Seeds one stored message so the route can read its sender from the server's own copy. */
+function seedMessage(accountId:string,messageId:string,address:string){
+  const baseline=automatic({obligations:[]});
+  const email={id:messageId,address,subject:'Subject',classification:baseline,automaticClassification:baseline};
+  const existing=storage.sql.prepare('SELECT data FROM snapshots WHERE account_id=?').get(accountId) as {data:string}|undefined;
+  const emails=existing?[...JSON.parse(existing.data).emails,email]:[email];
+  if(existing)storage.sql.prepare('UPDATE snapshots SET data=? WHERE account_id=?').run(JSON.stringify({emails,updated:NOW}),accountId);
+  else storage.sql.prepare('INSERT INTO snapshots (account_id,user_id,data,updated) VALUES (?,?,?,?)')
+    .run(accountId,'user-a',JSON.stringify({emails,updated:NOW}),NOW);
+}
+
+void test('a sender rule covers one exact address in one account and nothing else',async()=>{
+  seedAccount('acct-1');seedAccount('acct-2');
+  seedMessage('acct-1','m1','News@Berkeley.EDU');
+  seedMessage('acct-1','m2','other@berkeley.edu');
+  seedMessage('acct-2','m3','news@berkeley.edu');
+  const saved=await correctMessage(request({accountId:'acct-1',messageId:'m1',expectedRevision:0,
+    expectedSenderRevision:0,action:{type:'set-sender-junk-preference',value:'junk'}}));
+  assert.equal(saved.status,200);
+
+  const first=await loadSenderRules('user-a','acct-1',env);
+  assert.equal(first.get('news@berkeley.edu')?.junkPreference,'junk','the exact canonical address is covered');
+  const mailbox=await readMailbox('user-a','acct-1',env);
+  const mixed=mailbox.emails.find(email=>email.id==='m1');
+  assert.equal(mixed?.category,'noise','the mixed-case stored address finds the canonical rule');
+  assert.equal(mixed?.senderRuleRevision,1,'the mailbox reports the database revision for Undo');
+  // Another sender at the same domain is untouched: domains are never matched.
+  assert.equal(first.get('other@berkeley.edu'),undefined,'a sibling address at the same domain is not');
+  // The same address in another connected mailbox is a separate rule that was never made.
+  assert.equal((await loadSenderRules('user-a','acct-2',env)).size,0,'and the other account is unaffected');
+});
+
+void test('two writes against one revision produce exactly one winner',async()=>{
+  seedAccount('acct-1');
+  const results=await Promise.allSettled([
+    saveSenderRule('user-a','acct-1','news@berkeley.edu',0,'junk',env),
+    saveSenderRule('user-a','acct-1','news@berkeley.edu',0,'not-junk',env),
+  ]);
+  assert.equal(results.filter(r=>r.status==='fulfilled').length,1,'one write succeeds');
+  assert.equal(results.filter(r=>r.status==='rejected').length,1,'and one is refused as a conflict');
+  const rule=(await loadSenderRules('user-a','acct-1',env)).get('news@berkeley.edu');
+  assert.equal(rule?.revision,1,'the revision advanced exactly once');
+  assert.ok(rule?.active);
+});
+
+void test('marking and clearing a sender never rewrites the automatic baseline',async()=>{
+  seedAccount('acct-1');
+  seedMessage('acct-1','m1','news@berkeley.edu');
+  const baselineBefore=JSON.parse((storage.sql.prepare('SELECT data FROM snapshots WHERE account_id=?')
+    .get('acct-1') as {data:string}).data).emails[0].automaticClassification;
+  for(const action of [{type:'set-sender-junk-preference',value:'junk'},{type:'clear-sender-junk-preference'}] as const){
+    const revision=(await loadSenderRules('user-a','acct-1',env)).get('news@berkeley.edu')?.revision??0;
+    const response=await correctMessage(request({accountId:'acct-1',messageId:'m1',expectedRevision:0,
+      expectedSenderRevision:revision,action}));
+    assert.equal(response.status,200);
+  }
+  const baselineAfter=JSON.parse((storage.sql.prepare('SELECT data FROM snapshots WHERE account_id=?')
+    .get('acct-1') as {data:string}).data).emails[0].automaticClassification;
+  // A sender rule is composed on top of the classifier's record; it never edits it, which
+  // is what makes removing the rule a complete restoration rather than a guess.
+  assert.deepEqual(baselineAfter,baselineBefore,'the classifier record is untouched');
+});
+
+void test('disconnecting an account removes its sender rules and tombstones only',async()=>{
+  seedAccount('acct-1');seedAccount('acct-2');
+  await saveSenderRule('user-a','acct-1','news@berkeley.edu',0,'junk',env);
+  await saveSenderRule('user-a','acct-1','cleared@berkeley.edu',0,'junk',env);
+  await saveSenderRule('user-a','acct-1','cleared@berkeley.edu',1,undefined,env); // leaves a tombstone
+  await saveSenderRule('user-a','acct-2','news@berkeley.edu',0,'junk',env);
+  assert.equal((await loadSenderRules('user-a','acct-1',env)).size,2,'one active rule and one tombstone');
+
+  storage.sql.prepare('DELETE FROM sender_rules WHERE account_id=? AND user_id=?').run('acct-1','user-a');
+  assert.equal((await loadSenderRules('user-a','acct-1',env)).size,0,'both are removed with the account');
+  assert.equal((await loadSenderRules('user-a','acct-2',env)).get('news@berkeley.edu')?.junkPreference,'junk',
+    'while the other account keeps its own rule');
+});
+
+void test('a rule applies to every stored message from that sender, and stops when cleared',async()=>{
+  seedAccount('acct-1');
+  seedMessage('acct-1','m1','News@Berkeley.EDU');
+  seedMessage('acct-1','m2','news@berkeley.edu');
+  seedMessage('acct-1','m3','someone@berkeley.edu');
+  await saveSenderRule('user-a','acct-1','news@berkeley.edu',0,'junk',env);
+
+  const marked=await readMailbox('user-a','acct-1',env);
+  const category=(id:string)=>marked.emails.find(email=>email.id===id)?.category;
+  assert.equal(category('m1'),'noise','a mixed-case form of the sender moves');
+  assert.equal(category('m2'),'noise','every existing message, not just the one acted on');
+  assert.notEqual(category('m3'),'noise','and nobody else moves');
+  // The saved preference and its revision reach the browser on an ordinary mailbox read,
+  // which is what makes the Undo control available on a later visit.
+  const first=marked.emails.find(email=>email.id==='m1');
+  assert.equal(first?.senderJunkPreference,'junk');
+  assert.equal(first?.senderRuleRevision,1,'the stored revision is visible through the canonical lookup');
+
+  await saveSenderRule('user-a','acct-1','news@berkeley.edu',1,undefined,env);
+  const cleared=await readMailbox('user-a','acct-1',env);
+  const after=cleared.emails.find(email=>email.id==='m1');
+  assert.notEqual(after?.category,'noise','clearing returns them to automatic sorting');
+  assert.equal(after?.senderJunkPreference,undefined,'with no preference left');
+  assert.equal(after?.senderRuleRevision,2,'but the cleared revision still reported');
 });

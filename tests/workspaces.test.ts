@@ -63,6 +63,13 @@ void test('two users share the same immutable corpus and fold across independent
   assert.equal(await hash(canonical(teammate.content)), teammate.checksum);
 });
 
+void test('damaged stored artifact JSON is rejected at the database boundary',async()=>{
+  const {owner,ws,sql}=await setup();
+  const item=(await owner.publish(ws.id,corpus(),'damaged')).artifact;
+  sql.prepare('UPDATE workspace_artifacts SET parent_ids = ? WHERE id = ?').run(JSON.stringify({not:'an array'}),item.id);
+  await assert.rejects(owner.getArtifact(ws.id,item.id),denied(409));
+});
+
 void test('membership, role checks, and parent links prevent cross-workspace access', async () => {
   const { owner, editor, viewer, ws, outsider } = await setup();
   const item = (await owner.publish(ws.id, corpus(), 'one')).artifact;

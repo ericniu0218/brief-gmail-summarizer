@@ -55,11 +55,13 @@ const identityOf=(email:Email)=>`${email.accountId||''}:${email.id}`;
  * otherwise re-derive every classification on each of O(n log n) comparisons.
  */
 export function sortInboxEmails(emails:Email[],now:number|null,mode:SortMode='importance') {
-  // With no clock there is no time-based policy to apply, so arrival order is the only
-  // honest ordering — and it makes the server render and the first client paint identical.
-  const ordering=now===null?'newest':mode;
+  // With no clock, even arrival order cannot be validated: a forged future timestamp
+  // would jump to the top for the first paint. Preserve the server's validated order until
+  // the browser clock arrives, which also keeps hydration deterministic.
+  if(now===null)return [...emails];
+  const ordering=mode;
   const scored=emails.map((email,index)=>({
-    email,index,received:receivedAtOf(email),
+    email,index,received:receivedAtOf(email,now),
     importance:now===null?undefined:evaluateImportance(email,now),
   }));
   scored.sort((a,b)=>{

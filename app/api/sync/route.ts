@@ -10,18 +10,30 @@ import { readMailbox } from '@/server/mailbox';
 export async function POST(request:Request){
   try{
     mutation(request);const user=await userId();const e=runtime();
-    const body=await inputObject(request).catch(()=>({} as Record<string,unknown>));
+    const body=await inputObject(request);
     const requested=typeof body.accountId==='string'?body.accountId:ALL_INBOXES;
+    const explicit=body.explicit===true;
+    // The combined refresh visits the mailbox that waited longest first. A fixed order
+    // would always spend the request's time on the same accounts, leaving the last one
+    // permanently stale once there are more mailboxes than one request can refresh.
     const targets=requested===ALL_INBOXES
-      ? (await ownedConnections(user,e)).map(c=>c.id)
-      : [(await getOwnedConnection(user,requested,e)).id];
+      ? (await ownedConnections(user,e)).sort((a,b)=>(a.last_sync||0)-(b.last_sync||0))
+      : [await getOwnedConnection(user,requested,e)];
     const accounts:Record<string,{ok:boolean;error?:string}>={};
-    for(const accountId of targets){
+    // How much Gmail work one request will start. Each account's own refresh is a single
+    // bounded page under its own lease, so this only decides how many of them are begun:
+    // the rest keep their cursor and continue on the next refresh.
+    const deadline=Date.now()+20000;
+    for(const target of targets){
+      const accountId=target.id;
+      if(targets.length>1&&Date.now()>deadline){accounts[accountId]={ok:false,error:'Not refreshed yet — this refresh ran out of time. Refresh again to continue.'};continue;}
       try{
         // A very recent snapshot absorbs double-clicks without repeating Gmail work.
         const existing=await e.DB.prepare('SELECT snapshots.updated, connections.sync_page_token FROM connections LEFT JOIN snapshots ON snapshots.account_id=connections.id AND snapshots.user_id=connections.user_id WHERE connections.id=? AND connections.user_id=?')
           .bind(accountId,user).first<{updated:number|null;sync_page_token:string|null}>();
-        if(existing?.updated&&!existing.sync_page_token&&Date.now()-existing.updated<60000){accounts[accountId]={ok:true};continue;}
+        // A very recent snapshot absorbs double-clicks from automatic refreshes. A person
+        // pressing Refresh is asking for new mail, so their request is never suppressed.
+        if(!explicit&&existing?.updated&&!existing.sync_page_token&&Date.now()-existing.updated<60000){accounts[accountId]={ok:true};continue;}
         // One bounded page keeps a browser request within provider and worker limits.
         // The saved cursor lets scheduled and later explicit refreshes continue safely.
         await syncInbox(user,accountId,e);
@@ -33,6 +45,7 @@ export async function POST(request:Request){
     // why a partial refresh still returns everything that did load.
     const view=await readMailbox(user,requested,e);
     const values=Object.values(accounts);
-    return json({...view,refreshed:values.filter(r=>r.ok).length,failed:values.filter(r=>!r.ok).length});
+    const failures=targets.flatMap(target=>accounts[target.id]?.ok?[]:[{accountId:target.id,email:target.email,error:accounts[target.id]?.error||'Refresh failed.'}]);
+    return json({...view,refreshed:values.filter(r=>r.ok).length,failed:failures.length,failures});
   }catch(error){return failure(error);}
 }

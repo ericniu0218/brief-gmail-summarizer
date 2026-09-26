@@ -1,6 +1,7 @@
 import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
+import { readFileSync } from 'node:fs';
 import { allByText, byLabel, byText, click, render, screen, setupDom, settle, teardownDom, unmountTree } from './dom';
 import Dashboard from '../app/page';
 import { ReplyComposer } from '../components/reply-composer';
@@ -8,9 +9,12 @@ import { ClassificationDetail } from '../components/classification-detail';
 import { NoiseList } from '../components/noise-list';
 import { PriorityEmailList } from '../components/priority-email-list';
 import { WeekCalendar } from '../components/week-calendar';
+import { SenderJunkButton } from '../components/sender-junk-button';
+import { useSenderRule } from '../hooks/use-sender-rule';
+import { EmailBody } from '../components/email-body';
 import { demoEmails, type Email } from '../lib/mail';
 import type { Classification } from '../lib/classification';
-import type { ConnectionStatus } from '../hooks/use-inbox';
+import { useInbox, type ConnectionStatus } from '../hooks/use-inbox';
 import type { InboxSnapshot } from '../lib/inbox-client';
 
 /**
@@ -85,6 +89,18 @@ function defaultHandler(url:string,body:Record<string,unknown>|undefined){
   // The refresh names its account in the request body rather than the query string.
   if(url.startsWith('/api/sync'))return mailFor(typeof body?.accountId==='string'?body.accountId:null);
   if(url.startsWith('/api/reply'))return {id:'sent-1',status:'sent'};
+  if(url.startsWith('/api/classification')){
+    // Mirrors the real route: the saved preference and the advanced revision come back so
+    // the browser can keep writing in order.
+    const action=body?.action as {type?:string;value?:string}|undefined;
+    const junk=action?.type==='set-sender-junk-preference'?action.value as 'junk'|'not-junk':undefined;
+    const revision=(Number(body?.expectedSenderRevision)||0)+1;
+    return {updated:true,revision:Number(body?.expectedRevision)||0,senderRuleRevision:revision,
+      senderJunkPreference:junk??null,
+      email:mail({id:typeof body?.messageId==='string'?body.messageId:'s1',
+        accountId:typeof body?.accountId==='string'?body.accountId:'acct-1',
+        senderJunkPreference:junk,senderRuleRevision:revision})};
+  }
   return undefined;
 }
 
@@ -100,6 +116,108 @@ async function openDashboard(options:{viewport?:'desktop'|'mobile';handler?:Hand
   return seen;
 }
 
+function InboxLifecycleProbe(){
+  const inbox=useInbox();
+  return createElement('div',{},
+    createElement('span',{'data-testid':'busy'},inbox.busy?'busy':'idle'),
+    createElement('button',{type:'button',onClick:()=>void inbox.refresh()},'Probe refresh'),
+    createElement('button',{type:'button',onClick:()=>void inbox.reloadCached()},'Probe cached reload'),
+    createElement('button',{type:'button',onClick:()=>inbox.setActiveAccountId('acct-2')},'Probe switch account'),
+    createElement('button',{type:'button',onClick:inbox.resetToDemo},'Probe reset demo'));
+}
+
+void test('a cached reload supersedes sync output without starting a second sync',async()=>{
+  setupDom();
+  let syncCount=0;
+  let release!:()=>void;
+  const held=new Promise<void>(resolve=>{release=resolve;});
+  stubFetch(async(url,body)=>{
+    if(url.startsWith('/api/sync')){
+      syncCount++;
+      if(syncCount===2)await held;
+      return mailFor(typeof body?.accountId==='string'?body.accountId:null);
+    }
+    return defaultHandler(url,body);
+  });
+  await render(createElement(InboxLifecycleProbe));
+  await settle();
+  assert.equal(syncCount,1,'boot completed its initial sync');
+
+  await click(byText('button','Probe refresh'));
+  assert.equal(screen().querySelector('[data-testid="busy"]')?.textContent,'busy');
+  await click(byText('button','Probe cached reload'));
+  assert.equal(screen().querySelector('[data-testid="busy"]')?.textContent,'busy',
+    'the physical sync keeps its mutex until it settles');
+  await click(byText('button','Probe refresh'));
+  assert.equal(syncCount,2,'another refresh cannot overlap the superseded sync');
+  release();
+  await settle();
+  assert.equal(screen().querySelector('[data-testid="busy"]')?.textContent,'idle');
+  await click(byText('button','Probe refresh'));
+  assert.equal(syncCount,3,'a later refresh can start normally');
+});
+
+void test('switching accounts during refresh never starts an overlapping sync',async()=>{
+  setupDom();
+  let syncCount=0;
+  const synced:(string|null)[]=[];
+  let release!:()=>void;
+  const held=new Promise<void>(resolve=>{release=resolve;});
+  stubFetch(async(url,body)=>{
+    if(url.startsWith('/api/sync')){
+      syncCount++;
+      const accountId=typeof body?.accountId==='string'?body.accountId:null;
+      synced.push(accountId);
+      if(syncCount===2)await held;
+      return mailFor(accountId);
+    }
+    return defaultHandler(url,body);
+  });
+  await render(createElement(InboxLifecycleProbe));
+  await settle();
+  await click(byText('button','Probe refresh'));
+  await click(byText('button','Probe switch account'));
+  assert.equal(syncCount,2,'switching reads the target cache while Gmail is busy');
+  assert.equal(screen().querySelector('[data-testid="busy"]')?.textContent,'busy');
+  await click(byText('button','Probe refresh'));
+  assert.equal(syncCount,2,'Refresh remains locked until the original request settles');
+  release();
+  await settle();
+  // The mailbox chosen mid-sync was shown from the cache. It is refreshed as soon as the
+  // mutex frees, so the newly selected account is not left stale until the next poll.
+  assert.equal(syncCount,3,'the account chosen during the sync refreshes once it can');
+  assert.equal(synced[2],'acct-2','and the queued refresh targets that account');
+  await click(byText('button','Probe refresh'));
+  assert.equal(syncCount,4,'the selected account can refresh after the mutex is released');
+});
+
+void test('resetting to demo does not release a physical Gmail sync early',async()=>{
+  setupDom();
+  let syncCount=0;
+  let release!:()=>void;
+  const held=new Promise<void>(resolve=>{release=resolve;});
+  stubFetch(async(url,body)=>{
+    if(url.startsWith('/api/sync')){
+      syncCount++;
+      if(syncCount===2)await held;
+      return mailFor(typeof body?.accountId==='string'?body.accountId:null);
+    }
+    return defaultHandler(url,body);
+  });
+  await render(createElement(InboxLifecycleProbe));
+  await settle();
+  await click(byText('button','Probe refresh'));
+  await click(byText('button','Probe switch account'));
+  await click(byText('button','Probe reset demo'));
+  assert.equal(screen().querySelector('[data-testid="busy"]')?.textContent,'busy');
+  await click(byText('button','Probe refresh'));
+  assert.equal(syncCount,2,'demo reset cannot launch another Gmail request');
+  release();
+  await settle();
+  assert.equal(screen().querySelector('[data-testid="busy"]')?.textContent,'idle');
+  assert.equal(syncCount,2,'demo reset discards the connected mailbox refresh that was queued behind it');
+});
+
 /** Subjects currently listed in the inbox. */
 const subjects=()=>allByText('h3',/account (work|personal) mail/).map(node=>(node.textContent||'').trim()).sort();
 
@@ -111,6 +229,30 @@ function navButton(label:string){
   return found[0] as HTMLElement;
 }
 const isActive=(element:Element)=>element.hasAttribute('data-active');
+
+void test('the email reader switches views and expands without weakening its sandbox',async()=>{
+  setupDom();
+  const email={...demoEmails[0],body:'Plain fallback https://tracking.example/click?token=secret',
+    html:'<table width="900"><tr><td>Formatted newsletter</td></tr></table>'};
+  await render(createElement(EmailBody,{email}));
+  assert.equal(screen().querySelectorAll('iframe.email-document').length,1);
+  assert.equal(byText('button','Formatted').getAttribute('aria-pressed'),'true');
+
+  await click(byText('button','Plain text'));
+  assert.equal(screen().querySelectorAll('iframe.email-document').length,0,'plain view replaces the frame');
+  assert.match(screen().querySelector('.message-body')?.textContent||'',/tracking\.example/);
+  assert.doesNotMatch(screen().querySelector('.message-body')?.textContent||'',/token=secret/,
+    'the tracking query stays in the href rather than the visible copy');
+
+  await click(byText('button','Formatted'));
+  const frame=screen().querySelector('iframe.email-document')!;
+  assert.ok(!frame.classList.contains('expanded'));
+  await click(byText('button','Expand view'));
+  assert.ok(frame.classList.contains('expanded'));
+  assert.deepEqual((frame.getAttribute('sandbox')||'').split(' ').sort(),
+    ['allow-popups','allow-popups-to-escape-sandbox'],'expanding grants no new iframe capability');
+  assert.equal(byText('button','Compact view').getAttribute('aria-pressed'),'true');
+});
 
 void test('the dashboard opens on the default mailbox, not the combined view', async () => {
   await openDashboard();
@@ -600,4 +742,207 @@ void test('agenda disclosures have unique ids even when sanitised email keys wou
   const controls=[...screen().querySelectorAll('.calendar-agenda-summary')].map(node=>node.getAttribute('aria-controls'));
   assert.equal(controls.length,4);
   assert.equal(new Set(controls).size,4,'every disclosure controls only its own detail panel');
+});
+
+// ── Sender junk controls in the reader ─────────────────────────────────────
+
+const senderEmail=(over:Partial<Email>={})=>mail({id:'s1',accountId:'acct-1',
+  subject:'Pulse Survey',address:'communications@berkeley.edu',
+  accountEmail:'first@example.com',correctionRevision:0,senderRuleRevision:0,...over});
+
+/** Renders the control alone, which is how it behaves inside the reader's action row. */
+async function openControl(email:Email,handler?:Handler,demo=false){
+  setupDom();
+  const seen=stubFetch(handler??defaultHandler);
+  const applied:Email[]=[];
+  const refreshes:number[]=[];
+  await render(createElement(SenderJunkButton,{email,demo,
+    onApplied:(next:Email)=>{applied.push(next);},
+    onRefresh:async()=>{refreshes.push(1);return true;}}));
+  await settle();
+  return {seen,applied,refreshes};
+}
+const control=()=>screen().querySelector('.sender-junk-button') as HTMLButtonElement;
+
+void test('the reader offers Mark sender as junk, and confirms before saving', async () => {
+  const {seen}=await openControl(senderEmail());
+  assert.equal(control().getAttribute('aria-label'),'Mark sender as junk');
+  assert.equal(screen().querySelectorAll('.sender-junk-state').length,0,'nothing claims a rule exists yet');
+
+  // Pressing it opens a confirmation rather than saving. The dialog's own contents cannot
+  // be rendered in this harness (see tests/dom.ts), so what is asserted here is the part
+  // that matters most: nothing is written until the reader confirms.
+  await click(control());
+  assert.equal(seen.filter(r=>r.url.startsWith('/api/classification')).length,0,
+    'opening the confirmation saves nothing');
+  assert.equal(control().getAttribute('aria-expanded'),null);
+});
+
+/**
+ * Drives the shared hook directly. The confirmation dialog cannot be opened in this
+ * harness, so the save it guards is exercised here instead — through the same code path
+ * the dialog's confirm button calls.
+ */
+function HookProbe({email,demo,onApplied,onRefresh,record}:{email:Email;demo:boolean;
+  onApplied:(email:Email)=>void;onRefresh?:()=>Promise<boolean>;record:(outcome:unknown)=>void}){
+  const rule=useSenderRule({email,demo,onApplied,onRefresh});
+  return createElement('div',null,
+    createElement('button',{type:'button','data-probe':'mark',
+      onClick:()=>{void rule.markJunk().then(record);}},'probe mark'),
+    createElement('button',{type:'button','data-probe':'clear',
+      onClick:()=>{void rule.clearRule().then(record);}},'probe clear'),
+    createElement('span',{'data-probe':'notice'},rule.notice?.text??''),
+  );
+}
+
+async function probe(email:Email,options:{handler?:Handler;demo?:boolean;refresh?:()=>Promise<boolean>}={}){
+  setupDom();
+  const seen=stubFetch(options.handler??defaultHandler);
+  const applied:Email[]=[];const outcomes:unknown[]=[];
+  await render(createElement(HookProbe,{email,demo:options.demo??false,
+    onApplied:(next:Email)=>{applied.push(next);},onRefresh:options.refresh,
+    record:(outcome:unknown)=>{outcomes.push(outcome);}}));
+  await settle();
+  const press=async(name:string)=>{await click(screen().querySelector(`[data-probe=${name}]`)!);};
+  const notice=()=>screen().querySelector('[data-probe=notice]')!.textContent||'';
+  return {seen,applied,outcomes,press,notice};
+}
+
+void test('marking sends the sender action with both revisions and refreshes once', async () => {
+  let refreshes=0;
+  const run=await probe(senderEmail({correctionRevision:3,senderRuleRevision:7}),
+    {refresh:async()=>{refreshes++;return true;}});
+  await run.press('mark');
+  assert.equal(refreshes,1,'the cached mailbox is re-read exactly once');
+  const save=run.seen.find(r=>r.url==='/api/classification');
+  assert.ok(save,'the save was submitted');
+  assert.equal(save.body?.accountId,'acct-1','targeting the mailbox that received it');
+  assert.equal(save.body?.messageId,'s1');
+  assert.equal(save.body?.expectedRevision,3,'the message revision is sent');
+  assert.equal(save.body?.expectedSenderRevision,7,'and the sender revision');
+  assert.deepEqual(save.body?.action,{type:'set-sender-junk-preference',value:'junk'});
+  assert.equal(run.applied.length,1,'the returned message is merged');
+  assert.match(run.notice(),/Sender marked as junk\./);
+  assert.deepEqual(run.outcomes,[{ok:true,revision:8,previous:undefined}],
+    'the new revision is reported so a temporary Undo can reverse exactly this change');
+});
+
+void test('a successful save whose refresh fails says so without repeating the save', async () => {
+  const run=await probe(senderEmail(),{refresh:async()=>false});
+  await run.press('mark');
+  assert.equal(run.seen.filter(r=>r.url==='/api/classification').length,1,'the save ran exactly once');
+  assert.match(run.notice(),/could not be refreshed/,'and the failure is described as the refresh');
+});
+
+void test('a temporary Undo reverses exactly the change it was offered for', async () => {
+  // Marking a sender that already had a Keep preference must restore that preference,
+  // not merely clear the rule, and must be ordered against the revision it just created.
+  const run=await probe(senderEmail({senderJunkPreference:'not-junk',senderRuleRevision:4}));
+  await run.press('mark');
+  const outcome=run.outcomes[0] as {ok:true;revision:number;previous?:string};
+  assert.equal(outcome.previous,'not-junk','the preference in place beforehand is remembered');
+  assert.equal(outcome.revision,5,'along with the revision the save produced');
+});
+
+void test('an active rule shows a permanent Undo that clears it', async () => {
+  const {seen,refreshes}=await openControl(senderEmail({senderJunkPreference:'junk',senderRuleRevision:2}));
+  // Active state comes from the saved preference, not from the message being in Noise.
+  assert.equal(control().getAttribute('aria-label'),'Undo sender junk');
+  assert.match(screen().textContent||'',/This sender is marked as junk\./);
+
+  await click(control());
+  const save=seen.find(r=>r.url==='/api/classification');
+  assert.deepEqual(save?.body?.action,{type:'clear-sender-junk-preference'},'undo clears, with no second confirmation');
+  assert.equal(save?.body?.expectedSenderRevision,2);
+  assert.equal(refreshes.length,1);
+  assert.match(screen().textContent||'',/Automatic sorting and message-specific corrections apply again/);
+});
+
+void test('a message already in Noise is not mistaken for a saved rule', async () => {
+  // Automatic junk classification and a confirmed sender rule are different states, and
+  // only the second one has anything to undo.
+  await openControl(senderEmail({category:'noise'}));
+  assert.equal(control().getAttribute('aria-label'),'Mark sender as junk');
+});
+
+void test('a failed save leaves the rule as it was and stays retryable', async () => {
+  const failing:Handler=(url,body)=>url.startsWith('/api/classification')
+    ? (()=>{throw new Error('boom');})() : defaultHandler(url,body);
+  const {applied,refreshes}=await openControl(senderEmail({senderJunkPreference:'junk',senderRuleRevision:2}),failing);
+  await click(control());
+  assert.equal(applied.length,0,'nothing was merged');
+  assert.equal(refreshes.length,0,'and no refresh was claimed');
+  assert.equal(control().getAttribute('aria-label'),'Undo sender junk','the rule still reads as active');
+  assert.ok(!control().disabled,'and the control is usable again');
+});
+
+void test('the demo workspace saves nothing', async () => {
+  const {seen}=await openControl(senderEmail(),undefined,true);
+  await click(control());
+  assert.equal(seen.filter(r=>r.url==='/api/classification').length,0,'no mutation is attempted');
+  assert.match(screen().textContent||'',/Connect Gmail to save sender preferences/);
+});
+
+void test('the permanent Undo survives a remount and works from another message', async () => {
+  // Nothing is remembered in component state: the control reads the saved preference that
+  // arrives with every message, so it is there after a reload or a later visit.
+  const marked=senderEmail({senderJunkPreference:'junk',senderRuleRevision:3});
+  await openControl(marked);
+  assert.equal(control().getAttribute('aria-label'),'Undo sender junk');
+  teardownDom();
+
+  // A different message from the same sender in the same account offers the same Undo.
+  const sibling=senderEmail({id:'s2',senderJunkPreference:'junk',senderRuleRevision:3});
+  const {seen}=await openControl(sibling);
+  assert.equal(control().getAttribute('aria-label'),'Undo sender junk');
+  await click(control());
+  const save=seen.find(r=>r.url==='/api/classification');
+  assert.equal(save?.body?.messageId,'s2','the request is made from the message in hand');
+  assert.equal(save?.body?.expectedSenderRevision,3,'against the rule revision it was shown');
+});
+
+void test('a second press cannot start a second save', async () => {
+  // The rendered disabled state and a synchronous guard both apply, because React state
+  // updates are asynchronous and two fast clicks can otherwise both get through.
+  let release!:()=>void;
+  const held=new Promise<void>(resolve=>{release=resolve;});
+  const slow:Handler=async(url,body)=>{
+    if(url.startsWith('/api/classification'))await held;
+    return defaultHandler(url,body);
+  };
+  const {seen}=await openControl(senderEmail({senderJunkPreference:'junk',senderRuleRevision:1}),slow);
+  await click(control());
+  assert.equal(control().disabled,true,'the control reports itself busy');
+  assert.equal(control().getAttribute('aria-label'),'Undoing…');
+  await click(control());
+  await click(control());
+  release();
+  await settle();
+  assert.equal(seen.filter(r=>r.url==='/api/classification').length,1,'exactly one save was sent');
+});
+
+void test('the control is reachable and operable from the keyboard', async () => {
+  await openControl(senderEmail());
+  const button=control();
+  assert.equal(button.tagName,'BUTTON','a real button, so Enter and Space work unaided');
+  assert.ok(!button.hasAttribute('disabled'));
+  assert.ok((button.getAttribute('tabindex')??'0')!=='-1','it stays in the tab order');
+  button.focus();
+  assert.equal(screen().ownerDocument.activeElement,button,'and it can hold focus');
+  // The visible text shortens on a narrow screen, so the name is stated independently.
+  assert.equal(button.getAttribute('aria-label'),'Mark sender as junk');
+  assert.ok((button.textContent||'').includes('Mark sender as junk'),'the full label is present at wide widths');
+});
+
+void test('the reader declares one close control, not two', () => {
+  // The sheet's built-in close button is switched off for this sheet, and its SheetClose
+  // primitive is rendered in the action row instead. The sheet itself cannot be opened in
+  // this harness, so what is checked is that the page never asks for both.
+  const source=readFileSync(`${process.cwd()}/app/page.tsx`,'utf8');
+  assert.match(source,/showCloseButton=\{false\}/,'the built-in close button is disabled for this sheet');
+  assert.equal(source.match(/<SheetClose\b/g)?.length,1,'and exactly one SheetClose is rendered');
+  assert.match(source,/<SheetClose[^>]*aria-label="Close"/,'carrying an accessible name');
+  assert.match(source,/className="email-sheet-actions"/,'inside the reader action row');
+  // Other sheets keep their own close button.
+  assert.equal(source.match(/showCloseButton=/g)?.length,1,'no other sheet is changed');
 });

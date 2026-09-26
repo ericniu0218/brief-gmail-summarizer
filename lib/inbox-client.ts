@@ -30,7 +30,19 @@ export type InboxSnapshot = {
   /** Set only on a refresh response: how many accounts refreshed or failed. */
   refreshed?: number;
   failed?: number;
+  failures?: {accountId:string;email:string;error:string}[];
 };
+
+/** Turn a partial 200 sync response into an honest, actionable status message. */
+export function syncFailureMessage(data:InboxSnapshot){
+  if(!(data.failed&&data.failed>0))return '';
+  const reported=data.failures?.map(failure=>failure.email).filter(Boolean)??[];
+  const names=reported.length?reported:data.accounts?.filter(account=>account.error).map(account=>account.email)??[];
+  const who=names.length?names.join(', '):'some mailboxes';
+  return (data.refreshed??0)>0
+    ?`Some mail could not be refreshed (${who}). Everything that did load is shown.`
+    :`Could not refresh ${who}. The mail shown is from the last successful refresh.`;
+}
 export class ApiError extends Error {
   constructor(
     message: string,

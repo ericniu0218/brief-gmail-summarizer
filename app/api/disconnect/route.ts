@@ -16,7 +16,7 @@ import { getOwnedConnection, ownedConnections, refreshTokenFor } from '@/server/
 export async function POST(request:Request){
   try{
     mutation(request);const user=await userId();const e=runtime();
-    const body=await inputObject(request).catch(()=>({} as Record<string,unknown>));
+    const body=await inputObject(request);
     // Rejects a foreign account, an unknown id and the reserved combined-view selection.
     const owned=await getOwnedConnection(user,typeof body.accountId==='string'?body.accountId:'',e);
 
@@ -39,10 +39,18 @@ export async function POST(request:Request){
     // With nothing left the preference is removed entirely and the app returns to demo mode.
     const remaining=await ownedConnections(user,e);
     const preference=await e.DB.prepare('SELECT default_account_id FROM account_preferences WHERE user_id = ?').bind(user).first<{default_account_id:string}>();
+    let defaultAccountId=preference?.default_account_id||null;
     if(preference?.default_account_id===owned.id||!remaining.length){
-      if(remaining.length)await e.DB.prepare('UPDATE account_preferences SET default_account_id = ? WHERE user_id = ?').bind(remaining[0].id,user).run();
-      else await e.DB.prepare('DELETE FROM account_preferences WHERE user_id = ?').bind(user).run();
+      if(remaining.length){
+        defaultAccountId=remaining[0].id;
+        await e.DB.prepare('UPDATE account_preferences SET default_account_id = ? WHERE user_id = ?').bind(defaultAccountId,user).run();
+      }else{
+        defaultAccountId=null;
+        await e.DB.prepare('DELETE FROM account_preferences WHERE user_id = ?').bind(user).run();
+      }
     }
-    return json({disconnected:true,revoked,remaining:remaining.length,defaultAccountId:remaining[0]?.id||null});
+    // Report the preference that is actually stored. Naming the first remaining mailbox
+    // would be wrong whenever a different one is the default and was left untouched.
+    return json({disconnected:true,revoked,remaining:remaining.length,defaultAccountId});
   }catch(error){return failure(error);}
 }

@@ -1,5 +1,5 @@
 import { polishReply, replyOptions } from '@/server/ai';
-import { failure, HttpError, json, mutation, userId } from '@/server/runtime';
+import { failure, HttpError, inputObject, json, mutation, userId } from '@/server/runtime';
 import { demoEmails } from '@/lib/mail';
 
 /** Generates reply suggestions for the fixed demo inbox without touching Gmail. */
@@ -8,7 +8,7 @@ import { demoEmails } from '@/lib/mail';
 export async function POST(request:Request){
   try{
     mutation(request);await userId();
-    const input=await request.json() as {id?:string;action?:string;tone?:string;variation?:number;notes?:string};
+    const input=await inputObject(request,65536) as {id?:string;action?:string;tone?:string;variation?:number;notes?:string};
     const email=demoEmails.find(m=>m.id===input.id);
     if(!email)throw new HttpError(400,'Choose an email from the sample inbox.');
     const tone=['Concise','Friendly','Professional'].includes(input.tone||'')?input.tone!:'Concise';
