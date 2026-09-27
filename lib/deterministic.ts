@@ -46,6 +46,13 @@ const MANDATORY=/\b(required|mandatory|you must\b|must (?:complete|submit|respon
 const VAGUE_ONLY=/\b(soon|asap|when you can|at your convenience|no rush)\b/i;
 const DATE_PHRASE=/\b(?:by |before |on |due )?(?:today|tomorrow|(?:this|next) \w+day|\w+day|(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.?\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+20\d{2})?|20\d{2}-\d{2}-\d{2})(?:\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm))?\b/i;
 const CANCELLED=/\b(cancel(?:led|ing|s)?|called off|no longer (?:happening|needed)|won'?t be going ahead)\b/i;
+// "Reply CANCEL to release this slot" and "Reply STOP to stop receiving these" tell the
+// reader how to cancel. They are instructions, not cancellations, and reading them as
+// cancellations silently deleted a real appointment from Important. Rating a labelled set
+// of mail found this on an appointment reminder due the next morning.
+const CANCEL_INSTRUCTION=/\b(?:reply|text|respond|click|press|call)\s+(?:with\s+)?["'“]?(?:cancel|stop|unsubscribe)\b[^.!?\n]*|\b(?:to|if you (?:need|want|wish) to|in order to)\s+(?:cancel|stop|reschedule)\b[^.!?\n]*/gi;
+/** The text with cancellation *instructions* removed, so only real cancellations remain. */
+const withoutCancelInstructions=(text:string)=>text.replace(CANCEL_INSTRUCTION,' ');
 const RESCHEDULED=/\b(moved to|reschedul\w*|pushed (?:to|back)|new time|now at|changed to)\b/i;
 const CONFIRMED=/\b(confirmed|see you (?:then|at)|it'?s booked|accepted|locked in)\b/i;
 const COMPLETED=/\b(received (?:it|the|your)|got (?:it|the|your)|thanks[, ]+(?:received|got it)|all set|this is (?:now )?done|completed)\b/i;
@@ -56,6 +63,25 @@ const PERSONAL_DOMAIN=/(^|[.@])(family|personal|friends?|gmail|outlook|yahoo|icl
 const INSTITUTIONAL=/\.(edu|gov)$/i;
 const BULK_SENDER=/(^|[.@])(no[-_]?reply|newsletter|marketing|promo|offers?|deals?|mailer|campaign|news)([.@]|$)/i;
 
+// An obligation is only as good as the sentence behind it. Spam that pads its body with
+// base64 filler produced a "meeting" out of a 76-character random token, which then ranked
+// above real mail. Links are stripped first, because a long URL in an otherwise ordinary
+// sentence — a Zoom link beside a meeting time — is normal and must still count.
+const URL_LIKE=/\bhttps?:\/\/\S+|\bwww\.\S+/gi;
+const OPAQUE_TOKEN=/[A-Za-z0-9+/=_-]{24,}/g;
+function looksLikeLanguage(sentence:string){
+  const prose=sentence.replace(URL_LIKE,' ');
+  const letters=prose.replace(/\s+/g,'').length;
+  if(!letters)return false;
+  let opaque=0;
+  for(const token of prose.match(OPAQUE_TOKEN)||[]){
+    // A long run with no lower-case vowel is not a word in any language this handles.
+    if(!/[aeiou]/.test(token))opaque+=token.length;
+  }
+  // Rejected only when the filler dominates, so one stray identifier cannot hide a real task.
+  return opaque/letters<0.4;
+}
+
 function firstSentenceWith(text:string,pattern:RegExp){
   for(const sentence of text.split(/(?<=[.!?\n])\s+/)){
     if(pattern.test(sentence))return sentence.trim().slice(0,300);
@@ -63,7 +89,8 @@ function firstSentenceWith(text:string,pattern:RegExp){
   return '';
 }
 
-function meetingStateOf(text:string):MeetingState{
+function meetingStateOf(raw:string):MeetingState{
+  const text=withoutCancelInstructions(raw);
   if(CANCELLED.test(text))return 'cancelled';
   if(RESCHEDULED.test(text))return 'rescheduled';
   if(CONFIRMED.test(text))return 'confirmed';
@@ -71,8 +98,12 @@ function meetingStateOf(text:string):MeetingState{
 }
 
 function obligationStateOf(sentence:string,whole:string):ObligationState{
-  if(CANCELLED.test(sentence))return 'cancelled';
-  if(COMPLETED.test(whole)&&!PROMISE.test(whole))return 'completed';
+  if(CANCELLED.test(withoutCancelInstructions(sentence)))return 'cancelled';
+  // Completion has to be stated about *this* obligation. Searching the whole message let an
+  // unrelated "everyone received the point" three paragraphs down mark a live deadline as
+  // done, which removed a problem set due in two days from Important entirely. A promise to
+  // send something later still blocks completion wherever it appears.
+  if(COMPLETED.test(sentence)&&!PROMISE.test(whole))return 'completed';
   return 'open';
 }
 
@@ -103,7 +134,7 @@ export function deterministicClassify(message:ClassifiableMessage,userAddress=''
   const obligations:Obligation[]=[];
   const push=(kind:Obligation['kind'],pattern:RegExp,extra:Partial<Obligation>={})=>{
     const evidence=firstSentenceWith(current,pattern);
-    if(!evidence)return;
+    if(!evidence||!looksLikeLanguage(evidence))return;
     // Somebody else's work is not the user's task.
     const other=/\b([A-Z][a-z]+)\s+(?:will|is going to|has agreed to|is handling)\b/.exec(evidence);
     const ownerIsUser=other?false:onlyCopied?null:addressedDirectly?true:null;

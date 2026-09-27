@@ -26,7 +26,7 @@ export const IMPORTANCE = {
   meetingWindow: 7 * DAY,
   /** How long a direct request counts as recent after it arrives. */
   recentRequest: 7 * DAY,
-  /** Beyond this, an undated unresolved item is no longer surfaced by age alone. */
+  /** Beyond this, an undated unresolved item drops out of the ranking by age alone. */
   agingRequest: 30 * DAY,
   /** A missed deadline is shown as overdue for this long, then it stops being urgent. */
   overdueGrace: 7 * DAY,
@@ -115,9 +115,15 @@ function rateObligation(obligation: Obligation, received: number | undefined, no
     if (meeting) return at('routine', false, 'meeting-passed', 'This meeting has already taken place.', { dueAt: due, overdue: false });
     if (-until <= IMPORTANCE.overdueGrace)
       return at('overdue', true, 'recently-overdue', 'Overdue.', { dueAt: due, overdue: true });
-    // Still unresolved, and still visible in its category — but no longer urgent, because
-    // permanent urgency is indistinguishable from no urgency at all.
-    return at('aging', false, 'long-overdue', 'Overdue for more than a week.', { dueAt: due, overdue: true });
+    // Still unresolved, and still recent enough to act on. It ranks below work that is
+    // actually due now, but it is shown: rating a labelled set of real and constructed mail
+    // put every aging item in the top band, because an institutional obligation does not
+    // stop mattering after a week.
+    if (-until <= IMPORTANCE.agingRequest)
+      return at('aging', true, 'long-overdue', 'Overdue for more than a week.', { dueAt: due, overdue: true });
+    // Past the same horizon that retires an undated item. This is what keeps last year's
+    // deadlines out of Important: permanent urgency is indistinguishable from none.
+    return at('aging', false, 'stale-overdue', 'Overdue for a long time.', { dueAt: due, overdue: true });
   }
 
   // No supported date, so recency is the only evidence of current relevance.
@@ -136,7 +142,7 @@ function rateObligation(obligation: Obligation, received: number | undefined, no
   if (obligation.kind === 'request' && obligation.ownerIsUser === true && age <= IMPORTANCE.recentRequest)
     return at('recent-request', true, 'recent-direct-request', 'A direct request from the last week.');
   if (age <= IMPORTANCE.agingRequest)
-    return at('aging', false, 'aging-obligation', 'Unresolved, but not recent.');
+    return at('aging', true, 'aging-obligation', 'Unresolved, but not recent.');
   return at('routine', false, 'old-undated-obligation', 'Unresolved for over a month, with no date.');
 }
 
