@@ -119,7 +119,7 @@ void test('the 72-hour window is measured in elapsed time, not calendar dates', 
   assert.equal(evaluateImportance(outside, NOW).tier, 'routine');
 });
 
-void test('an overdue deadline is urgent for a week and then stops being urgent', () => {
+void test('an overdue deadline is urgent for a week, shown for a month, then retired', () => {
   const justOverdue = evaluateImportance(withObligations('a', [deadline(ago(HOUR))]), NOW);
   assert.equal(justOverdue.tier, 'overdue');
   assert.equal(justOverdue.important, true);
@@ -128,22 +128,33 @@ void test('an overdue deadline is urgent for a week and then stops being urgent'
   const edge = evaluateImportance(withObligations('b', [deadline(ago(IMPORTANCE.overdueGrace))]), NOW);
   assert.equal(edge.important, true, 'exactly at the grace boundary');
 
+  // Past the grace period it drops a tier but stays in Important. Rating a labelled set of
+  // real and constructed mail put every aging obligation in the top band: a fine that is
+  // still accruing, or a form the university is still waiting for, has not stopped mattering.
   const longPast = evaluateImportance(withObligations('c', [deadline(ago(IMPORTANCE.overdueGrace + 1000))]), NOW);
-  assert.equal(longPast.important, false, 'past the grace period it is no longer urgent');
-  assert.equal(longPast.overdue, true, 'but it is still unresolved and still says so');
-  assert.equal(longPast.tier, 'aging');
+  assert.equal(longPast.tier, 'aging', 'below work that is due now');
+  assert.equal(longPast.important, true, 'but still shown');
+  assert.equal(longPast.overdue, true, 'and still says it is unresolved');
+
+  // One horizon retires everything, dated or not. This is what keeps last year's deadlines
+  // out of Important, which is the whole reason the ranking was reworked.
+  const stale = evaluateImportance(withObligations('d', [deadline(ago(IMPORTANCE.agingRequest + DAY))]), NOW);
+  assert.equal(stale.tier, 'aging');
+  assert.equal(stale.important, false, 'a long-dead deadline is history, not work');
+  assert.equal(stale.reasonCode, 'stale-overdue');
 });
 
-void test('an undated direct request ages out of Important now', () => {
+void test('an undated direct request drops a tier after a week and retires after a month', () => {
   const fresh = withObligations('fresh', [obligation()], { receivedAt: ago(IMPORTANCE.recentRequest - 1000) });
   const edge = withObligations('edge', [obligation()], { receivedAt: ago(IMPORTANCE.recentRequest) });
   const older = withObligations('older', [obligation()], { receivedAt: ago(IMPORTANCE.recentRequest + 1000) });
   const ancient = withObligations('ancient', [obligation()], { receivedAt: ago(IMPORTANCE.agingRequest + DAY) });
   assert.equal(evaluateImportance(fresh, NOW).important, true);
   assert.equal(evaluateImportance(edge, NOW).important, true, 'exactly seven days still counts');
-  assert.equal(evaluateImportance(older, NOW).important, false);
   assert.equal(evaluateImportance(older, NOW).tier, 'aging', 'it stays an unresolved item');
+  assert.equal(evaluateImportance(older, NOW).important, true, 'ranked lower, still shown');
   assert.equal(evaluateImportance(ancient, NOW).tier, 'routine');
+  assert.equal(evaluateImportance(ancient, NOW).important, false, 'a month with no date retires it');
   // Nothing was marked done: the task is quieter, not finished.
   for (const message of [older, ancient])
     assert.equal(message.classification!.obligations[0].state, 'open', 'the record is untouched');

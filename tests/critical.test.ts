@@ -716,6 +716,45 @@ void test('quoted requests do not create new obligations',()=>{
  assert.equal(reply.obligations.length,0,'an obligation quoted from history is not a new task');
 });
 
+void test('a completion elsewhere in the message does not resolve a live deadline',()=>{
+ // Found by rating a labelled set: "everyone received the point", three paragraphs below,
+ // marked a problem set due in two days as completed, which removed it from Important.
+ const result=deterministicClassify({id:'ext1',subject:'Problem set 4 deadline moved to Monday',
+  text:'Problem set 4 is now due Monday at 11:59pm. No extensions beyond that date.\n\nQuestion 3 was poorly worded and everyone received the point.',
+  quoted:'',from:{name:'Dan',address:'dan@berkeley.edu'},to:[{address:'alex@studio.example'}],cc:[],
+  receivedAt:Date.UTC(2026,8,25),labels:['INBOX'],attachments:[],contentComplete:true},'alex@studio.example');
+ const deadline=result.obligations.find(o=>o.kind==='deadline');
+ assert.ok(deadline,'the deadline is still extracted');
+ assert.equal(deadline!.state,'open','an unrelated completion sentence does not finish it');
+
+ // A completion stated in the obligation's own sentence still resolves it.
+ const done=deterministicClassify({id:'ext2',subject:'Problem set 4',
+  text:'Problem set 4 was due Monday at 11:59pm and I received your submission, so you are all set.',
+  quoted:'',from:{name:'Dan',address:'dan@berkeley.edu'},to:[{address:'alex@studio.example'}],cc:[],
+  receivedAt:Date.UTC(2026,8,25),labels:['INBOX'],attachments:[],contentComplete:true},'alex@studio.example');
+ assert.equal(done.obligations.find(o=>o.kind==='deadline')?.state,'completed','a real completion still counts');
+});
+
+void test('an instruction for how to cancel is not a cancellation',()=>{
+ // Found by rating a labelled set: "Reply CANCEL to release this slot" convinced the
+ // classifier that an appointment the next morning had been cancelled.
+ const reminder=deterministicClassify({id:'cx1',subject:'Appointment reminder: tomorrow 11:20am',
+  text:'This is a reminder of your appointment tomorrow at 11:20am. Please arrive ten minutes early.\n\nReply CANCEL to release this slot.',
+  quoted:'',from:{name:'Clinic',address:'clinic@uhs.berkeley.edu'},to:[{address:'alex@studio.example'}],cc:[],
+  receivedAt:Date.UTC(2026,8,25),labels:['INBOX'],attachments:[],contentComplete:true},'alex@studio.example');
+ const meeting=reminder.obligations.find(o=>o.kind==='meeting');
+ assert.ok(meeting,'the appointment is still an obligation');
+ assert.notEqual(meeting!.meetingState,'cancelled','an instruction is not a cancellation');
+ assert.equal(meeting!.state,'open');
+
+ // A real cancellation is still read as one.
+ const called=deterministicClassify({id:'cx2',subject:'Cancelled: sprint planning Friday',
+  text:'Cancelling Friday sprint planning, we will fold it into Monday standup instead.',
+  quoted:'',from:{name:'Sarah',address:'sarah@studio.example'},to:[{address:'alex@studio.example'}],cc:[],
+  receivedAt:Date.UTC(2026,8,25),labels:['INBOX'],attachments:[],contentComplete:true},'alex@studio.example');
+ assert.equal(called.obligations.find(o=>o.kind==='meeting')?.meetingState,'cancelled','a real cancellation still counts');
+});
+
 void test('deterministic classification tolerates missing recipient arrays',()=>{
  const input={id:'missing-recipients',subject:'Hello',text:'No action needed.',quoted:'',
   from:{name:'S',address:'sender@example.com'},receivedAt:Date.UTC(2026,8,14),
