@@ -1,3 +1,4 @@
+import { isPublicMailDomain } from './addresses';
 import type { Email } from './mail';
 import { cachedImportance, evaluateImportance, receivedAtOf } from './importance';
 
@@ -66,6 +67,7 @@ export function sortInboxEmails(emails:Email[],now:number|null,mode:SortMode='im
   }));
   scored.sort((a,b)=>{
     if(ordering==='importance'&&a.importance&&b.importance){
+      if(a.importance.important!==b.importance.important)return a.importance.important?-1:1;
       if(a.importance.rank!==b.importance.rank)return a.importance.rank-b.importance.rank;
       // Unknown due times sort last within a tier without ever producing NaN, because
       // two equal infinities are compared for equality rather than subtracted.
@@ -97,7 +99,9 @@ function companyName(email:Email,key:string) {
 }
 
 function isFoldableOperationalEmail(email:Email) {
-  return FOLDABLE_OPERATIONAL.test(searchable(email));
+  const [local,domain='']=email.address.toLowerCase().split('@');
+  return !isPublicMailDomain(domain)&&/^(?:no[-_]?reply|notifications?|security|accounts?|support)(?:[.+_-]|$)/.test(local)
+    &&FOLDABLE_OPERATIONAL.test(searchable(email));
 }
 
 /**
@@ -113,7 +117,7 @@ export function buildInboxRows(emails:Email[],now:number|null,mode:SortMode='imp
   const keyOf=new Map<Email,string>();
   for(const email of sorted){
     if(!isFoldableOperationalEmail(email))continue;
-    const key=organizationKey(email);
+    const key=`${email.accountId||''}:${organizationKey(email)}`;
     keyOf.set(email,key);
     const bucket=buckets.get(key);
     if(bucket)bucket.push(email);
@@ -130,7 +134,7 @@ export function buildInboxRows(emails:Email[],now:number|null,mode:SortMode='imp
       if(emitted.has(key))continue;
       emitted.add(key);
       // `group` follows the sorted order, so its first member is the one that placed it.
-      rows.push({kind:'fold',id:`fold:${key}`,company:companyName(group[0],key),emails:group,
+      rows.push({kind:'fold',id:`fold:${key}`,company:companyName(group[0],organizationKey(group[0])),emails:group,
         needsReplyCount:group.filter(item=>item.needsReply).length,lead:group[0]});
       continue;
     }

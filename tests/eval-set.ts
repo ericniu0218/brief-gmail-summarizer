@@ -13,19 +13,27 @@ import type { Section, Tag } from '../lib/categories';
  * - A task owned by a named third party is not the user's action item.
  * - Quoted history never creates a new obligation.
  * - Research is a topic. It never implies the user must act.
- * Threads and near-duplicates are kept in the same split so held-out stays honest.
+ * - A promotion is a message whose main purpose is an optional purchase, upgrade, signup
+ *   or sales conversation. It belongs in Noise, and nothing it asks for is required.
+ * - `important` marks legitimate mail that must stay Important at `EVAL_NOW`.
+ * Threads and near-duplicates are kept in the same split so held-out stays honest; a
+ * campaign's templates share one `family`.
  */
 export type Fixture={
   id:string;
   split:'dev'|'heldout';
   note:string;
   message:ClassifiableMessage;
-  expect:{section:Section;tags?:Tag[];notTags?:Tag[];junk?:boolean;ownerIsUser?:boolean|null};
+  expect:{section:Section;tags?:Tag[];notTags?:Tag[];junk?:boolean;ownerIsUser?:boolean|null;important?:boolean};
+  /** Templates of one campaign or thread; they must share a split. Defaults to the id. */
+  family?:string;
 };
 
 const USER='alex@studio.example';
 const DAY=86400000;
 const ANCHOR=Date.UTC(2026,8,14,15,0,0); // Monday 2026-09-14T15:00Z
+/** The clock importance is judged at: two hours after every fixture arrived. */
+export const EVAL_NOW=ANCHOR+2*3600000;
 
 function message(id:string,over:Partial<Omit<ClassifiableMessage,'from'>>&{subject:string;text:string;from:string}):ClassifiableMessage{
   return {
@@ -137,6 +145,59 @@ export const FIXTURES:Fixture[]=[
    message:message('stale-old-request',{from:'james@studio.example',subject:'Budget sign-off',text:'Could you approve the Q1 budget by Friday?',receivedAt:ANCHOR-300*DAY}),
    expect:{section:'work',tags:['requests']}},
 ];
+
+/**
+ * Campaign families and the legitimate mail they are most easily confused with. Wording is
+ * deliberately different from the regression tests so the evaluation is not a copy of them.
+ */
+const promotion=(id:string,family:string,split:Fixture['split'],note:string,over:Parameters<typeof message>[1]):Fixture=>
+  ({id,family,split,note,message:message(id,over),expect:{section:'noise',junk:true,notTags:['meetings','requests','actions','deadlines']}});
+const legitimate=(id:string,split:Fixture['split'],note:string,over:Parameters<typeof message>[1],expect:Fixture['expect']):Fixture=>
+  ({id,family:id,split,note,message:message(id,over),expect});
+
+FIXTURES.push(
+  // Development campaigns.
+  promotion('flash-sale','retail-flash-sale','dev','A sitewide sale with a code and a countdown.',
+    {from:'hello@harboroutfitters.example',subject:'Flash sale: 40% off sitewide',text:'Today only. Use code FLASH40 at checkout. Shop the collection before midnight.'}),
+  promotion('flash-sale-extended','retail-flash-sale','dev','A near-duplicate of the same campaign.',
+    {from:'hello@harboroutfitters.example',subject:'Flash sale extended: 40% off',text:'We extended the sale by popular demand. Use code FLASH40. Shop now.'}),
+  promotion('abandoned-basket','abandoned-basket','dev','"Complete your purchase" is not a transaction.',
+    {from:'orders@deskmate.example',subject:'You left something behind',text:'Items are still in your basket. Complete your purchase before they sell out. Free shipping on orders over $50.'}),
+  promotion('free-plan-upsell','saas-upgrade','dev','A usage limit framed as an upsell.',
+    {from:'team@boardly.example',subject:'Unlock more with Boardly Teams',text:'You are close to the limit of the free plan. Upgrade now for unlimited boards. Special pricing ends Friday.'}),
+  legitimate('receipt-with-footer','dev','A receipt with a promotional footer keeps its receipt purpose.',
+    {from:'orders@harboroutfitters.example',subject:'Your receipt from Harbor Outfitters',text:'Order #88213 confirmed. We charged $64.00 to your card ending 4410. Get 15% off your next order with code THANKS15. Shop now.'},
+    {section:'personal',junk:false}),
+  legitimate('payment-declined','dev','A declined payment with a date is a real task.',
+    {from:'billing@boardly.example',subject:'Payment declined for your subscription',text:'Your card ending 4410 was declined. Update your payment method by September 16 to keep your account active.'},
+    {section:'work',tags:['actions'],important:true}),
+  legitimate('client-redlines','dev','A client request with a date.',
+    {from:'mira@northwindlaw.example',subject:'Contract redlines',text:'Could you send the redlined contract by September 15? Our board reviews it that afternoon.'},
+    {section:'work',tags:['requests'],important:true}),
+  legitimate('new-login','dev','A concrete sign-in event.',
+    {from:'security@boardly.example',subject:'New login to your account',text:'We noticed a new sign-in from Firefox on Linux in Denver. If this was not you, reset your password.'},
+    {section:'work',junk:false,important:true}),
+
+  // Held-out campaigns.
+  promotion('masterclass-promo','webinar-promo','heldout','An invitation to register is not attendance.',
+    {from:'events@metriclane.example',subject:'Live masterclass: scaling analytics',text:'Save your seat for our free masterclass on September 22. Spots are limited. Register today.'}),
+  promotion('cold-outreach','cold-pitch','heldout','A personalised sales conversation is still a solicitation.',
+    {from:'sam@growthpartners.example',subject:'Idea for Studio',text:'Hi Alex, open to a quick call next week? Teams like yours use our outsourcing service to cut costs. Worth a 15-minute chat?'}),
+  promotion('monitoring-ad','security-product','heldout','Breach talk in an advertisement is not a security event.',
+    {from:'offers@watchtowerid.example',subject:'Is your data exposed?',text:'Data breaches hit millions every year. Our monitoring plan alerts you instantly. Get 50% off your first year. Start your free trial today.'}),
+  legitimate('registered-summit','heldout','A confirmed registration is a real event.',
+    {from:'events@metriclane.example',subject:'Your registration is confirmed: Analytics Summit',text:'Your registration is confirmed. The event starts September 15 at 9:00am at Moscone West.'},
+    {section:'work',tags:['meetings'],important:true}),
+  legitimate('key-rotation','heldout','A vendor requirement with a date, not an upsell.',
+    {from:'notices@apiworks.example',subject:'Required: rotate your API keys by September 16',text:'For security, API keys issued before 2024 stop working on September 16. You must rotate your keys before then.'},
+    {section:'work',tags:['actions'],important:true}),
+  legitimate('methods-digest','heldout','A research newsletter with an unsubscribe link.',
+    {from:'digest@methodsjournal.example',subject:'Methods digest: three new preprints',text:'Three preprints on causal inference, a dataset for survival analysis, and notes on peer review. Unsubscribe or manage your preferences.'},
+    {section:'work',tags:['research'],junk:false}),
+  legitimate('campaign-qa','heldout','A colleague\'s task about a campaign is work.',
+    {from:'nina@studio.example',subject:'QA before launch',text:'Can you QA the "Buy now, save 20%" email before it ships on September 15?'},
+    {section:'work',tags:['requests'],important:true}),
+);
 
 export const DEV_FIXTURES=FIXTURES.filter(f=>f.split==='dev');
 export const HELDOUT_FIXTURES=FIXTURES.filter(f=>f.split==='heldout');

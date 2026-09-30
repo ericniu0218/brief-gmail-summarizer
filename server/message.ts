@@ -25,7 +25,17 @@ export type NormalizedMessage={
   html?:string;
   labels:string[];
   headers:Record<string,string>;
+  /**
+   * Every value for each header, including repeats. Optional because a message normalized
+   * by an older version, or a fixture, may not carry it; readers fall back to `headers`.
+   */
+  headerValues?:Record<string,string[]>;
   calendar?:CalendarInvite;
+  /**
+   * Campaign headers, derived once here so both classifiers read the same facts. Only ever
+   * supporting evidence of a promotion. Optional because older records do not carry it.
+   */
+  distribution?:{listUnsubscribe:boolean;bulkPrecedence:boolean};
   attachments:Attachment[];
   htmlOnly:boolean;
   /** False whenever any part of the message was dropped, truncated, or unavailable. */
@@ -42,6 +52,13 @@ const TEXT_LIMIT=20000;
 const HTML_DISPLAY_LIMIT=750_000;
 const MAX_MIME_DEPTH=20;
 const MAX_DEFERRED_BODIES=8;
+/** Largest calendar file read from a named attachment. Invitations are a few kilobytes. */
+const MAX_CALENDAR_BYTES=262144;
+const CALENDAR_TYPES=['text/calendar','application/ics'];
+/** A calendar part is read even when it carries a filename such as `invite.ics`. */
+function isCalendarPart(mime:string,size:number){
+  return CALENDAR_TYPES.includes(mime)&&size<=MAX_CALENDAR_BYTES;
+}
 const MAX_DEFERRED_BYTES=2_000_000;
 
 /**
@@ -54,7 +71,8 @@ export async function hydrateDeferredBodies(message:GmailMessage,load:(attachmen
   function visit(part:GmailPart|undefined,depth=0){
     if(!part||depth>MAX_MIME_DEPTH)return;
     const mime=typeof part.mimeType==='string'?part.mimeType.toLowerCase():'';
-    if(!part.filename&&part.body?.attachmentId&&!part.body.data&&['text/plain','text/html','text/calendar','application/ics'].includes(mime))deferred.push(part);
+    const readable=!part.filename&&['text/plain','text/html','text/calendar','application/ics'].includes(mime);
+    if(part.body?.attachmentId&&!part.body.data&&(readable||isCalendarPart(mime,part.body.size||0)))deferred.push(part);
     for(const child of Array.isArray(part.parts)?part.parts:[])visit(child,depth+1);
   }
   visit(message.payload);
@@ -80,23 +98,97 @@ export function decodeEntities(value:string){
   });
 }
 
-function stripTags(value:string){return value.replace(/<[^>]*>/g,'');}
+/** Elements whose content is never readable text. */
+const HIDDEN_CONTENT=new Set(['script','style','head','title']);
+/** Closing one of these ends a line of text. */
+const BLOCK_END=new Set(['p','div','tr','li','h1','h2','h3','h4','h5','h6','table','blockquote','section','article']);
+/** Longest HTML body converted to text. Beyond this the text is truncated and marked. */
+export const MAX_HTML_TEXT_INPUT=2_000_000;
+
+/** A link target from a tag's attributes, read without a backtracking pattern. */
+function hrefOf(tag:string){
+  const at=tag.search(/\shref\s*=/i);
+  if(at<0)return '';
+  let index=tag.indexOf('=',at)+1;
+  while(tag[index]===' '||tag[index]==='\t'||tag[index]==='\n')index++;
+  const quote=tag[index];
+  if(quote!=='"'&&quote!=="'")return '';
+  const end=tag.indexOf(quote,index+1);
+  return end<0?'':tag.slice(index+1,end);
+}
 
 /**
  * Convert HTML mail to text. Markup is treated purely as data: nothing is executed,
  * no remote content is fetched, and no link is followed. Link targets are preserved
  * inline so a classifier can still see them.
+ *
+ * One pass over the input, moving forward only. The previous regular expressions searched
+ * to the end of the input again from every unmatched `<`, so a malformed 100 KB body took
+ * seconds; the work here grows in proportion to the input. An unterminated comment,
+ * script or style hides the rest of the document, as it does in a browser, and a `<` with
+ * no `>` after it anywhere is plain text.
  */
 export function htmlToText(html:string){
-  let value=html.replace(/<(script|style|head|title)\b[\s\S]*?<\/\1>/gi,' ').replace(/<!--[\s\S]*?-->/g,' ');
-  value=value.replace(/<a\b[^>]*?href=["']([^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi,(_whole,href:string,label:string)=>{
-    const text=decodeEntities(stripTags(label)).replace(/\s+/g,' ').trim();
-    if(!href||/^(?:javascript|data):/i.test(href))return text;
-    return text&&!text.includes(href)?`${text} (${href})`:href;
-  });
-  value=value.replace(/<br\s*\/?>/gi,'\n').replace(/<\/(?:p|div|tr|li|h[1-6]|table|blockquote|section|article)>/gi,'\n');
-  value=value.replace(/<li\b[^>]*>/gi,'\n- ');
-  return normalizeEmailText(decodeEntities(stripTags(value)).replace(/[ \t ]+/g,' '));
+  const source=html.length>MAX_HTML_TEXT_INPUT?html.slice(0,MAX_HTML_TEXT_INPUT):html;
+  const lower=source.toLowerCase();
+  // Closing tags already known to be absent, so an unclosed `<title>` repeated thousands of
+  // times is searched for once rather than once per repeat.
+  const unclosed=new Set<string>();
+  // Output is kept as chunks: closing a link replaces only its own label, never copies the
+  // whole text written so far.
+  const out:string[]=[];
+  let cursor=0;
+  let link:{href:string;start:number}|undefined;
+  const closeLink=()=>{
+    if(!link)return;
+    const label=out.splice(link.start).join('').replace(/\s+/g,' ').trim();
+    const text=decodeEntities(label);
+    const href=link.href,decoded=decodeEntities(href);
+    const replacement=!href||/^(?:javascript|data):/i.test(decoded.trim())?label
+      :text&&!text.includes(decoded)?`${label} (${href})`:href;
+    out.push(replacement);
+    link=undefined;
+  };
+  while(cursor<source.length){
+    const open=source.indexOf('<',cursor);
+    if(open<0){out.push(source.slice(cursor));break;}
+    out.push(source.slice(cursor,open));
+    if(source.startsWith('<!--',open)){
+      const end=source.indexOf('-->',open+4);
+      if(end<0)break;
+      out.push(' ');cursor=end+3;continue;
+    }
+    const close=source.indexOf('>',open+1);
+    if(close<0){out.push(source.slice(open));break;}
+    cursor=close+1;
+    const tag=lower.slice(open+1,close);
+    const match=/^(\/)?\s*([a-z][a-z0-9]*)/.exec(tag);
+    if(!match)continue;
+    const closing=!!match[1],name=match[2];
+    if(!closing&&HIDDEN_CONTENT.has(name)&&!tag.endsWith('/')){
+      if(unclosed.has(name))continue;
+      const end=lower.indexOf('</'+name,cursor);
+      if(end<0){
+        // Script and style run to the end of an unclosed document; a stray <title> or
+        // <head> opener is only a tag.
+        if(name==='script'||name==='style')break;
+        unclosed.add(name);continue;
+      }
+      const endClose=source.indexOf('>',end);
+      out.push(' ');cursor=endClose<0?source.length:endClose+1;continue;
+    }
+    if(name==='a'){
+      // Links do not nest; a new one closes the previous, as a browser's parser does.
+      closeLink();
+      if(!closing)link={href:hrefOf(source.slice(open+1,close)),start:out.length};
+      continue;
+    }
+    if(name==='br')out.push('\n');
+    else if(closing&&BLOCK_END.has(name))out.push('\n');
+    else if(!closing&&name==='li')out.push('\n- ');
+  }
+  closeLink();
+  return normalizeEmailText(decodeEntities(out.join('')).replace(/[ \t\u00a0]+/g,' '));
 }
 
 /** Some senders publish a broken text/plain alternative containing their CSS bundle. */
@@ -172,7 +264,10 @@ function collect(part:Part|null|undefined,into:{text:string[];html:string[];atta
   if(depth>MAX_MIME_DEPTH){into.depthLimited=true;return;}
   if(!part||typeof part!=='object'){into.malformed=true;return;}
   const mime=typeof part.mimeType==='string'?part.mimeType.toLowerCase():'';
-  const isAttachment=typeof part.filename==='string'&&!!part.filename;
+  const named=typeof part.filename==='string'&&!!part.filename;
+  // An invitation often arrives only as `invite.ics`. It is read like an inline calendar
+  // part, within a size bound, instead of being listed as an unread attachment.
+  const isAttachment=named&&!isCalendarPart(mime,part.body?.size||0);
   if(isAttachment){
     into.attachments.push({filename:part.filename!,mimeType:mime||'application/octet-stream',size:part.body?.size||0});
   }else if(typeof part.body?.data==='string'&&part.body.data){
@@ -190,32 +285,86 @@ function collect(part:Part|null|undefined,into:{text:string[];html:string[];atta
   for(const child of Array.isArray(part.parts)?part.parts:[])collect(child,into,depth+1);
 }
 
-function icsValue(ics:string,field:string){
-  const match=new RegExp(`^${field}(?:;[^:\\n]*)?:(.*)$`,'im').exec(ics.replace(/\r\n[ \t]/g,''));
-  return match?match[1].trim():undefined;
+function icsProperty(ics:string,field:string){
+  // Parameter values may be quoted, and a quoted value may contain ':' — Outlook writes
+  // TZID="(UTC-08:00) Pacific Time (US & Canada)". The value starts at the first unquoted ':'.
+  const match=new RegExp(`^${field}((?:;(?:[^:;"\\n]|"[^"\\n]*")*)*):(.*)$`,'im').exec(ics.replace(/\r?\n[ \t]/g,''));
+  return match?{params:match[1],value:match[2].trim()}:undefined;
+}
+function icsValue(ics:string,field:string){return icsProperty(ics,field)?.value;}
+
+/** Milliseconds `zone` is ahead of UTC at the instant `at`. Throws for an unknown zone. */
+function zoneOffset(at:number,zone:string){
+  const parts=Object.fromEntries(new Intl.DateTimeFormat('en-US',{timeZone:zone,hourCycle:'h23',
+    year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'})
+    .formatToParts(new Date(at)).map(part=>[part.type,part.value]));
+  return Date.UTC(Number(parts.year),Number(parts.month)-1,Number(parts.day),Number(parts.hour),Number(parts.minute),Number(parts.second))-at;
+}
+
+/**
+ * An iCalendar date-time as ISO 8601, so every consumer can read it without knowing the
+ * format. Calendar files write `20260930T090000Z`, not the extended form `Date.parse`
+ * accepts, and a local time is only meaningful with the `TZID` beside it.
+ *
+ *   - UTC (`…Z`) becomes `2026-09-30T09:00:00Z`.
+ *   - A `TZID` local time is converted to UTC in that zone, daylight saving included.
+ *   - An all-day `VALUE=DATE` becomes the date alone.
+ *   - A floating time, or one in a zone this runtime does not know, keeps its wall-clock
+ *     form with no zone; readers treat it as that day with an unknown timezone.
+ *
+ * Anything else is returned as written, which `Date.parse` may still understand.
+ */
+export function icsDateTime(params:string,value:string):string{
+  const match=/^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})?(Z)?)?$/.exec(value);
+  if(!match)return value;
+  const [,y,mo,d,h,mi,sec='00',utc]=match;
+  const date=`${y}-${mo}-${d}`;
+  if(h===undefined)return date;
+  const wall=`${date}T${h}:${mi}:${sec}`;
+  if(utc)return `${wall}Z`;
+  const zone=/;TZID=("?)([^;:"]+)\1/i.exec(params)?.[2];
+  if(!zone)return wall;
+  try{
+    const guess=Date.UTC(Number(y),Number(mo)-1,Number(d),Number(h),Number(mi),Number(sec));
+    let instant=guess-zoneOffset(guess,zone);
+    // Once more at the corrected instant, in case the guess fell across a DST change.
+    instant=guess-zoneOffset(instant,zone);
+    return new Date(instant).toISOString().replace('.000Z','Z');
+  }catch{return wall;}
 }
 
 export function parseCalendar(ics:string):CalendarInvite|undefined{
   // Extract only fields the sorter needs. This is intentionally not a general iCalendar
-  // parser; folded lines are handled by `icsValue` and all other properties are ignored.
-  if(!/BEGIN:VEVENT/i.test(ics))return undefined;
+  // parser; folded lines are handled by `icsProperty` and all other properties are ignored.
+  // Event fields come from the event itself: a VTIMEZONE block, which usually comes first,
+  // has DTSTART lines of its own describing when daylight saving began in 1970.
+  const event=/BEGIN:VEVENT[\s\S]*?(?:END:VEVENT|$)/i.exec(ics)?.[0];
+  if(!event)return undefined;
+  const start=icsProperty(event,'DTSTART'),end=icsProperty(event,'DTEND');
   return {
-    method:icsValue(ics,'METHOD'),summary:icsValue(ics,'SUMMARY'),
-    start:icsValue(ics,'DTSTART'),end:icsValue(ics,'DTEND'),
-    status:icsValue(ics,'STATUS'),uid:icsValue(ics,'UID'),
+    method:icsValue(ics,'METHOD'),summary:icsValue(event,'SUMMARY'),
+    start:start?icsDateTime(start.params,start.value):undefined,end:end?icsDateTime(end.params,end.value):undefined,
+    status:icsValue(event,'STATUS'),uid:icsValue(event,'UID'),
   };
 }
 
 export function normalizeMessage(m:GmailMessage):NormalizedMessage{
   // 1. Read headers and partition the MIME tree into its useful content types.
   const headers:Record<string,string>={};
+  // Every value for a repeated header, in the order received. `headers` keeps one value for
+  // the many callers that want a single string; unsubscribe decisions read this instead,
+  // because two List-Unsubscribe headers that disagree must be noticed rather than one
+  // silently overwriting the other.
+  const headerValues:Record<string,string[]>={};
   const found={text:[] as string[],html:[] as string[],attachments:[] as Attachment[],calendar:[] as string[],deferred:false,depthLimited:false,malformed:false};
   const payload=m.payload&&typeof m.payload==='object'?m.payload:undefined;
   if(!payload)found.malformed=true;
   if(payload?.headers!==undefined&&!Array.isArray(payload.headers))found.malformed=true;
   for(const header of Array.isArray(payload?.headers)?payload.headers:[]){
     if(!header||typeof header.name!=='string'||typeof header.value!=='string'){found.malformed=true;continue;}
-    headers[header.name.toLowerCase()]=header.value;
+    const name=header.name.toLowerCase();
+    headers[name]=header.value;
+    (headerValues[name]||=[]).push(header.value);
   }
   collect(payload,found);
 
@@ -232,6 +381,7 @@ export function normalizeMessage(m:GmailMessage):NormalizedMessage{
   const htmlOnly=!plain&&!!richHtml;
   const brokenPlain=!!(plain&&richHtml&&looksLikeLeakedCss(plain));
   let raw=brokenPlain?htmlToText(richHtml):plain||(richHtml?htmlToText(richHtml):'');
+  if((brokenPlain||!plain)&&richHtml.length>MAX_HTML_TEXT_INPUT)incompleteReasons.push('formatted-body-truncated');
   const displayHtml=richHtml&&new TextEncoder().encode(richHtml).byteLength<=HTML_DISPLAY_LIMIT?richHtml:undefined;
   if(richHtml&&!displayHtml)incompleteReasons.push('formatted-body-too-large');
   if(!raw){raw=normalizeEmailText(m.snippet||'');if(raw)incompleteReasons.push('only-snippet-available');}
@@ -263,8 +413,10 @@ export function normalizeMessage(m:GmailMessage):NormalizedMessage{
     from,to:parseParties(headers.to||''),cc:parseParties(headers.cc||''),
     subject:headers.subject||'(No subject)',
     text,quoted:quotedText,signature,html:displayHtml,
-    labels:m.labelIds||[],headers,
+    labels:m.labelIds||[],headers,headerValues,
     calendar:found.calendar.length?parseCalendar(found.calendar.join('\n')):undefined,
+    distribution:{listUnsubscribe:!!(headers['list-unsubscribe']||'').trim(),
+      bulkPrecedence:/^\s*(?:bulk|list)\b/i.test(headers.precedence||'')},
     attachments:found.attachments,
     htmlOnly,
     contentComplete:incompleteReasons.length===0,

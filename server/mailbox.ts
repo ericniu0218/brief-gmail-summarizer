@@ -1,6 +1,7 @@
 import { activeJunkPreference, automaticBaseline, composeClassification, loadOverrides, loadSenderRules, manualCorrectionView, senderRuleFor, withSenderRule } from './overrides';
 import { parseSnapshot } from './snapshots';
-import { loadMessages } from './messages';
+import { loadMessages, snapshotSentIds } from './messages';
+import { isBlocked, loadBlockedSenders, type BlockedSender } from './blocked';
 import { ALL_INBOXES, getOwnedConnection, ownedConnections } from './gmail';
 import type { Runtime } from './runtime';
 import type { StoredEmail } from './sync';
@@ -18,11 +19,12 @@ export async function readMailbox(user:string,requested:string,e:Runtime){
   const connections=requested===ALL_INBOXES
     ? await ownedConnections(user,e)
     : [await getOwnedConnection(user,requested,e)];
-  if(!connections.length)return {emails:[],accounts:[],ai:false,updated:null,pending:0,skipped:0,hasMore:false};
+  if(!connections.length)return {emails:[],accounts:[],blocked:[],ai:false,updated:null,pending:0,skipped:0,hasMore:false};
 
   const now=Date.now();
   const emails:StoredEmail[]=[];
   const accounts=[];
+  const blocked:(BlockedSender&{accountEmail:string})[]=[];
   let pending=0,skipped=0,hasMore=false,updated:number|null=null,ai=true;
   for(const c of connections){
     const stored=await e.DB.prepare('SELECT data FROM snapshots WHERE account_id = ? AND user_id = ?').bind(c.id,user).first<{data:string}>();
@@ -31,14 +33,22 @@ export async function readMailbox(user:string,requested:string,e:Runtime){
     const rows=await loadMessages(user,c.id,e);
     accounts.push({id:c.id,email:c.email,lastSync:c.last_sync,error:c.error||(stored&&!snapshot?'Cached mailbox summary is damaged. Refresh Gmail to repair it.':null),loaded:!!snapshot||rows.length>0,
       pending:snapshot?.pending||0,skipped:snapshot?.skipped||0,hasMore:!!snapshot?.hasMore});
+    const blockedRows=await loadBlockedSenders(user,c.id,e);
+    blocked.push(...blockedRows.map(row=>({...row,accountEmail:c.email})));
     if(!snapshot&&!rows.length){ai=false;continue;}
     // New databases store one row per email. A legacy snapshot remains a read-only
-    // fallback until its first sync imports those records.
-    const accountEmails=rows.length?rows:(snapshot?.emails||[]).filter((email):email is StoredEmail=>!!email&&typeof email==='object'&&typeof email.id==='string');
+    // fallback until its first sync imports those records. Blocked senders are left out
+    // here, when the view is read, and only here: their mail stays stored untouched.
+    const hidden=new Set(blockedRows.map(row=>row.address));
+    const accountEmails=(rows.length?rows:(snapshot?.emails||[]).filter((email):email is StoredEmail=>!!email&&typeof email==='object'&&typeof email.id==='string'))
+      .filter(email=>!isBlocked(hidden,email.address));
+    // Judged on the snapshot as written: completing a damaged record invents a false badge.
+    const sentInSnapshot=rows.length?new Set<string>():snapshotSentIds(stored?.data);
     const overrides=await loadOverrides(user,c.id,e,accountEmails.map(email=>email.id));
     const senderRules=await loadSenderRules(user,c.id,e);
     for(const email of accountEmails){
-      const source={...email,accountId:c.id,accountEmail:c.email};
+      // A legacy snapshot predates the replied marker; its send is read from the record.
+      const source={...email,accountId:c.id,accountEmail:c.email,replied:email.replied||(!rows.length&&sentInSnapshot.has(email.id))};
       if(!email.classification&&!email.automaticClassification){emails.push(source);continue;}
       const automatic=automaticBaseline(email.automaticClassification)??automaticBaseline(email.classification);
       const manual=overrides.get(email.id),senderRule=senderRuleFor(senderRules,email.address);
@@ -49,7 +59,7 @@ export async function readMailbox(user:string,requested:string,e:Runtime){
         manuallyCorrected:manual?.active!==false&&!!manual,manualCorrection:manualCorrectionView(manual),
         automaticClassificationAvailable:false});continue;}
       const {classification,category,tags,priority,label}=composeClassification(automatic,effective,now);
-      emails.push({...source,automaticClassification:automatic,classification,category,tags,priority,label,
+      emails.push({...source,automaticClassification:automatic,classification,category,tags,priority,label,needsReply:!source.replied&&classification.replyRequired,
         correctionRevision:manual?.revision??0,manuallyCorrected:manual?.active!==false&&!!manual,
         manualCorrection:manualCorrectionView(manual),
         senderJunkPreference:activeJunkPreference(senderRule),senderRuleRevision:senderRule?.revision??0,
@@ -66,5 +76,5 @@ export async function readMailbox(user:string,requested:string,e:Runtime){
     if(aAt!==bAt)return bAt-aAt;
     return `${a.accountId}:${a.id}`.localeCompare(`${b.accountId}:${b.id}`);
   });
-  return {emails,accounts,ai,updated,pending,skipped,hasMore};
+  return {emails,accounts,blocked,ai,updated,pending,skipped,hasMore};
 }

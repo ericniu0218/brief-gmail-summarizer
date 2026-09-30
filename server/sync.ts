@@ -1,10 +1,12 @@
-import { accessToken, emailFrom, getOwnedConnection, gmail, safeUnsubscribe } from './gmail';
+import { accessToken, emailFrom, getOwnedConnection, gmail } from './gmail';
+import { describeUnsubscribe } from './unsubscribe';
 import { hydrateDeferredBodies, normalizeMessage, type GmailMessage, type NormalizedMessage } from './message';
-import { classifyMessages } from './classify';
+import { classifyMessages, recheckModelResult } from './classify';
 import { activeJunkPreference, applyOverride, automaticBaseline, contentFingerprint, loadOverrides, loadSenderRules, manualCorrectionView, senderRuleFor, withSenderRule } from './overrides';
 import { parseSnapshot } from './snapshots';
-import { loadMessageMap, loadMessages, parseStoredEmail } from './messages';
+import { loadMessageMap, loadMessages, parseStoredEmail, snapshotSentIds } from './messages';
 import { deterministicClassify } from '@/lib/deterministic';
+import { POLICY_VERSION, type Classification } from '@/lib/classification';
 import { analysisVersion, summarize } from './ai';
 import { HttpError, type Runtime } from './runtime';
 import type { Email } from '@/lib/mail';
@@ -27,7 +29,28 @@ export type StoredEmail=Email&{
   classifiedAt?:number;
   /** Full-mailbox scan that most recently observed this Gmail message. */
   syncGeneration?:string;
+  /** Reply send receipt from mailbox_messages, independent of a task correction. */
+  replied?:boolean;
 };
+/**
+ * The content and classification rules a completed full scan has applied to every stored
+ * message. An incremental refresh only revisits the last two days, so raising this is how a
+ * rule change reaches older mail: each account runs one full scan, page by page through the
+ * existing cursor, and records this value only when that scan reaches its last page.
+ *
+ * 1: structured content (quoted history, signatures, calendar invitations).
+ * 2: promotional-purpose checks (sales calls to action are never required tasks).
+ * 3: contextual purpose checks and local rule upgrades.
+ * 4: audit fixes — calendar-file dates, month-end and year rollover, every task per kind,
+ *    sentence-scoped optional wording and meeting state, earned-record protection.
+ */
+export const CONTENT_VERSION=4;
+
+/** Whether a stored result came from the model. Older records carry only its version. */
+function fromModel(hit:Pick<StoredEmail,'classificationSource'|'analysisVersion'>|undefined){
+  return !!hit&&(hit.classificationSource==='ai'||(!hit.classificationSource&&/^gemini:/.test(hit.analysisVersion||'')));
+}
+
 export type Snapshot={emails:StoredEmail[];ai:boolean;pending:number;skipped:number;analysisVersion:string;updated:number;limit:number;hasMore:boolean};
 export async function summarizeInbox(emails:Email[],e:Runtime){
   try{return await summarize(emails,e);}
@@ -48,8 +71,8 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
   // The token returned by this atomic update identifies both the connection and the
   // refresh that acquired the lease. Concurrent refreshes stop here with a conflict.
   // The lease is per account row, so refreshing one mailbox never blocks another.
-  const lock=await e.DB.prepare('UPDATE connections SET sync_lock = ? WHERE id = ? AND user_id = ? AND sync_lock < ? RETURNING token, sync_page_token, sync_generation, sync_skipped, sync_full_scan, backfill_complete, last_full_scan, content_version')
-    .bind(leaseUntil,accountId,user,now).first<{token:string;sync_page_token:string|null;sync_generation:string|null;sync_skipped:number;sync_full_scan:number;backfill_complete:number;last_full_scan:number|null;content_version:number}>();
+  const lock=await e.DB.prepare('UPDATE connections SET sync_lock = ? WHERE id = ? AND user_id = ? AND sync_lock < ? RETURNING token, sync_page_token, sync_generation, sync_skipped, sync_full_scan, backfill_complete, last_full_scan, content_version, recovery_needed')
+    .bind(leaseUntil,accountId,user,now).first<{token:string;sync_page_token:string|null;sync_generation:string|null;sync_skipped:number;sync_full_scan:number;backfill_complete:number;last_full_scan:number|null;content_version:number;recovery_needed:number}>();
   if(!lock)throw new HttpError(409,'This inbox is already being refreshed.');
   // Long backfills renew their lease at each expensive boundary. The exact previous
   // expiry and credential must still match, so a stale or reconnected worker cannot
@@ -71,7 +94,19 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
     const generation=lock.sync_generation||`${now.toString(36)}-${crypto.randomUUID()}`;
     // After the first complete backfill, ordinary refreshes scan only a two-day overlap.
     // A monthly full reconciliation removes messages deleted outside the application.
-    const fullScan=pageToken?lock.sync_full_scan!==0:lock.content_version<1||!lock.backfill_complete||!lock.last_full_scan||now-lock.last_full_scan>=30*86400000;
+    // An account whose mail an earlier version deleted is reconciled against Gmail. The
+    // request only widens the *next* scan to start: a scan already in progress keeps its
+    // saved cursor, because restarting it would lose its position and the partial results
+    // already written. Nothing is cleared up front, so the visible inbox is never emptied
+    // while the scan runs; messages still in Gmail are simply written back as it passes.
+    // A count of outstanding requests, not a flag: one added while this scan runs must
+    // survive this scan's completion, which clears only the requests it saw at the start.
+    const recovering=lock.recovery_needed>0;
+    // Guards left by an older instance's unsubscribe only need to outlast that instance's
+    // own follow-up delete, which runs immediately. The recovery the same insert scheduled
+    // restores anything that got through.
+    await e.DB.prepare('DELETE FROM legacy_unsubscribe_guards WHERE account_id=? AND user_id=?').bind(accountId,user).run();
+    const fullScan=pageToken?lock.sync_full_scan!==0:recovering||lock.content_version<CONTENT_VERSION||!lock.backfill_complete||!lock.last_full_scan||now-lock.last_full_scan>=30*86400000;
     const query=encodeURIComponent(`${fullScan?'':'newer_than:2d '}-in:sent -in:trash -in:spam -in:drafts`);
     let list:{messages?:{id:string}[];nextPageToken?:string};
     try{list=await gmail(`messages?maxResults=100&q=${query}${pageToken?`&pageToken=${encodeURIComponent(pageToken)}`:''}`,token);}
@@ -89,11 +124,14 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
     const old=previous?parseSnapshot(previous.data):undefined;
     const currentAnalysisVersion=analysisVersion(e);
     // Import a legacy snapshot once. Subsequent reads and writes use bounded message rows.
+    const sentInSnapshot=snapshotSentIds(previous?.data);
     const legacy=(old?.emails||[]).map(email=>email&&typeof email==='object'?parseStoredEmail(JSON.stringify(email)):undefined).filter((email):email is StoredEmail=>!!email);
     const existingCount=await e.DB.prepare('SELECT COUNT(*) count FROM mailbox_messages WHERE account_id=? AND user_id=?').bind(accountId,user).first<{count:number}>();
     if(!existingCount?.count&&legacy.length)for(let i=0;i<legacy.length;i+=50){
-      await e.DB.batch(legacy.slice(i,i+50).map(email=>e.DB.prepare('INSERT OR IGNORE INTO mailbox_messages (user_id,account_id,message_id,data,received_at,scan_generation) VALUES (?,?,?,?,?,?)')
-        .bind(user,accountId,email.id,JSON.stringify(email),email.receivedAt||0,email.syncGeneration||'legacy')));
+      // The replied column is filled from the record, so a send made before the column
+      // existed survives the next sync rewriting this row.
+      await e.DB.batch(legacy.slice(i,i+50).map(email=>e.DB.prepare('INSERT OR IGNORE INTO mailbox_messages (user_id,account_id,message_id,data,received_at,scan_generation,replied) VALUES (?,?,?,?,?,?,?)')
+        .bind(user,accountId,email.id,JSON.stringify(email),email.receivedAt||0,email.syncGeneration||'legacy',email.replied||sentInSnapshot.has(email.id)?1:0)));
     }
     const normalized:NormalizedMessage[]=[];
     const refs=list.messages||[];
@@ -117,22 +155,45 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
     }
     const overrides=await loadOverrides(user,accountId,e,normalized.map(message=>message.id));
     const senderRules=await loadSenderRules(user,accountId,e);
-    // Reuse a stored classification only when the content and the classifier version
+    // Reuse a stored classification only when the content and the rules that produced it
     // both still match. Reading or refreshing never triggers reclassification.
+    //
+    // A model result and a rule-based one are kept apart, because they mean different
+    // things. A model result under older rules keeps the model's facts and has only the
+    // current purpose checks applied, so a rule change never bills the whole mailbox and
+    // never throws away a task only the model recognised. A rule-based result is a stand-in
+    // whenever a model is configured — the model failed, or was not configured when the
+    // message arrived — so it goes back to the model rather than being relabelled as if the
+    // model had produced it.
+    const aiConfigured=!!e.GEMINI_API_KEY;
+    const localVersion=`${POLICY_VERSION}:deterministic`;
+    const rechecked=new Map<string,Classification>();
     const reusable=(message:NormalizedMessage)=>{
+      if(rechecked.has(message.id))return rechecked.get(message.id);
       const hit=cached.get(message.id);
       const automatic=automaticBaseline(hit?.automaticClassification)??automaticBaseline(hit?.classification);
-      if(!automatic||automatic.processingStatus==='failed')return undefined;
-      if(hit?.fingerprint!==contentFingerprint(message))return undefined;
-      return hit?.analysisVersion===currentAnalysisVersion?automatic:undefined;
+      if(!hit||!automatic||automatic.processingStatus==='failed')return undefined;
+      const current=hit.fingerprint===contentFingerprint(message);
+      // A fingerprint written before campaign evidence was part of it still identifies the
+      // same content; only the checks that read that evidence need to run again.
+      if(!current&&hit.fingerprint!==contentFingerprint(message,true))return undefined;
+      if(fromModel(hit)){
+        if(current&&automatic.version===POLICY_VERSION)return automatic;
+        const updated=recheckModelResult(automatic,message,account);
+        rechecked.set(message.id,updated);
+        return updated;
+      }
+      if(aiConfigured)return undefined;
+      if(current&&automatic.version===localVersion)return automatic;
+      const updated=deterministicClassify(message,account);
+      rechecked.set(message.id,updated);
+      return updated;
     };
     const fresh=normalized.filter(message=>!reusable(message));
     // Only new or changed content crosses the model boundary.
     await renewLease();
     const {results,failures}=await classifyMessages(fresh,account,e);
     await renewLease();
-    const removed=await e.DB.prepare('SELECT address FROM unsubscribed WHERE account_id = ? AND user_id = ?').bind(accountId,user).all<{address:string}>();
-    const muted=new Set(removed.results.map(r=>r.address));
     let pending=0;
     const pageEmails:StoredEmail[]=[];
     for(const message of normalized){
@@ -144,8 +205,11 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
         if(!classification){
           // The deterministic classifier keeps the inbox usable during model failures;
           // failed model results stay visible as review items instead of disappearing.
-          classification={...deterministicClassify(message,account),processingStatus:failures.has(message.id)?'needs_review':'classified',
-            uncertainty:failures.get(message.id)||undefined};
+          const local=deterministicClassify(message,account);
+          // A model failure is the more urgent thing to say; otherwise keep the classifier's
+          // own note, such as incomplete content or only being copied.
+          classification={...local,processingStatus:failures.has(message.id)?'needs_review':local.processingStatus,
+            uncertainty:failures.get(message.id)||local.uncertainty};
         }
         // The snapshot retains `classification` as the effective display value for old
         // clients, but `automaticClassification` is the clean cache used by every future
@@ -153,7 +217,7 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
         const manual=overrides.get(message.id),senderRule=senderRuleFor(senderRules,message.from.address);
         const effective=withSenderRule(manual,senderRule,message.id);
         const email=emailFrom(message,applyOverride(classification,effective));
-        if(muted.has(email.address))continue;
+        const plan=describeUnsubscribe(message,e);
         // Each stored message remembers its source mailbox so the combined view can
         // attribute it and every action can target the right account.
         pageEmails.push({...email,accountId,accountEmail:account,automaticClassification:classification,
@@ -162,12 +226,17 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
           senderJunkPreference:activeJunkPreference(senderRule),senderRuleRevision:senderRule?.revision??0,
           automaticClassificationAvailable:true,
           fingerprint:contentFingerprint(message),
-          analysisVersion:results.has(message.id)?currentAnalysisVersion:stored?cached.get(message.id)!.analysisVersion:'',
-          classificationSource:results.has(message.id)?'ai':stored?(cached.get(message.id)?.classificationSource||'deterministic'):'deterministic',
+          // Only a model call made now earns the current model version. A result checked
+          // again under new rules keeps the version of the model that actually produced it.
+          analysisVersion:results.has(message.id)?currentAnalysisVersion:stored?cached.get(message.id)!.analysisVersion||'':'',
+          classificationSource:results.has(message.id)||(stored&&fromModel(cached.get(message.id)))?'ai':'deterministic',
           classificationPending:failures.has(message.id),
           classifiedAt:results.has(message.id)||!stored?Date.now():cached.get(message.id)?.classifiedAt,
           syncGeneration:generation,
-          oneClick:!!(email.oneClick&&email.unsubscribe&&safeUnsubscribe(email.unsubscribe,e))});
+          // Both come from one call, so the flag the older interface reads and the richer
+          // capability can never disagree about the same message.
+          oneClick:plan.capability==='one-click',unsubscribeCapability:plan.capability,
+          listId:plan.identity.listId});
         if(failures.has(message.id))pending++;
       }catch{
         // A corrupt cached classification or override affects only its own message.
@@ -182,13 +251,14 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
     for(let i=0;i<pageEmails.length;i+=50){
       await renewLease();
       await e.DB.batch(pageEmails.slice(i,i+50).map(email=>
-      // Recheck unsubscribe state inside the write, closing the gap between the earlier
-      // sender lookup and this upsert. Preserve a successful reply recorded concurrently.
-      e.DB.prepare("INSERT INTO mailbox_messages (user_id,account_id,message_id,data,received_at,scan_generation,replied) SELECT ?,?,?,?,?,?,0 WHERE NOT EXISTS (SELECT 1 FROM unsubscribed WHERE account_id=? AND user_id=? AND address=?) ON CONFLICT(account_id,message_id) DO UPDATE SET data=CASE WHEN mailbox_messages.replied=1 THEN json_set(excluded.data,'$.needsReply',json('false')) ELSE excluded.data END,received_at=excluded.received_at,scan_generation=excluded.scan_generation")
-        .bind(user,accountId,email.id,JSON.stringify(email),email.receivedAt||0,generation,accountId,user,email.address)));
+      // Every message Gmail returns is stored. Asking a newsletter to stop sending says
+      // nothing about what this mailbox should show: the sender still controls delivery, and
+      // its receipts and account notices must keep arriving normally. Preserve a successful
+      // reply recorded concurrently.
+      e.DB.prepare("INSERT INTO mailbox_messages (user_id,account_id,message_id,data,received_at,scan_generation,replied) VALUES (?,?,?,?,?,?,0) ON CONFLICT(account_id,message_id) DO UPDATE SET data=CASE WHEN mailbox_messages.replied=1 THEN json_set(excluded.data,'$.needsReply',json('false')) ELSE excluded.data END,received_at=excluded.received_at,scan_generation=excluded.scan_generation")
+        .bind(user,accountId,email.id,JSON.stringify(email),email.receivedAt||0,generation)));
     }
     await renewLease();
-    for(const address of muted)await e.DB.prepare('DELETE FROM mailbox_messages WHERE account_id=? AND user_id=? AND json_extract(data,\'$.address\')=?').bind(accountId,user,address).run();
     if(fullScan&&!list.nextPageToken){
       await e.DB.prepare('DELETE FROM mailbox_messages WHERE account_id=? AND user_id=? AND scan_generation<>?').bind(accountId,user,generation).run();
       // Once Gmail confirms a message is absent, its correction can no longer be reached
@@ -213,10 +283,16 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
       previous
         ?e.DB.prepare('UPDATE snapshots SET data=?, updated=?, revision=revision+1 WHERE account_id=? AND user_id=? AND revision=? AND EXISTS (SELECT 1 FROM connections WHERE id=? AND user_id=? AND token=? AND sync_lock=? AND sync_lock>?)').bind(JSON.stringify(snapshot),snapshot.updated,accountId,user,previous.revision,accountId,user,lock.token,leaseUntil,snapshot.updated)
         :e.DB.prepare('INSERT INTO snapshots (account_id,user_id,data,updated,revision) SELECT ?,?,?,?,0 WHERE EXISTS (SELECT 1 FROM connections WHERE id=? AND user_id=? AND token=? AND sync_lock=? AND sync_lock>?) ON CONFLICT(account_id) DO NOTHING').bind(accountId,user,JSON.stringify(snapshot),snapshot.updated,accountId,user,lock.token,leaseUntil,snapshot.updated),
-      e.DB.prepare('UPDATE connections SET last_sync=?,sync_lock=0,error=NULL,sync_page_token=?,sync_generation=?,sync_skipped=?,sync_full_scan=?,backfill_complete=?,last_full_scan=?,content_version=? WHERE id=? AND user_id=? AND token=? AND sync_lock=? AND sync_lock>?')
+      e.DB.prepare('UPDATE connections SET last_sync=?,sync_lock=0,error=NULL,sync_page_token=?,sync_generation=?,sync_skipped=?,sync_full_scan=?,backfill_complete=?,last_full_scan=?,content_version=?,recovery_needed=MAX(recovery_needed-?,0) WHERE id=? AND user_id=? AND token=? AND sync_lock=? AND sync_lock>?')
         .bind(snapshot.updated,list.nextPageToken||null,list.nextPageToken?generation:null,list.nextPageToken?totalSkipped:0,fullScan?1:0,
           fullScan&&!list.nextPageToken?1:lock.backfill_complete,fullScan&&!list.nextPageToken?snapshot.updated:lock.last_full_scan,
-          fullScan&&!list.nextPageToken?1:lock.content_version,accountId,user,lock.token,leaseUntil,snapshot.updated),
+          fullScan&&!list.nextPageToken?CONTENT_VERSION:lock.content_version,
+          // Cleared only by a full scan that reached its last page, and only by the number
+          // of requests it saw at the start. This write already requires the lease and the
+          // credential to be unchanged, so an interrupted or superseded recovery leaves the
+          // count and the next refresh resumes it.
+          recovering&&fullScan&&!list.nextPageToken?lock.recovery_needed:0,
+          accountId,user,lock.token,leaseUntil,snapshot.updated),
     ]);
     if(!writes[0].meta.changes)throw new HttpError(409,'This Gmail connection or refresh changed. Please refresh the inbox again.');
     return {...snapshot,emails:await loadMessages(user,accountId,e)};

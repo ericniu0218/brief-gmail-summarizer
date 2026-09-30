@@ -8,7 +8,7 @@ import { rowLabels } from '@/lib/categories';
 /** At most two compact labels per row; the conversation panel carries the full set. */
 function rowChips(email:Email,important:boolean){
   const tags=rowLabels(email).map(text=>({text,important:false,review:false}));
-  const chips=important?[{text:'Important',important:true,review:false},...tags]:tags.length?tags:[{text:email.label||'Mail',important:false,review:false}];
+  const chips=important?[{text:'Important',important:true,review:false},...tags]:tags.length?tags:[{text:(email.label==='Important'?'Mail':email.label)||'Mail',important:false,review:false}];
   // Awaiting review is a status, not urgency, so it never claims the Important slot.
   const review=email.classification?.processingStatus==='needs_review';
   return (review?[{text:'Needs review',important:false,review:true},...chips]:chips).slice(0,2);

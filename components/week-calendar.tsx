@@ -3,7 +3,7 @@
 import { useEffect, useId, useMemo, useState } from 'react';
 import { ArrowUpRight, CalendarDays, ChevronDown, ChevronLeft, ChevronRight, X } from 'lucide-react';
 import { emailKey, type Email } from '@/lib/mail';
-import { byEventTime, dateKey, emailDates, monthGrid, weekDays } from '@/lib/calendar';
+import { byEventTime, dateKey, emailDates, eventMinutes, monthGrid, weekDays } from '@/lib/calendar';
 
 type CalendarMode = 'day' | 'week' | 'month';
 const MODES: { id: CalendarMode; name: string }[] = [
@@ -21,14 +21,18 @@ const WEEKDAY_INITIALS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
  * the arrow beside it is a separate control that opens the message itself, so browsing
  * the day and leaving it are never the same click.
  */
-function AgendaItem({email,expanded,onToggle,onSelect}:{email:Email;expanded:boolean;onToggle:()=>void;onSelect:(email:Email)=>void}){
+function AgendaItem({email,day,expanded,onToggle,onSelect}:{email:Email;day:string;expanded:boolean;onToggle:()=>void;onSelect:(email:Email)=>void}){
   // React supplies a unique, hydration-safe relationship between this disclosure button
   // and its detail panel. Sanitising message keys could make distinct keys collide.
   const detailId=`agenda-detail-${useId().replace(/:/g,'')}`;
+  const minutes=eventMinutes(email,day);
+  const statedTime=minutes===undefined?'':new Date(2020,0,1,Math.floor(minutes/60),minutes%60)
+    .toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
   return <li>
     <div className="calendar-agenda-row">
       <button type="button" className="calendar-agenda-summary" aria-expanded={expanded} aria-controls={detailId}
         onClick={onToggle}>{email.subject}</button>
+      {statedTime&&<small className="calendar-agenda-time">{statedTime}</small>}
       <button type="button" className="calendar-agenda-open" aria-label={`Open ${email.subject}`}
         onClick={() => onSelect(email)}><ArrowUpRight size={14}/></button>
     </div>
@@ -39,7 +43,7 @@ function AgendaItem({email,expanded,onToggle,onSelect}:{email:Email;expanded:boo
   </li>;
 }
 
-function AgendaList({ items, onSelect }: { items: Email[]; onSelect: (email: Email) => void }) {
+function AgendaList({ items, day, onSelect }: { items: Email[]; day:string; onSelect: (email: Email) => void }) {
   // One open at a time: the card is narrow, and keeping several expanded would undo the
   // compactness this list exists for.
   const [open, setOpen] = useState<string | null>(null);
@@ -47,7 +51,7 @@ function AgendaList({ items, onSelect }: { items: Email[]; onSelect: (email: Ema
     {items.map(email => {
       const key = emailKey(email);
       const expanded = open === key;
-      return <AgendaItem key={key} email={email} expanded={expanded}
+      return <AgendaItem key={key} email={email} day={day} expanded={expanded}
         onToggle={() => setOpen(expanded ? null : key)} onSelect={onSelect}/>;
     })}
   </ul>;
@@ -187,13 +191,13 @@ export function WeekCalendar({ emails, demo, onSelect }: { emails: Email[]; demo
           <strong>{openDay.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}</strong>
           <button type="button" aria-label="Close day" onClick={() => setSelected(null)}><X size={13}/></button>
         </div>
-        {openEvents.length ? <AgendaList items={openEvents} onSelect={onSelect}/> : <p>No events on this day.</p>}
+        {openEvents.length ? <AgendaList items={openEvents} day={selected||''} onSelect={onSelect}/> : <p>No events on this day.</p>}
       </section>}
     </div>}
 
     {mode !== 'month' && <div className="calendar-agenda" aria-live="polite">
       <h3>{agendaDate.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}</h3>
-      {agenda.length ? <AgendaList items={agenda} onSelect={onSelect}/> : <p>No dated emails for this day.</p>}
+      {agenda.length ? <AgendaList items={agenda} day={agendaKey} onSelect={onSelect}/> : <p>No dated emails for this day.</p>}
     </div>}
   </section>;
 }

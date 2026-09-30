@@ -8,7 +8,9 @@ import type { Tag } from '@/lib/categories';
  */
 
 const DEFAULT_GEMINI_MODEL='gemini-3.5-flash-lite';
-const PROMPT_VERSION='2026-09-21-categories';
+// Changing the classification instructions or the shared purpose checks invalidates every
+// cached model result, so existing mail is reclassified rather than keeping old answers.
+const PROMPT_VERSION='2026-09-29-purpose-context';
 function geminiModel(e:Runtime){return (e.GEMINI_MODEL||DEFAULT_GEMINI_MODEL).replace(/^models\//,'');}
 export function analysisVersion(e:Runtime){return `gemini:${geminiModel(e)}:${PROMPT_VERSION}`;}
 type JsonSchema={type?:string;enum?:unknown[];properties?:Record<string,JsonSchema>;required?:string[];additionalProperties?:boolean;items?:JsonSchema;minItems?:number;maxItems?:number;minimum?:number;maximum?:number};
@@ -122,10 +124,21 @@ const toneGuide:Record<string,string>={
   Friendly:'Warm and conversational. Contractions, a personal opening line, and an encouraging close, while still answering the request.',
   Professional:'Measured and businesslike. Complete sentences, explicit next steps, and a formal greeting and sign-off.',
 };
-export function replyOptions(email:Email,tone:string,variation=0,e=runtime()) {
+/**
+ * The sign-off instruction. A name is used only when the caller knows it for certain — the
+ * sample inbox's fixed persona. A connected mailbox has no trusted display name (Gmail's
+ * profile supplies only the address), so the reply closes without one rather than signing
+ * with a name that belongs to somebody else.
+ */
+function signOff(signer?:string){
+  return signer?`signed as ${signer}`:'ending with a sign-off but no name, which the user adds themselves; never invent or guess a name';
+}
+/** The sample inbox's persona, whose mail is addressed to "Alex". Never used for real mail. */
+export const SAMPLE_SIGNER='Alex';
+export function replyOptions(email:Email,tone:string,variation=0,e=runtime(),signer?:string) {
   // This only drafts text; sending remains a separate explicit Gmail action.
   return generate<{options:string[]}>(
-    'Draft three complete email replies for the user to review, each signed as Alex. Tone: '+tone+'. '+(toneGuide[tone]||toneGuide.Concise)+
+    `Draft three complete email replies for the user to review, each ${signOff(signer)}. Tone: `+tone+'. '+(toneGuide[tone]||toneGuide.Concise)+
     ' Let the tone shape every option, not only the greeting and sign-off: change the sentence structure, length, and word choice to match it.'+
     ' The three options must be genuinely different from each other: vary the angle, structure, opening line, and phrasing so none reads like a light reword of another.'+
     (variation?' This is a regeneration. Take different angles than a previous batch would have and reuse none of its phrasing.':'')+
@@ -133,9 +146,9 @@ export function replyOptions(email:Email,tone:string,variation=0,e=runtime()) {
     {sender:email.sender,subject:email.subject,body:email.body.slice(0,7000),tone,attempt:variation,seed:crypto.randomUUID()},
     {type:'object',properties:{options:{type:'array',minItems:3,maxItems:3,items:{type:'string'}}},required:['options'],additionalProperties:false},e);
 }
-export function polishReply(email:Email,notes:string,tone:string,e=runtime()) {
+export function polishReply(email:Email,notes:string,tone:string,e=runtime(),signer?:string) {
   return generate<{reply:string}>(
-    'The `notes` field is the user’s own rough description of what they want to say in reply to this email; the `body` field is the original message, given only for context. Turn the notes into one complete, well-written email reply, signed as Alex. Tone: '+tone+'. '+(toneGuide[tone]||toneGuide.Concise)+
+    `The \`notes\` field is the user’s own rough description of what they want to say in reply to this email; the \`body\` field is the original message, given only for context. Turn the notes into one complete, well-written email reply, ${signOff(signer)}. Tone: `+tone+'. '+(toneGuide[tone]||toneGuide.Concise)+
     ' Preserve every fact, number, name, and decision the notes state, and only those — fix grammar, wording, and structure, but do not add approvals, availability, promises, or information the notes did not include.'+
     ' Do not include subject headers. Never send anything.',
     {sender:email.sender,subject:email.subject,body:email.body.slice(0,7000),notes:notes.slice(0,4000),tone,seed:crypto.randomUUID()},

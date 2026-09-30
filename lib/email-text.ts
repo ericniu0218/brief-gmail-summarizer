@@ -6,12 +6,22 @@
  * in the reader. This is also safe to apply to old records at display time.
  */
 export function normalizeEmailText(value:string){
-  return value
-    .replace(/\r\n?/g,'\n')
-    .replace(/[\t ]+$/gm,'')
+  return trimLineEnds(value.replace(/\r\n?/g,'\n'))
     .replace(/\n[\t ]+\n/g,'\n\n')
     .replace(/\n{3,}/g,'\n\n')
     .trim();
+}
+
+/**
+ * Trailing spaces and tabs removed from every line. Done by hand: `/[\t ]+$/gm` restarts at
+ * every space of a long run that is followed by text, which is quadratic in the run.
+ */
+function trimLineEnds(value:string){
+  return value.split('\n').map(line=>{
+    let end=line.length;
+    while(end&&(line.charCodeAt(end-1)===32||line.charCodeAt(end-1)===9))end--;
+    return end===line.length?line:line.slice(0,end);
+  }).join('\n');
 }
 
 export type EmailTextPart=

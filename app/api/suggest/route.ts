@@ -1,5 +1,5 @@
-import { polishReply, replyOptions } from '@/server/ai';
-import { failure, HttpError, inputObject, json, mutation, userId } from '@/server/runtime';
+import { polishReply, replyOptions, SAMPLE_SIGNER } from '@/server/ai';
+import { failure, HttpError, inputObject, json, mutation, runtime, userId } from '@/server/runtime';
 import { demoEmails } from '@/lib/mail';
 
 /** Generates reply suggestions for the fixed demo inbox without touching Gmail. */
@@ -15,9 +15,9 @@ export async function POST(request:Request){
     if(input.action==='polish'){
       if(typeof input.notes!=='string'||!input.notes.trim())throw new HttpError(400,'Describe what you want to say first.');
       if(input.notes.length>4000)throw new HttpError(400,'Keep your notes under 4,000 characters.');
-      return json(await polishReply(email,input.notes,tone));
+      return json(await polishReply(email,input.notes,tone,runtime(),SAMPLE_SIGNER));
     }
     const variation=typeof input.variation==='number'&&Number.isInteger(input.variation)?Math.min(Math.max(input.variation,0),50):0;
-    return json(await replyOptions(email,tone,variation));
+    return json(await replyOptions(email,tone,variation,runtime(),SAMPLE_SIGNER));
   }catch(error){return failure(error);}
 }

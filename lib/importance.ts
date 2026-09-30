@@ -1,4 +1,4 @@
-import { appliesToUser, DUE_SOON_MS, effectiveClassification, isResolved, MEETING_SOON_MS, obligationDueAt, type Classification, type Obligation } from './classification';
+import { appliesToUser, DUE_SOON_MS, effectiveClassification, isResolved, MEETING_SOON_MS, obligationDueAt, relevantDueAt, type Classification, type Obligation } from './classification';
 import type { Email } from './mail';
 
 /**
@@ -88,13 +88,13 @@ function hasFutureReceivedAt(email:Pick<Email,'receivedAt'>,now:number){
 export function isUpcomingMeeting(obligation: Obligation, now: number, windowMs: number = IMPORTANCE.meetingWindow) {
   if (!obligation || obligation.kind !== 'meeting') return false;
   if (isResolved(obligation) || obligation.meetingState === 'cancelled') return false;
-  const due = obligationDueAt(obligation);
+  const due = relevantDueAt(obligation);
   return due !== undefined && due >= now && due - now <= windowMs;
 }
 
 /** Rates one live obligation. Callers filter out resolved and other people's work first. */
 function rateObligation(obligation: Obligation, received: number | undefined, now: number, futureReceived=false): Importance {
-  const due = obligationDueAt(obligation);
+  const due = relevantDueAt(obligation);
   const meeting = obligation.kind === 'meeting';
 
   if (due !== undefined) {
@@ -210,8 +210,8 @@ export function evaluateImportance(email: Email, now: number): Importance {
   // meeting tomorrow must surface for the meeting.
   for (const obligation of live) {
     const candidate = rateObligation(obligation, received, now, futureReceived);
-    const better = !best || candidate.rank < best.rank
-      || (candidate.rank === best.rank && (candidate.dueAt ?? Infinity) < (best.dueAt ?? Infinity));
+    const better = !best || (candidate.important&&!best.important) || (candidate.important===best.important &&
+      (candidate.rank < best.rank || (candidate.rank === best.rank && (candidate.dueAt ?? Infinity) < (best.dueAt ?? Infinity))));
     if (better) best = candidate;
   }
 
@@ -219,7 +219,7 @@ export function evaluateImportance(email: Email, now: number): Importance {
   // message is genuine, and an old one is history like anything else.
   if (classification.securityEvent && received !== undefined && now - received <= IMPORTANCE.recentRequest) {
     const security = at('recent-request', true, 'recent-security-event', 'A recent account or security notice.');
-    if (!best || security.rank < best.rank) best = security;
+    if (!best || !best.important || security.rank < best.rank) best = security;
   }
 
   return best ?? at('routine', false, 'no-current-obligation', 'Nothing here needs attention now.');

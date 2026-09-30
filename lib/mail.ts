@@ -30,6 +30,11 @@ export type Email = {
   senderJunkPreference?:'junk'|'not-junk';
   senderRuleRevision?:number;
   receivedAt?: number; messageId?: string; unsubscribe?: string; oneClick?: boolean;
+  /** What the app can do about this message's newsletter; see lib/unsubscribe. */
+  unsubscribeCapability?: import('./unsubscribe').UnsubscribeCapability;
+  /** The newsletter this message belongs to, when it named one. Two lists from one sender
+   *  have different values, so one control never implies it covers both. */
+  listId?: string;
 };
 // These deterministic classifications keep the demo useful when Gemini is unavailable.
 // AI replaces them with richer summaries and labels when `/api/demo` succeeds.

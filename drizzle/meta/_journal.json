@@ -99,6 +99,41 @@
       "when": 1790493755519,
       "tag": "0013_operation_timestamps",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1790580155519,
+      "tag": "0014_unsubscribe_requests",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "6",
+      "when": 1790666555519,
+      "tag": "0015_unsubscribe_attempts",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "6",
+      "when": 1790656371956,
+      "tag": "0016_blocked_senders",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "6",
+      "when": 1790752955519,
+      "tag": "0017_retire_unsubscribed",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1790753055519,
+      "tag": "0018_legacy_unsubscribe_guard",
+      "breakpoints": true
     }
   ]
 }

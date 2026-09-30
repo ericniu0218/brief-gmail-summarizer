@@ -42,6 +42,10 @@ export const connections = sqliteTable('connections', {
   lastFullScan: integer('last_full_scan'),
   // Version 1 means a completed full scan stored rich HTML for formatted display.
   contentVersion: integer('content_version').notNull().default(0),
+  // Outstanding requests to reconcile this account against Gmail, set when an earlier
+  // version deleted or may have deleted mail. A count, so a request made during a scan
+  // survives that scan; a completed full scan subtracts only the requests it started with.
+  recoveryNeeded: integer('recovery_needed').notNull().default(0),
   error: text('error'),
   created: integer('created').notNull(),
 }, table => [
@@ -106,6 +110,9 @@ export const operations = sqliteTable('operations', {
   result: text('result'),
   // When the attempt was claimed, so an unconfirmed one can say how long ago it happened.
   created: integer('created').notNull().default(0),
+  // The attempt that owns this operation. Every completion or failure write names it, so
+  // overlapping confirmed retries cannot both send.
+  attempt: text('attempt'),
 }, table => [index('operations_account').on(table.accountId)]);
 export const unsubscribed = sqliteTable('unsubscribed', {
   id: text('id').primaryKey(),
@@ -114,6 +121,52 @@ export const unsubscribed = sqliteTable('unsubscribed', {
   address: text('address').notNull(),
   created: integer('created').notNull(),
 }, table => [uniqueIndex('unsubscribed_account_address').on(table.accountId, table.address)]);
+/**
+ * History of unsubscribe requests. This is a record of what was asked and what came back —
+ * never an instruction. Nothing reads it to decide which mail to show, because the sender
+ * controls delivery: its newsletters may keep arriving, and its receipts and account
+ * notices must keep arriving.
+ */
+export const unsubscribeRequests = sqliteTable('unsubscribe_requests', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull(),
+  accountId: text('account_id').notNull(),
+  /** The message the request was made from. Null for rows imported from the old table. */
+  messageId: text('message_id'),
+  /** The newsletter's List-ID when the message stated one; null when it did not. */
+  listId: text('list_id'),
+  address: text('address').notNull(),
+  /** 'list' | 'message' | 'legacy-sender' — how narrowly the request can be attributed. */
+  scope: text('scope').notNull(),
+  outcome: text('outcome').notNull(),
+  detail: text('detail'),
+  /** Which attempt owns this row. Completion writes check it, so a slow earlier attempt
+   *  cannot overwrite what a later one already recorded. */
+  attempt: text('attempt'),
+  created: integer('created').notNull(), updated: integer('updated').notNull(),
+}, table => [index('unsubscribe_requests_account').on(table.accountId, table.userId)]);
+/**
+ * Senders the person chose never to see again in this app, per connected account.
+ *
+ * Blocking only hides mail when a view is read: every message stays stored, and nothing in
+ * Gmail is moved or deleted, so removing the row brings everything back.
+ */
+export const blockedSenders = sqliteTable('blocked_senders', {
+  userId: text('user_id').notNull(), accountId: text('account_id').notNull(),
+  address: text('address').notNull(),
+  /** The sender's display name when blocked, so the unblock list reads naturally. */
+  name: text('name'),
+  created: integer('created').notNull(),
+}, table => [primaryKey({columns:[table.accountId,table.address]}),index('blocked_senders_user').on(table.userId)]);
+/**
+ * A sender an older running version just unsubscribed from, during a rollout. While a row
+ * exists, that sender's stored mail cannot be deleted; the current sync clears the rows when
+ * it runs the recovery scan the same insert scheduled. See migration 0018.
+ */
+export const legacyUnsubscribeGuards = sqliteTable('legacy_unsubscribe_guards', {
+  userId: text('user_id').notNull(), accountId: text('account_id').notNull(),
+  address: text('address').notNull(), created: integer('created').notNull(),
+}, table => [primaryKey({columns:[table.accountId,table.address]})]);
 export const overrides = sqliteTable('overrides', {
   // One row holds manual intent for one message. Inactive rows are reset tombstones whose
   // revision prevents stale requests from recreating corrections.
