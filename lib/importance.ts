@@ -1,4 +1,4 @@
-import { appliesToUser, DUE_SOON_MS, effectiveClassification, isResolved, MEETING_SOON_MS, obligationDueAt, relevantDueAt, type Classification, type Obligation } from './classification';
+import { appliesToUser, DUE_SOON_MS, effectiveClassification, isResolved, MEETING_SOON_MS, relevantDueAt, type Classification, type Obligation } from './classification';
 import type { Email } from './mail';
 
 /**
