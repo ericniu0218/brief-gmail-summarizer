@@ -2,6 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { encrypt, decrypt, encode, inputObject, mutation, type Runtime } from '../server/runtime';
 import { parseMessage, safeUnsubscribe } from '../server/gmail';
+import { describeUnsubscribe } from '../server/unsubscribe';
+import { privateDestination } from '../server/gmail';
+import { asCapability, asOutcome, listIdOf, newsletterIdentity, parseListUnsubscribe, requestKey, reasonFor, notice } from '../lib/unsubscribe';
 import { POST as reply } from '../app/api/reply/route';
 import { POST as suggest } from '../app/api/suggest/route';
 import { generate } from '../server/ai';
@@ -15,9 +18,11 @@ import { hydrateDeferredBodies, normalizeMessage, type GmailMessage, type Normal
 import { collectBatch, evidenceSupported, validateItem } from '../server/classify';
 import { applyOverride, contentFingerprint } from '../server/overrides';
 import { deterministicClassify } from '../lib/deterministic';
+import { completeStoredEmail } from '../server/messages';
 import { resolveDate } from '../lib/dates';
-import { derivePriority, effectiveCategories, isOverdue, needsReview, upcomingMeetings, type Classification, type Obligation } from '../lib/classification';
-import { FIXTURES, DEV_FIXTURES, HELDOUT_FIXTURES } from './eval-set';
+import { applyPolicy, derivePriority, effectiveCategories, isOverdue, needsReview, upcomingMeetings, type Classification, type Obligation } from '../lib/classification';
+import { evaluateImportance } from '../lib/importance';
+import { FIXTURES, DEV_FIXTURES, HELDOUT_FIXTURES, EVAL_NOW } from './eval-set';
 
 declare global { var __briefTestEnv: Runtime; var __briefTestHeaders: Headers; }
 /** Resolve a fetch argument to its URL, matching the helper used by the other suites. */
@@ -716,6 +721,125 @@ void test('quoted requests do not create new obligations',()=>{
  assert.equal(reply.obligations.length,0,'an obligation quoted from history is not a new task');
 });
 
+void test('unsubscribe capability is read from the message, never guessed',()=>{
+ const plan=(headers:Record<string,string|string[]>)=>{
+  const headerValues:Record<string,string[]>={};
+  const flat:Record<string,string>={};
+  for(const [name,value] of Object.entries(headers)){
+   headerValues[name]=Array.isArray(value)?value:[value];
+   flat[name]=headerValues[name][headerValues[name].length-1];
+  }
+  return describeUnsubscribe({
+   id:'m1',threadId:'t',messageId:'<m1>',receivedAt:Date.UTC(2026,8,20),
+   from:{name:'News',address:'news@example.com'},to:[{name:'Alex',address:'alex@studio.example'}],cc:[],
+   subject:'Issue 14',text:'Hello',quoted:'',signature:'',labels:['INBOX'],headers:flat,headerValues,
+   attachments:[],htmlOnly:false,contentComplete:true,incompleteReasons:[]},testEnv);
+ };
+ // RFC 8058 only allows an automatic POST when the offer is covered by a passing signature.
+ const signed={
+  'authentication-results':'mx.google.com; dkim=pass header.d=list-manage.com; spf=pass',
+  'dkim-signature':'v=1; a=rsa-sha256; d=list-manage.com; h=from:subject:list-unsubscribe:list-unsubscribe-post; b=xx',
+ };
+
+ const automatic=plan({...signed,'list-unsubscribe':'<https://news.list-manage.com/u?id=1>','list-unsubscribe-post':'List-Unsubscribe=One-Click'});
+ assert.equal(automatic.capability,'one-click');
+ assert.equal(automatic.automatic,'https://news.list-manage.com/u?id=1');
+
+ // The same endpoint without the marker is a page to open, not a request to submit.
+ assert.equal(plan({...signed,'list-unsubscribe':'<https://news.list-manage.com/u?id=1>'}).capability,'manual-page');
+
+ // One-click claimed for a destination this server will not call: still offer the link.
+ const unknownProvider=plan({...signed,'list-unsubscribe':'<https://mailer.unknown.example/u>','list-unsubscribe-post':'List-Unsubscribe=One-Click'});
+ assert.equal(unknownProvider.capability,'manual-page','an unverified destination is not submitted automatically');
+ assert.ok(unknownProvider.page,'but the person is not left with nothing');
+
+ // A link that is not openable at all is reported as unverified, not offered.
+ assert.equal(plan({'list-unsubscribe':'<https://user:pass@news.example/u>'}).capability,'unverified');
+ assert.equal(plan({'list-unsubscribe':'<mailto:stop@news.example>'}).capability,'email-required');
+ assert.equal(plan({}).capability,'none');
+ // A footer link is never treated as instructions: only the header counts.
+ assert.equal(plan({'list-id':'<weekly.news.example.com>'}).capability,'none');
+
+ // An unsigned one-click claim is not automatic: anyone can write the header.
+ assert.equal(plan({'list-unsubscribe':'<https://news.list-manage.com/u>','list-unsubscribe-post':'List-Unsubscribe=One-Click'}).capability,
+  'manual-page','without a covering signature the offer is not trusted');
+ // A signature that does not cover the two headers is the same as none.
+ assert.equal(plan({'list-unsubscribe':'<https://news.list-manage.com/u>','list-unsubscribe-post':'List-Unsubscribe=One-Click',
+  'authentication-results':'mx.google.com; dkim=pass header.d=list-manage.com',
+  'dkim-signature':'v=1; d=list-manage.com; h=from:subject; b=xx'}).capability,'manual-page','the offer must be under the signature');
+ // A pass reported for one domain cannot authorise another domain's signature.
+ assert.equal(plan({'list-unsubscribe':'<https://news.list-manage.com/u>','list-unsubscribe-post':'List-Unsubscribe=One-Click',
+  'authentication-results':'mx.google.com; dkim=pass header.d=attacker.example',
+  'dkim-signature':'v=1; d=list-manage.com; h=list-unsubscribe:list-unsubscribe-post; b=xx'}).capability,'manual-page');
+});
+
+void test('malformed, folded, repeated and conflicting unsubscribe headers',()=>{
+ // A folded header is one value split across lines; the continuation is not a new entry.
+ const folded=parseListUnsubscribe(['<https://a.example/u>,\r\n  <mailto:stop@a.example>']);
+ assert.deepEqual(folded.https,['https://a.example/u']);
+ assert.deepEqual(folded.mailto,['mailto:stop@a.example']);
+
+ // The same header twice with the same content is a harmless duplicate.
+ const duplicate=parseListUnsubscribe(['<https://a.example/u>','<https://a.example/u>']);
+ assert.equal(duplicate.conflicting,false);
+ assert.deepEqual(duplicate.https,['https://a.example/u']);
+
+ // Two headers pointing somewhere different: neither can be attributed to the sender.
+ const conflicting=parseListUnsubscribe(['<https://a.example/u>','<https://b.example/u>']);
+ assert.equal(conflicting.conflicting,true);
+ assert.deepEqual(conflicting.https,[],'nothing is picked when the sender contradicts itself');
+
+ // Values that carry no usable method.
+ for(const bad of ['','   ','https://a.example/u','<>','not a header'])
+  assert.deepEqual(parseListUnsubscribe([bad]).https,[],JSON.stringify(bad));
+ assert.equal(parseListUnsubscribe(['<https://a.example/'+'x'.repeat(3000)+'>']).https.length,0,'an oversized value is refused');
+ assert.equal(parseListUnsubscribe(undefined).https.length,0);
+});
+
+void test('a server unsubscribe request never reaches a private or deceptive address',()=>{
+ for(const url of [
+  'https://127.0.0.1/u','https://10.0.0.5/u','https://192.168.1.1/u','https://172.16.4.4/u',
+  'https://169.254.169.254/latest/meta-data','https://100.64.0.1/u','https://localhost/u',
+  'https://intranet/u','https://mail.internal/u','https://[::1]/u','https://0.0.0.0/u',
+  'https://list-manage.com.attacker.example/u','https://notlist-manage.com/u',
+  'http://news.list-manage.com/u','https://news.list-manage.com:8443/u','https://user:pass@news.list-manage.com/u',
+ ])assert.equal(safeUnsubscribe(url,testEnv),false,url);
+ assert.equal(safeUnsubscribe('https://news.list-manage.com/u',testEnv),true);
+ // A trailing dot is the same host and must not slip past the boundary check.
+ assert.equal(safeUnsubscribe('https://news.list-manage.com./u',testEnv),true);
+ assert.equal(privateDestination('news.list-manage.com'),false);
+});
+
+void test('two newsletters from one publisher keep separate identities',()=>{
+ const weekly=newsletterIdentity('m1','Weekly Roundup <weekly.news.example.com>');
+ const alerts=newsletterIdentity('m2','<alerts.news.example.com>');
+ assert.equal(weekly.scope,'list');
+ assert.equal(weekly.listId,'weekly.news.example.com','the bracketed identity, without the display phrase');
+ assert.notEqual(requestKey('acct-1',weekly),requestKey('acct-1',alerts),'one sender, two lists, two records');
+ // The same newsletter in two mailboxes is two separate records.
+ assert.notEqual(requestKey('acct-1',weekly),requestKey('acct-2',weekly));
+ // With no List-ID the record stays tied to the message rather than claiming the sender.
+ const unnamed=newsletterIdentity('m3',undefined);
+ assert.equal(unnamed.scope,'message');
+ assert.equal(requestKey('acct-1',unnamed),'acct-1:message:m3');
+ // A display phrase with no bracketed identity identifies nothing.
+ assert.equal(newsletterIdentity('m4','Our Weekly Roundup').scope,'message');
+ assert.equal(listIdOf('<'+'x'.repeat(300)+'>'),undefined,'an oversized value is refused');
+});
+
+void test('stored capability and outcome values are validated, not trusted',()=>{
+ for(const good of ['one-click','manual-page','email-required','none','unverified','unavailable'])
+  assert.equal(asCapability(good),good);
+ for(const bad of ['unsubscribed',42,null,undefined,{},'ONE-CLICK'])
+  assert.equal(asCapability(bad),undefined,JSON.stringify(bad));
+ for(const good of ['none','pending','accepted','action-required','failed','unknown'])
+  assert.equal(asOutcome(good),good);
+ for(const bad of ['ok',true,'accepted ',''])assert.equal(asOutcome(bad),undefined,JSON.stringify(bad));
+ // A row written by an older version drops the unknown value instead of surfacing it.
+ assert.equal(completeStoredEmail({id:'m1',unsubscribeCapability:'totally-unsubscribed'})?.unsubscribeCapability,undefined);
+ assert.equal(completeStoredEmail({id:'m1',unsubscribeCapability:'one-click'})?.unsubscribeCapability,'one-click');
+});
+
 void test('a completion elsewhere in the message does not resolve a live deadline',()=>{
  // Found by rating a labelled set: "everyone received the point", three paragraphs below,
  // marked a problem set due in two days as completed, which removed it from Important.
@@ -826,10 +950,58 @@ void test('evaluation: the new classifier is measured against the previous one',
  assert.ok(all.section>=baseline.section,'section accuracy must not regress against the baseline');
 });
 
+/**
+ * Promotion outcomes, reported separately because they fail in different directions: a
+ * promotion in Work or Important costs attention, legitimate mail in Noise costs a missed
+ * obligation. A promotion is any fixture whose expected section is Noise.
+ */
+function promotionReport(fixtures:typeof FIXTURES){
+ const out={promotions:0,promotionsInWork:0,promotionsImportant:0,promotionsToNoise:0,legit:0,legitToNoise:0,importantLegit:0,importantDemoted:0,misses:[] as string[]};
+ for(const fixture of fixtures){
+  const result=deterministicClassify(fixture.message,'alex@studio.example');
+  const section=applyPolicy(result,EVAL_NOW).category;
+  const important=evaluateImportance({...fixture.message,classification:result} as never,EVAL_NOW).important;
+  if(fixture.expect.section==='noise'){
+   out.promotions++;
+   if(section==='work'){out.promotionsInWork++;out.misses.push(`${fixture.id}: promotion in Work`);}
+   if(important){out.promotionsImportant++;out.misses.push(`${fixture.id}: promotion Important`);}
+   if(section==='noise')out.promotionsToNoise++;
+  }else{
+   out.legit++;
+   if(section==='noise'){out.legitToNoise++;out.misses.push(`${fixture.id}: legitimate mail in Noise`);}
+   if(fixture.expect.important){out.importantLegit++;if(!important){out.importantDemoted++;out.misses.push(`${fixture.id}: important mail demoted`);}}
+  }
+ }
+ return out;
+}
+
+void test('evaluation: promotions are kept out of Work and Important without burying legitimate mail',()=>{
+ const report:string[]=[];
+ for(const [name,set] of [['dev',DEV_FIXTURES],['held-out',HELDOUT_FIXTURES],['all',FIXTURES]] as const){
+  const r=promotionReport(set);
+  report.push(
+   `${name} (promotions ${r.promotions}, legitimate ${r.legit})`,
+   `  promotions filed in Work          ${r.promotionsInWork}`,
+   `  promotions marked Important       ${r.promotionsImportant}`,
+   `  promotions routed to Noise        ${r.promotionsToNoise}/${r.promotions} (${percent(r.promotionsToNoise,r.promotions)})`,
+   `  legitimate mail routed to Noise   ${r.legitToNoise}`,
+   `  important legitimate mail demoted ${r.importantDemoted}/${r.importantLegit}`,
+  );
+ }
+ const all=promotionReport(FIXTURES);
+ if(all.misses.length)report.push('  misses: '+all.misses.join('; '));
+ console.log('\n'+report.join('\n')+'\n');
+ // A small synthetic suite measures these rules; it is not evidence of production accuracy.
+ assert.equal(all.promotionsInWork,0,all.misses.join('; '));
+ assert.equal(all.promotionsImportant,0,all.misses.join('; '));
+ assert.equal(all.legitToNoise,0,all.misses.join('; '));
+ assert.equal(all.importantDemoted,0,all.misses.join('; '));
+});
+
 void test('evaluation fixtures keep threads and near-duplicates in one split',()=>{
  const splits=new Map<string,string>();
  for(const fixture of FIXTURES){
-  const family=fixture.id.replace(/-(same-sender|reschedule|cancelled|marketing|newsletter)$/,'');
+  const family=fixture.family??fixture.id.replace(/-(same-sender|reschedule|cancelled|marketing|newsletter)$/,'');
   const existing=splits.get(family);
   if(existing)assert.equal(existing,fixture.split,`${family} spans splits`);
   splits.set(family,fixture.split);
@@ -1046,4 +1218,10 @@ void test('a date the message states reaches the obligation it states',()=>{
   from:{name:'S',address:'s@acme.example'},to:[{address:'ethan_ko@berkeley.edu'}],cc:[],
   receivedAt:received,labels:['INBOX'],attachments:[],contentComplete:true} as never,'ethan_ko@berkeley.edu');
  assert.equal(meeting.obligations.find(o=>o.kind==='meeting')?.due?.date,'2026-09-25');
+});
+
+void test('a manual unsubscribe page is reported as a page to open', () => {
+  assert.equal(reasonFor('manual-page', 'none'), 'open-page');
+  assert.equal(notice('open-page').action, 'page');
+  assert.equal(reasonFor('none', 'none'), 'no-instructions');
 });

@@ -99,9 +99,56 @@ export function parseMessage(m:GmailMessage,userAddress=''):Email {
   const normalized=normalizeMessage(m);
   return emailFrom(normalized,deterministicClassify(normalized,userAddress));
 }
+/**
+ * Addresses this server must never call, whatever a header says.
+ *
+ * An unsubscribe URL comes from mail written by a stranger, so it is treated as hostile
+ * input aimed at the network this worker sits on. Anything naming an address literal rather
+ * than a public name is refused outright: there is no legitimate unsubscribe endpoint at an
+ * IP address, and every interesting target of a server-side request forgery — loopback, a
+ * private range, link-local metadata services, unique local addresses — is reachable only
+ * that way.
+ */
+const IPV4=/^\d{1,3}(?:\.\d{1,3}){3}$/;
+const INTERNAL_NAME=/(^|\.)(localhost|local|internal|intranet|lan|home|corp|localdomain)$/i;
+export function privateDestination(hostname:string){
+  const host=hostname.toLowerCase().replace(/\.$/,'');
+  if(!host)return true;
+  // An IPv6 literal arrives bracketed from the URL parser; any of them is refused, which
+  // covers ::1, fc00::/7 and fe80::/10 without parsing the address.
+  if(host.startsWith('['))return true;
+  if(INTERNAL_NAME.test(host))return true;
+  if(IPV4.test(host)){
+    const parts=host.split('.').map(Number);
+    if(parts.some(part=>!Number.isInteger(part)||part<0||part>255))return true;
+    const [a,b]=parts;
+    // Loopback, both private ranges, link-local (which carries cloud metadata at
+    // 169.254.169.254), carrier-grade NAT, and this-network.
+    return a===127||a===10||a===0||(a===172&&b>=16&&b<=31)||(a===192&&b===168)
+      ||(a===169&&b===254)||(a===100&&b>=64&&b<=127);
+  }
+  // A name with no dot cannot be a public domain, so it can only resolve somewhere local.
+  return !host.includes('.');
+}
+
+/**
+ * Whether this server may make an unsubscribe request to a URL by itself.
+ *
+ * The allowlist is the substance of the protection and is deliberately kept: a destination
+ * this app has never heard of is offered to the person to open, never called automatically.
+ * The checks before it make the allowlist meaningful — a hostname is compared on domain
+ * boundaries, so `list-manage.com.attacker.example` does not match `list-manage.com`.
+ *
+ * DNS is not resolved here, so this cannot detect a name that resolves to a private address
+ * or rebinds between the check and the request. That is acceptable only because the
+ * allowlist limits requests to known bulk providers; widening it would require resolving
+ * and pinning the address before connecting.
+ */
 export function safeUnsubscribe(url:string,e:Runtime) {
   let target:URL; try{target=new URL(url);}catch{return false;}
   if(target.protocol!=='https:'||target.username||target.password||target.port && target.port!=='443')return false;
+  if(privateDestination(target.hostname))return false;
   const allowed=['list-manage.com','mailchimp.com','sendgrid.net','convertkit.com','beehiiv.com','substack.com',...(e.UNSUBSCRIBE_ALLOWED_HOSTS||'').split(',').map(s=>s.trim().toLowerCase()).filter(Boolean)];
-  return allowed.some(host=>target.hostname===host||target.hostname.endsWith('.'+host));
+  const host=target.hostname.toLowerCase().replace(/\.$/,'');
+  return allowed.some(entry=>host===entry||host.endsWith('.'+entry));
 }

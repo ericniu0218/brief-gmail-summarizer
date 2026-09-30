@@ -1,6 +1,6 @@
 import type { Section, Tag } from './categories';
 
-export const POLICY_VERSION='policy-2026-09-22-1';
+export const POLICY_VERSION='policy-2026-09-29-audit-fixes';
 
 export type Context='work'|'personal'|'unknown';
 export type Topic='research';
@@ -33,6 +33,12 @@ export type Obligation={
   state:ObligationState;
   meetingState?:MeetingState;
   uncertainty?:string;
+  /**
+   * Set when the task is a sales call to action ("complete your order", "book a demo").
+   * It stays visible as extracted text but is not work: it adds no tag and never files the
+   * message under Work. Absent on older records, which behave as before.
+   */
+  commercial?:boolean;
 };
 
 /**
@@ -60,6 +66,12 @@ export type Classification={
   proposedDisposition?:Disposition;
   /** Stable identifier for the conflict that forced review. */
   reviewReason?:string;
+  /**
+   * A line recording something the recipient earned or completed, such as a certification.
+   * An automatic Junk proposal is held for review instead of burying it. Absent on older
+   * records.
+   */
+  preservedEvidence?:string;
   /**
    * Set when a manual correction or user rule produced the effective result.
    * `category` records a deliberate user choice of section, which is the only thing
@@ -123,9 +135,12 @@ export function isResolved(obligation:Obligation){
 /** An obligation counts for the user unless it is demonstrably somebody else's. */
 export function appliesToUser(obligation:Obligation){return obligation.ownerIsUser!==false;}
 
-/** Obligations that still stand for this user. Cancelled and superseded work never qualifies. */
+/**
+ * Obligations that still stand for this user. Cancelled and superseded work never
+ * qualifies, and neither does a sales call to action.
+ */
 export function openObligations(classification:Classification){
-  return obligationsOf(classification).filter(o=>!isResolved(o)&&appliesToUser(o));
+  return obligationsOf(classification).filter(o=>!isResolved(o)&&appliesToUser(o)&&!o.commercial);
 }
 
 const DAY=86400000;
@@ -181,6 +196,21 @@ export function obligationDueAt(obligation:Obligation):number|undefined{
   return at;
 }
 
+/**
+ * The due time relevance is judged by. Where the exact instant is unknown only because the
+ * message named no timezone ("confirmed for September 30 at 9am"), the day itself is not in
+ * doubt, so it counts like a date-only deadline: the end of that day, UTC. No instant is
+ * invented — the obligation keeps its ambiguous due value and still asks for review — but an
+ * appointment tomorrow is no longer rated as if it had no date at all.
+ */
+export function relevantDueAt(obligation:Obligation):number|undefined{
+  const exact=obligationDueAt(obligation);
+  if(exact!==undefined)return exact;
+  const due=obligation?.due;
+  if(!due||due.reason!=='timezone-unknown'||typeof due.date!=='string')return undefined;
+  return obligationDueAt({...obligation,due:{phrase:due.phrase,date:due.date,ambiguous:false}});
+}
+
 /** Days until the obligation is due, or undefined when no supported date exists. */
 export function daysUntilDue(obligation:Obligation,now:number){
   const due=obligationDueAt(obligation);
@@ -203,7 +233,7 @@ export function derivePriority(input:Classification,now:number):'high'|'normal'{
   if(classification.securityEvent)return 'high';
   for(const obligation of openObligations(classification)){
     if(!obligation.required)continue;
-    const due=obligationDueAt(obligation);
+    const due=relevantDueAt(obligation);
     if(due===undefined)continue;
     const until=due-now;
     // Exact elapsed time, not a count of calendar dates: "within 72 hours" must not
@@ -219,7 +249,8 @@ export function derivePriority(input:Classification,now:number):'high'|'normal'{
 
 /** Upcoming-event lists exclude cancelled and superseded meetings but keep them as history. */
 export function upcomingMeetings(classification:Classification){
-  return obligationsOf(classification).filter(o=>o.kind==='meeting'&&!isResolved(o)&&o.meetingState!=='cancelled');
+  // A promotional webinar is not on anyone's calendar until they register for it.
+  return obligationsOf(classification).filter(o=>o.kind==='meeting'&&!isResolved(o)&&o.meetingState!=='cancelled'&&!o.commercial);
 }
 
 /**
@@ -246,7 +277,7 @@ export function effectiveCategories(input:Classification):{category:Section;tags
   const tags=new Set<Tag>();
   // Cancelled meetings stay under Meetings as history; Overview filtering excludes them.
   for(const obligation of obligationsOf(classification)){
-    if(!appliesToUser(obligation))continue;
+    if(!appliesToUser(obligation)||obligation.commercial)continue;
     if(obligation.kind!=='meeting'&&isResolved(obligation))continue;
     tags.add(OBLIGATION_TAG[obligation.kind]);
   }
@@ -307,12 +338,15 @@ export function junkConflict(classification:Classification):string|undefined{
   // A claimed security event is worth a look, but being kept out of Junk is not a
   // statement that the message is genuine: it may still be phishing.
   if(classification.securityEvent)return 'junk-with-security-event';
+  if(classification.preservedEvidence)return 'junk-with-personal-record';
   return undefined;
 }
 
 const REVIEW_EXPLANATIONS:Record<string,string>={
   'junk-with-open-obligation':'This message may contain a request for you, so it was kept out of Junk for review.',
   'junk-with-security-event':'This message claims to be an account or security notice, so it was kept out of Junk for review. It has not been checked for authenticity.',
+  'junk-with-personal-record':'This message records something you earned or completed, such as a certification, so it was kept out of Junk for review.',
+  'quoted-history-obligation':'A task in this message appears only in quoted earlier mail, so it was not treated as current work. Check whether it still applies.',
   'unclear-task-owner':'It is unclear whether this task is yours, so it is waiting for your review.',
   'ambiguous-date':'A date in this message could not be resolved, so it is waiting for your review.',
   'conflicting-dates':'This message gives more than one due date, so it is waiting for your review.',

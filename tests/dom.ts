@@ -118,6 +118,16 @@ export async function render(element:ReactElement){
 }
 
 /**
+ * Re-renders into the existing root, the way a parent passing new props would, so a test can
+ * observe what happens to work already in flight when the data underneath it changes.
+ */
+export async function rerender(element:ReactElement){
+  if(!root)throw new Error('render must run before rerender');
+  await act(async()=>{root!.render(element);});
+  return container;
+}
+
+/**
  * Lets pending work finish: promises, timers and animation frames.
  *
  * Overlay components schedule their mount across a frame, and those callbacks run outside

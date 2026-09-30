@@ -529,3 +529,27 @@ void test('folding stays linear and loses nothing on a large single-sender mailb
   // Every message survives; grouping must never be a way of dropping mail.
   assert.equal(rows[0].kind === 'fold' ? rows[0].emails.length : 0, 12000);
 });
+
+void test('a stale obligation cannot mask another aging but important obligation',()=>{
+  const c=classification({obligations:[obligation({due:{phrase:'old',date:isoDate(ago(40*DAY)),ambiguous:false}}),
+    obligation({id:'newer',due:{phrase:'recent',date:isoDate(ago(10*DAY)),ambiguous:false}})]});
+  assert.equal(evaluateImportance(email('mixed',{classification:c}),NOW).important,true);
+  const stale=email('stale',{classification:classification({obligations:[c.obligations[0]]})});
+  assert.equal(sortInboxEmails([stale,email('mixed',{classification:c})],NOW)[0].id,'mixed');
+});
+
+void test('folds keep humans and accounts separate',()=>{
+  const make=(id:string,address:string,accountId='acct-1')=>email(id,{address,accountId,subject:'Please confirm your setup'});
+  for(const pair of [[make('a','alice@gmail.com'),make('b','bob@gmail.com')],
+    [make('a','professor@school.edu'),make('b','it@school.edu')],
+    [make('a','security@github.com'),make('b','security@github.com','acct-2')]])
+    assert.ok(buildInboxRows(pair,NOW).every(row=>row.kind==='email'));
+});
+
+void test('the calendar orders a written local meeting time without inventing a timezone',()=>{
+  const timed=email('clock',{classification:classification({obligations:[obligation({kind:'meeting',
+    due:{phrase:'September 24 at 9:00am',date:'2026-09-24',ambiguous:true,reason:'timezone-unknown'}})]})});
+  assert.equal(eventMinutes(timed,'2026-09-24'),9*60);
+  assert.equal(eventMinutes(timed,'2026-09-25'),undefined);
+  assert.equal(timed.classification?.obligations[0].due?.time,undefined);
+});

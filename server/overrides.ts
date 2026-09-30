@@ -4,6 +4,7 @@ import type { Section, Tag } from '@/lib/categories';
 import {
   applyPolicy,
   needsReview,
+  isResolved,
   obligationCorrectionKey,
   type Classification,
   type ObligationState,
@@ -11,22 +12,9 @@ import {
 import type { NormalizedMessage } from './message';
 
 export type JunkPreference='junk'|'not-junk';
-export const MAX_SENDER_ADDRESS=320;
-
-/** Canonical sender key accepted by rules. Invalid or synthetic identities are rejected. */
-export function normalizeSenderAddress(value:unknown):string|undefined{
-  if(typeof value!=='string')return undefined;
-  const address=value.trim().toLowerCase();
-  const at=address.indexOf('@');
-  let control=false;
-  for(let index=0;index<address.length;index++){
-    const code=address.charCodeAt(index);
-    if(code<=31||code===127){control=true;break;}
-  }
-  if(!address||address.length>MAX_SENDER_ADDRESS||/\s/.test(address)||control||
-    at<=0||at!==address.lastIndexOf('@')||at===address.length-1)return undefined;
-  return address;
-}
+// Shared with the browser, which needs the same answer before offering a sender action.
+import { MAX_SENDER_ADDRESS, normalizeSenderAddress } from '@/lib/addresses';
+export { MAX_SENDER_ADDRESS, normalizeSenderAddress };
 /**
  * A saved preference for one sender inside one account. An inactive rule is a cleared
  * tombstone: it still reports its revision so writes stay ordered, but carries no
@@ -85,7 +73,9 @@ const SECTIONS:Section[]=['work','personal','noise'];
 export const CORRECTABLE_TAGS:Tag[]=['deadlines','meetings','requests','actions','research','low-priority'];
 const TAGS:Tag[]=[...CORRECTABLE_TAGS,'junk'];
 export const CORRECTABLE_STATES:ObligationState[]=['open','completed','cancelled','superseded','unknown'];
-const DERIVED_REVIEW_REASONS=new Set(['junk-with-open-obligation','junk-with-security-event','unclear-task-owner','ambiguous-date','conflicting-dates','classification-failed']);
+// A person correcting the message has reviewed it, so a quoted-history task no longer needs
+// flagging once nothing structural keeps it in review.
+const DERIVED_REVIEW_REASONS=new Set(['junk-with-open-obligation','junk-with-security-event','junk-with-personal-record','unclear-task-owner','ambiguous-date','conflicting-dates','classification-failed','quoted-history-obligation']);
 
 function parsedTags(value:string):Tag[]{
   try{
@@ -358,6 +348,8 @@ export function applyOverride(classification:Classification,override?:Override):
   // A correction in one dimension must not clear an unrelated ambiguous date, ownership
   // question, provider failure, or security review. Recalculate structural reasons and
   // clear only a derived reason that the correction truly resolved.
+  if(next.obligations.some(o=>o.kind==='request'))
+    next.replyRequired=base.replyRequired&&next.obligations.some(o=>o.kind==='request'&&o.required&&o.ownerIsUser!==false&&!isResolved(o));
   const remainingReview=needsReview(next);
   if(remainingReview){next.processingStatus='needs_review';next.uncertainty=remainingReview;}
   else if(next.processingStatus==='needs_review'&&next.uncertainty&&DERIVED_REVIEW_REASONS.has(next.uncertainty)){
@@ -367,9 +359,15 @@ export function applyOverride(classification:Classification,override?:Override):
   return next;
 }
 
-/** Identifies content that an automatic classification was derived from. */
-export function contentFingerprint(message:Pick<NormalizedMessage,'subject'|'text'|'quoted'|'calendar'>){
-  const source=`${message.subject}\u0000${message.text}\u0000${message.quoted}\u0000${message.calendar?.start||''}${message.calendar?.status||''}`;
+/**
+ * Identifies the inputs an automatic classification was derived from: the content, and the
+ * campaign evidence the purpose checks read (the Promotions tab and list headers). Reading
+ * a message, starring it or any other label change leaves it unchanged, so those never
+ * cause reclassification. Both extra fields are optional for older records and fixtures.
+ */
+export function contentFingerprint(message:Pick<NormalizedMessage,'subject'|'text'|'quoted'|'calendar'>&Partial<Pick<NormalizedMessage,'labels'|'distribution'>>,legacy=false){
+  const campaign=`${Array.isArray(message.labels)&&message.labels.includes('CATEGORY_PROMOTIONS')?1:0}${message.distribution?.listUnsubscribe?1:0}${message.distribution?.bulkPrecedence?1:0}`;
+  const source=`${message.subject}\u0000${message.text}\u0000${message.quoted}\u0000${message.calendar?.start||''}${message.calendar?.status||''}${legacy?'':'\u0000'+campaign}`;
   let hash=0x811c9dc5;
   for(let i=0;i<source.length;i++){hash^=source.charCodeAt(i);hash=Math.imul(hash,0x01000193)>>>0;}
   return `${source.length.toString(36)}-${hash.toString(36)}`;

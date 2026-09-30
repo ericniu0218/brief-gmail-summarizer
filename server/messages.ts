@@ -1,11 +1,44 @@
 import type { StoredEmail } from './sync';
 import type { Runtime } from './runtime';
+import { asCapability } from '@/lib/unsubscribe';
 
 type Row={data:string;replied?:number};
 
+/**
+ * Whether a record shows a reply sent before the dedicated `replied` marker existed.
+ *
+ * Every writer derives the stored badge from the stored classification, except a successful
+ * send, which cleared the badge alone. So a record whose badge is off while its own
+ * classification says a reply is owed was answered. A record written consistently — which
+ * is every one not touched by a send — never matches, so nothing unanswered is hidden.
+ */
+export function sentBeforeMarker(email:{needsReply?:unknown;classification?:{replyRequired?:unknown}}|undefined){
+  return !!email&&email.needsReply===false&&email.classification?.replyRequired===true;
+}
+
+/**
+ * The same test on stored JSON as written. Completing a damaged record turns a *missing*
+ * badge into `false`, which is not evidence of anything, so only an explicit `false` counts.
+ */
+function rawSentBeforeMarker(data:string){
+  try{return sentBeforeMarker(JSON.parse(data) as Parameters<typeof sentBeforeMarker>[0]);}catch{return false;}
+}
+
+/** Ids in a stored snapshot, as written, whose records show a send before the marker. */
+export function snapshotSentIds(data:string|undefined){
+  const ids=new Set<string>();
+  try{
+    const emails=(JSON.parse(data||'{}') as {emails?:unknown}).emails;
+    for(const email of Array.isArray(emails)?emails:[])
+      if(email&&typeof email==='object'&&typeof (email as {id?:unknown}).id==='string'&&sentBeforeMarker(email as Parameters<typeof sentBeforeMarker>[0]))
+        ids.add((email as {id:string}).id);
+  }catch{/* A damaged snapshot proves nothing. */}
+  return ids;
+}
+
 function emailFromRow(row:Row){
   const email=parseStoredEmail(row.data);
-  return email&&row.replied?{...email,needsReply:false}:email;
+  return email&&(row.replied||(sentBeforeMarker(email)&&rawSentBeforeMarker(row.data)))?{...email,needsReply:false,replied:true}:email;
 }
 
 /**
@@ -35,6 +68,8 @@ export function completeStoredEmail(value:unknown):StoredEmail|undefined{
     color:text(email.color,'gray'),
     category,
     priority:email.priority==='high'?'high':'normal',
+    unsubscribeCapability:asCapability(email.unsubscribeCapability),
+    listId:typeof email.listId==='string'&&email.listId?email.listId.slice(0,255):undefined,
     needsReply:!!email.needsReply,
     unread:!!email.unread,
   } as StoredEmail;

@@ -13,8 +13,12 @@ export type InboxAccountState = {
   skipped: number;
   hasMore: boolean;
 };
+/** A sender hidden from one account's views. Its mail is still stored, not deleted. */
+export type BlockedSender = { accountId: string; accountEmail: string; address: string; name: string | null; created: number };
 export type InboxSnapshot = {
   emails: Email[];
+  /** Senders whose mail this view leaves out, so they can be unblocked. */
+  blocked?: BlockedSender[];
   updated: number | null;
   ai: boolean;
   hasMore?: boolean;

@@ -1,13 +1,15 @@
 import { build } from 'esbuild';
-import { mkdir, readdir } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 await mkdir('work', { recursive: true });
 const entries = (await readdir('tests'))
   .filter((name) => name.endsWith('.test.ts'))
   .map((name) => 'tests/' + name);
+const output=await mkdtemp('work/tests-');
+try {
 await build({
   entryPoints: entries,
-  outdir: 'work/tests',
+  outdir: output,
   outExtension: { '.js': '.mjs' },
   platform: 'node',
   format: 'esm',
@@ -59,9 +61,11 @@ const result = spawnSync(
   [
     '--test',
     ...entries.map(
-      (path) => 'work/tests/' + path.split('/').at(-1).replace('.ts', '.mjs'),
+      (path) => output + '/' + path.split('/').at(-1).replace('.ts', '.mjs'),
     ),
   ],
   { stdio: 'inherit' },
 );
 process.exitCode = result.status ?? 1;
+
+} finally { await rm(output, { recursive: true, force: true }); }

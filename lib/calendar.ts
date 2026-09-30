@@ -1,6 +1,7 @@
 import { emailKey, type Email } from './mail';
 import { evaluateImportance, IMPORTANCE, obligationDueAt, receivedAtOf } from './importance';
 import { isResolved, type Obligation } from './classification';
+import { inferYear, weekdayOffset } from './dates';
 
 /**
  * Lightweight calendar helpers for the dashboard. They find date phrases in email text
@@ -44,9 +45,21 @@ function datedObligations(email: Email): { obligation: Obligation; at: number }[
   return obligations.flatMap(obligation => {
     if (!obligation || typeof obligation !== 'object') return [];
     if (isResolved(obligation) || obligation.meetingState === 'cancelled') return [];
+    // An offer's expiry or a promotional webinar is not an event in the reader's week.
+    if (obligation.commercial) return [];
     // The same validated resolver the importance policy uses, so a date rejected there —
     // 30 February, an impossible month — can never reappear here as a real event.
-    const at = obligationDueAt(obligation);
+    let at=obligationDueAt(obligation);
+    // A written wall-clock time with no timezone still belongs on its stated day.
+    // This date is for calendar placement only, never an inferred due instant.
+    if(at===undefined&&obligation.due?.reason==='timezone-unknown') {
+      const match=/^(\d{4})-(\d{2})-(\d{2})$/.exec(obligation.due.date||'');
+      if(match){
+        const year=Number(match[1]),month=Number(match[2])-1,day=Number(match[3]);
+        const candidate=new Date(Date.UTC(year,month,day,12));
+        if(candidate.getUTCFullYear()===year&&candidate.getUTCMonth()===month&&candidate.getUTCDate()===day)at=candidate.getTime();
+      }
+    }
     return at === undefined ? [] : [{ obligation, at }];
   });
 }
@@ -60,13 +73,23 @@ function datedObligations(email: Email): { obligation: Obligation; at: number }[
  * nine, and returning whichever obligation happened to be written first would order the
  * day wrongly.
  */
+function writtenClock(phrase:string):number|undefined{
+  const match=/\b(?:at|by)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i.exec(phrase);
+  if(!match)return undefined;
+  const hour=Number(match[1]),minute=Number(match[2]||0);
+  if(hour<1||hour>12||minute>59)return undefined;
+  return (hour%12+(match[3].toLowerCase()==='pm'?12:0))*60+minute;
+}
+
 export function eventMinutes(email: Email, key: string): number | undefined {
   let earliest: number | undefined;
   for (const { obligation, at } of datedObligations(email)) {
-    if (!obligation.due?.time) continue;
-    const when = new Date(at);
-    if (dateKey(when) !== key) continue;
-    const minutes = when.getHours() * 60 + when.getMinutes();
+    const due=obligation.due;
+    if (!due) continue;
+    const when=new Date(at);
+    const minutes=due.time&&dateKey(when)===key?when.getHours()*60+when.getMinutes()
+      :!due.time&&due.date===key?writtenClock(due.phrase):undefined;
+    if(minutes===undefined)continue;
     if (earliest === undefined || minutes < earliest) earliest = minutes;
   }
   return earliest;
@@ -123,27 +146,40 @@ export function emailDates(email: Email, demoDate?: Date, now?: number): string[
     const parts=/^(\d{4})-(\d{2})-(\d{2})$/.exec(obligation.due?.date||'');
     if(parts)dates.add(dateKey(new Date(Number(parts[1]),Number(parts[2])-1,Number(parts[3]))));
   }
+  // The classification is the authority on what was called off. The text scan below is a
+  // fallback for dates no obligation captured, so it must not find a cancelled or finished
+  // obligation's own sentence and date again and put the event back. Other sentences, and
+  // any live event in them, are scanned as before.
+  const obligations = Array.isArray(email.classification?.obligations) ? email.classification.obligations : [];
+  for (const obligation of obligations) {
+    if (!obligation || typeof obligation !== 'object') continue;
+    if (!isResolved(obligation) && obligation.meetingState !== 'cancelled' && !obligation.commercial) continue;
+    // Its own sentence always; its date phrase only when that names a specific date. A bare
+    // "Friday" or "tomorrow" removed everywhere would take a live event elsewhere with it.
+    const phrase = obligation.due?.phrase;
+    for (const retired of [obligation.evidence, typeof phrase === 'string' && /\d/.test(phrase) ? phrase : undefined])
+      if (typeof retired === 'string' && retired.trim()) text = text.split(retired.trim()).join(' ');
+  }
   for (const match of text.matchAll(/\b(20\d{2})-(\d{2})-(\d{2})\b/g)) add(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
   const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
   for (const match of text.matchAll(/\b(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)[,\s]+)?(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(20\d{2}))?\b/gi)) {
-    const year = match[3] ? Number(match[3]) : validAnchor?.getFullYear();
-    if (year) add(year, months.indexOf(match[1].slice(0, 3).toLowerCase()), Number(match[2]));
+    const month = months.indexOf(match[1].slice(0, 3).toLowerCase()), day = Number(match[2]);
+    // The same year rule as the resolver: "January 2" in mail from 31 December is next
+    // January, and a date that could be either year is not placed at all.
+    const inferred = match[3] ? { year: Number(match[3]), uncertain: false }
+      : validAnchor ? inferYear(month, day, validAnchor.getTime()) : undefined;
+    if (inferred && !inferred.uncertain) add(inferred.year, month, day);
     text = text.replace(match[0], ' '.repeat(match[0].length));
   }
   if (validAnchor) {
-    const weekdays = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-    for (const match of text.matchAll(/\b(today|tomorrow|yesterday|(?:(?:this|next|last)\s+)?(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b/gi)) {
+    for (const match of text.matchAll(/\b(today|tomorrow|yesterday|(?:(?:this|next|last)\s+)?(?<!\bpast\s+)(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b/gi)) {
       const term = match[1].toLowerCase().replace(/\s+/g, ' ');
       // Retrospective mentions describe prior context, not scheduled events.
       // Keep matching them so 'last Thursday' cannot fall through as 'Thursday'.
       if (term === 'yesterday' || term.startsWith('last ')) continue;
-      let offset = term === 'today' ? 0 : term === 'tomorrow' ? 1 : null;
-      if (offset === null) {
-        const weekday = weekdays.indexOf(term.split(' ').at(-1)!);
-        offset = (weekday - validAnchor.getDay() + 7) % 7;
-        if (term.startsWith('next ') && offset === 0) offset = 7;
-        if (term.startsWith('this ')) offset = (weekday + 6) % 7 - (validAnchor.getDay() + 6) % 7;
-      }
+      // Shared with the resolver, so sorting and the calendar agree on which day it is.
+      const offset = term === 'today' ? 0 : term === 'tomorrow' ? 1 : weekdayOffset(term, validAnchor.getDay());
+      if (offset === undefined) continue;
       const day = new Date(validAnchor.getFullYear(), validAnchor.getMonth(), validAnchor.getDate() + offset);
       dates.add(dateKey(day));
     }

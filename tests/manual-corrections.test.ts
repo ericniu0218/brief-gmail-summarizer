@@ -455,3 +455,27 @@ void test('a rule applies to every stored message from that sender, and stops wh
   assert.equal(after?.senderJunkPreference,undefined,'with no preference left');
   assert.equal(after?.senderRuleRevision,2,'but the cleared revision still reported');
 });
+
+void test('completing and reopening a request updates reply state in correction responses and mailbox reads',async()=>{
+  seedAccount('acct-1');
+  const baseline=automatic();
+  const email={id:'m1',accountId:'acct-1',sender:'Sender',address:'sender@example.com',initials:'S',subject:'Review',summary:'Review',body:'Please approve invoice 42.',time:'Now',category:'work',priority:'normal',needsReply:true,unread:false,color:'blue',classification:baseline,automaticClassification:baseline};
+  storage.sql.prepare('INSERT INTO snapshots (account_id,user_id,data,updated) VALUES (?,?,?,?)').run('acct-1','user-a',JSON.stringify({emails:[email],ai:false,pending:0,skipped:0,analysisVersion:'test',updated:NOW,limit:60,hasMore:false}),NOW);
+  for(const [revision,state,expected] of [[0,'completed',false],[1,'open',true]] as const){
+    const response=await correctMessage(request({accountId:'acct-1',messageId:'m1',expectedRevision:revision,
+      action:{type:'set-obligation-state',obligationKey:obligationCorrectionKey(baseline.obligations[0]),state}}));
+    assert.equal(response.status,200);
+    const body=await response.json() as {email:Email};assert.equal(body.email.needsReply,expected);
+    if(state==='completed'){
+      // A sync may cache the corrected false flag before the task is reopened. A sync stores
+      // the flag together with the corrected classification it came from; a cleared flag
+      // beside a classification that still owes a reply is what a send leaves behind.
+      const data=JSON.parse((storage.sql.prepare('SELECT data FROM snapshots WHERE account_id=?').get('acct-1') as {data:string}).data);
+      data.emails[0].needsReply=false;
+      data.emails[0].classification={...data.emails[0].classification,replyRequired:false};
+      storage.sql.prepare('UPDATE snapshots SET data=? WHERE account_id=?').run(JSON.stringify(data),'acct-1');
+    }
+    const mailbox=await readMailbox('user-a','acct-1',env);
+    assert.equal(mailbox.emails[0].needsReply,expected);
+  }
+});

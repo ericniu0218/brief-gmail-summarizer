@@ -144,7 +144,7 @@ export async function POST(request:Request){
     const effective=withSenderRule(manual,senderRule,messageId);
     const {classification,category,tags,priority,label}=composeClassification(latestAutomatic,effective,Date.now());
     const email:StoredEmail={...latestSource,accountId:owned.id,accountEmail:owned.email,
-      automaticClassification:latestAutomatic,classification,category,tags,priority,label,
+      automaticClassification:latestAutomatic,classification,category,tags,priority,label,needsReply:!latestSource.replied&&classification.replyRequired,
       correctionRevision:manual?.revision??0,manuallyCorrected:manual?.active!==false&&!!manual,
       manualCorrection:manualCorrectionView(manual),
       senderJunkPreference:activeJunkPreference(senderRule),senderRuleRevision:senderRule?.revision??0,

@@ -2,11 +2,12 @@ import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { readFileSync } from 'node:fs';
-import { allByText, byLabel, byText, click, render, screen, setupDom, settle, teardownDom, unmountTree } from './dom';
+import { allByText, byLabel, byText, click, render, rerender, screen, setupDom, settle, teardownDom, unmountTree } from './dom';
 import Dashboard from '../app/page';
 import { ReplyComposer } from '../components/reply-composer';
 import { ClassificationDetail } from '../components/classification-detail';
 import { NoiseList } from '../components/noise-list';
+import { BlockConfirmFields } from '../components/block-confirm';
 import { PriorityEmailList } from '../components/priority-email-list';
 import { WeekCalendar } from '../components/week-calendar';
 import { SenderJunkButton } from '../components/sender-junk-button';
@@ -410,11 +411,172 @@ void test('a correction on an unattributed message is refused instead of guessed
     'the user is told how to recover rather than shown a dead end');
 });
 
+/** A Noise message that offers a supported unsubscribe. */
+function newsletter(over:Partial<Email>&{id:string}):Email{
+  return mail({accountId:'acct-1',category:'noise',oneClick:true,
+    unsubscribeCapability:'one-click',sender:'Daily News',address:'news@daily.example',
+    subject:'Issue '+over.id,...over} as Partial<Email>&{id:string;accountId:string});
+}
+
+void test('an accepted unsubscribe explains itself and keeps the message on screen', async () => {
+  setupDom();
+  const seen=stubFetch(async(url,body)=>{
+    if(url.startsWith('/api/unsubscribe'))
+      return {capability:'one-click',outcome:'accepted',reason:'accepted',
+        scope:'list',scopeDetail:'This request names the newsletter this message belongs to.'};
+    return defaultHandler(url,body);
+  });
+  const item=newsletter({id:'n1',listId:'daily.news.example'});
+  await render(createElement(NoiseList,{emails:[item],demo:false,onSelect:()=>{}}));
+  await settle();
+
+  await click(byText('button',/^Unsubscribe$/));
+  await settle();
+  assert.equal(seen.filter(r=>r.url.startsWith('/api/unsubscribe')).length,1);
+  // The wording is the accepted notice, and it never claims the sender has acted.
+  const shown=allByText('output',/accepted your unsubscribe request/);
+  assert.equal(shown.length,1,'the outcome is explained beside the button');
+  assert.ok(/existing emails will stay here/.test(shown[0].textContent||''));
+  assert.ok(byText('button',/Issue n1|Daily News/),'the message is still listed');
+  // Scope is available but tucked away, so it does not clutter the row.
+  assert.equal(allByText('small',/names the newsletter/).length,0,'detail stays collapsed');
+  await click(byText('button',/What does this cover\?/));
+  assert.equal(allByText('small',/names the newsletter/).length,1,'and opens on request');
+});
+
+void test('a newsletter needing confirmation offers the page, never a success message', async () => {
+  setupDom();
+  stubFetch(async(url,body)=>{
+    if(url.startsWith('/api/unsubscribe'))
+      return {capability:'one-click',outcome:'action-required',reason:'confirmation-required',
+        page:'https://news.list-manage.com/finish'};
+    return defaultHandler(url,body);
+  });
+  await render(createElement(NoiseList,{emails:[newsletter({id:'n2',listId:'a.example'})],demo:false,onSelect:()=>{}}));
+  await settle();
+  await click(byText('button',/^Unsubscribe$/));
+  await settle();
+  const shown=allByText('output',/requires confirmation on its website/);
+  assert.equal(shown.length,1);
+  assert.equal(allByText('output',/accepted/).length,0,'nothing claims success for an unfinished request');
+  const link=screen().querySelector('.unsubscribe-notice a') as HTMLAnchorElement|null;
+  assert.equal(link?.getAttribute('href'),'https://news.list-manage.com/finish');
+  assert.equal(link?.getAttribute('target'),'_blank');
+});
+
+void test('a sender with two newsletters gets no single control over both', async () => {
+  setupDom();
+  stubFetch(defaultHandler);
+  const weekly=newsletter({id:'w1',listId:'weekly.news.example',subject:'Weekly digest'});
+  const alerts=newsletter({id:'a1',listId:'alerts.news.example',subject:'Price alert'});
+  await render(createElement(NoiseList,{emails:[weekly,alerts],demo:false,onSelect:()=>{}}));
+  await settle();
+
+  // Both messages share one sender, so a group-level button would imply it covered both.
+  assert.equal(allByText('button',/^Unsubscribe$/).length,0,'no control on the group row');
+  assert.ok(byText('p',/2 separate newsletters/),'and the reason is stated');
+  await click(byLabel('Expand Daily News'));
+  await settle();
+  assert.equal(allByText('button',/Unsubscribe from this newsletter/).length,2,
+    'each newsletter gets its own control');
+});
+
+void test('two messages from one newsletter keep a single control', async () => {
+  setupDom();
+  stubFetch(defaultHandler);
+  const first=newsletter({id:'s1',listId:'same.news.example',subject:'Issue 1'});
+  const second=newsletter({id:'s2',listId:'same.news.example',subject:'Issue 2'});
+  await render(createElement(NoiseList,{emails:[first,second],demo:false,onSelect:()=>{}}));
+  await settle();
+  assert.equal(allByText('button',/^Unsubscribe$/).length,1,'one newsletter, one control');
+  assert.equal(allByText('p',/separate newsletters/).length,0);
+});
+
+void test('unsubscribing does not open or collapse the sender group', async () => {
+  setupDom();
+  stubFetch(async(url,body)=>{
+    if(url.startsWith('/api/unsubscribe'))return {capability:'one-click',outcome:'accepted',reason:'accepted'};
+    return defaultHandler(url,body);
+  });
+  await render(createElement(NoiseList,{emails:[newsletter({id:'n3',listId:'x.example'})],demo:false,onSelect:()=>{}}));
+  await settle();
+  assert.equal(byLabel('Expand Daily News').getAttribute('aria-expanded'),'false');
+  await click(byText('button',/^Unsubscribe$/));
+  await settle();
+  assert.equal(byLabel('Expand Daily News').getAttribute('aria-expanded'),'false',
+    'the group is where it was left');
+});
+
+void test('demo mode makes no external request and says so', async () => {
+  setupDom();
+  const seen=stubFetch(defaultHandler);
+  await render(createElement(NoiseList,{emails:[newsletter({id:'d1',listId:'demo.example'})],demo:true,onSelect:()=>{}}));
+  await settle();
+  await click(byText('button',/^Unsubscribe$/));
+  await settle();
+  assert.equal(seen.filter(r=>r.url.startsWith('/api/unsubscribe')).length,0,'nothing was submitted');
+  assert.ok(allByText('output',/Demo only/).length>0,'and the notice says so plainly');
+});
+
+void test('the button reports its own state and blocks a second click', async () => {
+  setupDom();
+  let release!:()=>void;
+  const held=new Promise<void>(resolve=>{release=resolve;});
+  let calls=0;
+  const seen=stubFetch(async(url,body)=>{
+    if(url.startsWith('/api/unsubscribe')){calls++;await held;return {capability:'one-click',outcome:'accepted',reason:'accepted'};}
+    return defaultHandler(url,body);
+  });
+  await render(createElement(NoiseList,{emails:[newsletter({id:'b1',listId:'b.example'})],demo:false,onSelect:()=>{}}));
+  await settle();
+
+  const button=byText('button',/^Unsubscribe$/);
+  assert.equal(button.getAttribute('aria-busy'),null,'at rest it is not busy');
+  await click(button);
+  const working=byText('button',/Unsubscribing…/);
+  assert.equal(working.getAttribute('aria-busy'),'true','the state is announced, not only drawn');
+  assert.ok((working as HTMLButtonElement).disabled,'and it cannot be pressed again');
+  // A second attempt while the first is in flight never becomes a request.
+  await click(working);
+  assert.equal(calls,1,'one request, however many clicks');
+  release();
+  await settle();
+  assert.equal(seen.filter(r=>r.url.startsWith('/api/unsubscribe')).length,1);
+  assert.ok(allByText('output',/accepted your unsubscribe request/).length>0);
+  assert.ok(byText('button',/Unsubscribe again/),'the control stays usable afterwards');
+});
+
+void test('switching to another mailbox drops a stale notice', async () => {
+  setupDom();
+  let release!:()=>void;
+  const held=new Promise<void>(resolve=>{release=resolve;});
+  stubFetch(async(url,body)=>{
+    if(url.startsWith('/api/unsubscribe')){await held;return {capability:'one-click',outcome:'accepted',reason:'accepted'};}
+    return defaultHandler(url,body);
+  });
+  const first=newsletter({id:'m-first',listId:'first.example',sender:'First Sender',address:'one@first.example'});
+  const second=newsletter({id:'m-second',listId:'second.example',sender:'Second Sender',address:'two@second.example'});
+  await render(createElement(NoiseList,{emails:[first],demo:false,onSelect:()=>{}}));
+  await settle();
+  await click(byText('button',/^Unsubscribe$/));
+
+  // The account changes while the request is in flight, so the list is replaced.
+  await rerender(createElement(NoiseList,{emails:[second],demo:false,onSelect:()=>{}}));
+  await settle();
+  release();
+  await settle();
+  // The answer belonged to a newsletter that is no longer shown, so it is not attached to
+  // whatever now occupies that row. The server-side record was written regardless.
+  assert.equal(allByText('output',/accepted your unsubscribe request/).length,0,
+    'no notice is shown against the wrong newsletter');
+  assert.ok(byText('strong',/Second Sender/),'the new mailbox is what is displayed');
+});
+
 void test('unsubscribing from an unattributed message is refused instead of guessed', async () => {
   setupDom();
   const seen=stubFetch(defaultHandler);
   const junk={...unattributed,category:'noise',oneClick:true,unsubscribe:'https://sender.example/unsubscribe'} as unknown as Email;
-  await render(createElement(NoiseList,{emails:[junk],demo:false,onRemoved:()=>{},onSelect:()=>{}}));
+  await render(createElement(NoiseList,{emails:[junk],demo:false,onSelect:()=>{}}));
   await settle();
 
   await click(byText('button',/^Unsubscribe$/));
@@ -642,9 +804,10 @@ void test('a day in the month grid opens its events in chronological order', asy
 
   const popup=screen().querySelector('.calendar-popup')!;
   assert.ok(popup,'clicking a date opens that day');
-  const bullets=[...popup.querySelectorAll('li')].map(node=>(node.textContent||'').trim());
+  const bullets=[...popup.querySelectorAll('.calendar-agenda-summary')].map(node=>(node.textContent||'').trim());
   // One bullet per event, earliest clock time first; the undated one follows the timed.
   assert.deepEqual(bullets,['Morning standup','Afternoon review','Budget paperwork']);
+  assert.deepEqual([...popup.querySelectorAll('.calendar-agenda-time')].map(node=>node.textContent),['9:00 AM','3:30 PM']);
   // Only that day's events, never the whole month.
   assert.ok(!bullets.includes('Different day'),'another day’s event is not listed');
 
@@ -945,4 +1108,271 @@ void test('the reader declares one close control, not two', () => {
   assert.match(source,/className="email-sheet-actions"/,'inside the reader action row');
   // Other sheets keep their own close button.
   assert.equal(source.match(/showCloseButton=/g)?.length,1,'no other sheet is changed');
+});
+
+// ── Blocking senders without a verified unsubscribe ─────────────────────────
+
+/** Tests of what a block does skip the question, as "Don't ask me again" would. */
+function skipQuestion(){globalThis.localStorage.setItem('brief-skip-block-confirm:user-a','true');}
+
+void test('a sender without a verified unsubscribe gets Block sender, which hides it after one click', async () => {
+  setupDom();
+  const seen=stubFetch(async(url,body)=>{
+    if(url.startsWith('/api/block'))return {accountId:'acct-1',address:'promo@shop.example',blocked:true};
+    return defaultHandler(url,body);
+  });
+  const promo=newsletter({id:'p1',oneClick:false,unsubscribeCapability:'manual-page',sender:'Shop',address:'promo@shop.example'});
+  let reloads=0;
+  skipQuestion();
+  await render(createElement(NoiseList,{emails:[promo],demo:false,user:'user-a',onSelect:()=>{},
+    onBlockChanged:async()=>{reloads++;return true;}}));
+  await settle();
+
+  assert.equal(allByText('button',/Unsubscribe/).length,0,'no unsubscribe button for an unverified sender');
+  await click(byText('button',/^Block sender$/));
+  await settle();
+  const sent=seen.filter(r=>r.url.startsWith('/api/block'));
+  assert.equal(sent.length,1);
+  assert.deepEqual(sent[0].body,{accountId:'acct-1',address:'promo@shop.example',name:'Shop',blocked:true});
+  assert.equal(reloads,1,'the mailbox is re-read so the sender leaves the list');
+  assert.equal(seen.filter(r=>r.url.startsWith('/api/unsubscribe')).length,0,'the sender is never contacted');
+
+  // A short notice confirms the block, and stays even though the row is gone.
+  assert.equal(allByText('output',/Blocked Shop/).length,1,'a notice confirms the block');
+  await click(byText('button',/^Undo$/));
+  await settle();
+  assert.deepEqual(seen.filter(r=>r.url.startsWith('/api/block'))[1]?.body,
+    {accountId:'acct-1',address:'promo@shop.example',blocked:false},'Undo unblocks the same sender');
+  assert.equal(allByText('output',/Blocked Shop/).length,0,'and the notice goes away');
+});
+
+void test('the block notice can be dismissed', async () => {
+  setupDom();
+  stubFetch(async(url,body)=>url.startsWith('/api/block')?{blocked:true}:defaultHandler(url,body));
+  skipQuestion();
+  await render(createElement(NoiseList,{emails:[newsletter({id:'p2',oneClick:false,sender:'Shop'})],demo:false,
+    user:'user-a',onSelect:()=>{},onBlockChanged:async()=>true}));
+  await settle();
+  await click(byText('button',/^Block sender$/));
+  await settle();
+  await click(byLabel('Dismiss'));
+  assert.equal(allByText('output',/Blocked Shop/).length,0);
+});
+
+void test('a verified newsletter keeps one-click Unsubscribe, and a failed one offers Block instead', async () => {
+  setupDom();
+  const seen=stubFetch(async(url,body)=>{
+    if(url.startsWith('/api/unsubscribe'))return {capability:'one-click',outcome:'unknown',reason:'uncertain'};
+    if(url.startsWith('/api/block'))return {blocked:true};
+    return defaultHandler(url,body);
+  });
+  skipQuestion();
+  await render(createElement(NoiseList,{emails:[newsletter({id:'v1',listId:'v.example'})],demo:false,user:'user-a',onSelect:()=>{},
+    onBlockChanged:async()=>true}));
+  await settle();
+  assert.equal(allByText('button',/^Block sender$/).length,0,'a verified newsletter is unsubscribed, not blocked');
+  await click(byText('button',/^Unsubscribe$/));
+  await settle();
+  await click(byText('button',/Block sender instead/));
+  await settle();
+  assert.equal(seen.filter(r=>r.url.startsWith('/api/block')).length,1);
+});
+
+void test('an accepted unsubscribe does not suggest blocking', async () => {
+  setupDom();
+  stubFetch(async(url,body)=>{
+    if(url.startsWith('/api/unsubscribe'))return {capability:'one-click',outcome:'accepted',reason:'accepted'};
+    return defaultHandler(url,body);
+  });
+  await render(createElement(NoiseList,{emails:[newsletter({id:'v2',listId:'w.example'})],demo:false,onSelect:()=>{}}));
+  await settle();
+  await click(byText('button',/^Unsubscribe$/));
+  await settle();
+  assert.equal(allByText('button',/Block sender instead/).length,0);
+});
+
+void test('blocked senders are listed and can be unblocked', async () => {
+  setupDom();
+  const seen=stubFetch(async(url,body)=>{
+    if(url.startsWith('/api/block'))return {blocked:false};
+    return defaultHandler(url,body);
+  });
+  let reloads=0;
+  await render(createElement(NoiseList,{emails:[],demo:false,onSelect:()=>{},onBlockChanged:async()=>{reloads++;return true;},
+    blocked:[{accountId:'acct-1',accountEmail:'me@example.com',address:'promo@shop.example',name:'Shop',created:1}]}));
+  await settle();
+  assert.ok(byText('p',/hidden here, not deleted/),'the list says nothing was deleted');
+  await click(byLabel('Unblock Shop'));
+  await settle();
+  const sent=seen.filter(r=>r.url.startsWith('/api/block'));
+  assert.deepEqual(sent[0]?.body,{accountId:'acct-1',address:'promo@shop.example',blocked:false});
+  assert.equal(reloads,1);
+});
+
+void test('blocking in the demo sends nothing', async () => {
+  setupDom();
+  const seen=stubFetch(defaultHandler);
+  skipQuestion();
+  await render(createElement(NoiseList,{emails:[newsletter({id:'d1',oneClick:false})],demo:true,user:'user-a',onSelect:()=>{}}));
+  await settle();
+  await click(byText('button',/^Block sender$/));
+  await settle();
+  assert.equal(seen.filter(r=>r.url.startsWith('/api/block')).length,0);
+  assert.ok(allByText('output',/Demo only/).length>0);
+});
+
+void test('Block sender asks first, and sends nothing until confirmed', async () => {
+  setupDom();
+  const seen=stubFetch(defaultHandler);
+  await render(createElement(NoiseList,{emails:[newsletter({id:'q1',oneClick:false,sender:'Shop'})],demo:false,
+    user:'user-a',onSelect:()=>{},onBlockChanged:async()=>true}));
+  await settle();
+  // The question itself is a dialog, which this harness cannot render (see tests/dom.ts);
+  // what matters most is that pressing the button alone blocks nothing.
+  await click(byText('button',/^Block sender$/));
+  await settle();
+  assert.equal(seen.filter(r=>r.url.startsWith('/api/block')).length,0,'nothing is blocked before confirming');
+  assert.equal(allByText('output',/Blocked Shop/).length,0);
+});
+
+void test('the question explains blocking and offers Don’t ask me again', async () => {
+  setupDom();
+  const ticks:boolean[]=[];
+  await render(createElement(BlockConfirmFields,{dontAsk:false,onDontAskChange:(value:boolean)=>{ticks.push(value);}}));
+  const text=screen().textContent||'';
+  for(const phrase of [/hidden in Gmail Hub/,/Nothing is deleted/,/sender isn’t told/,/unblock them anytime/])
+    assert.ok(phrase.test(text),`the explanation says ${String(phrase)}`);
+  await click(screen().querySelector('input[type=checkbox]') as HTMLElement);
+  assert.deepEqual(ticks,[true],'ticking the box reports the choice');
+  assert.ok(byText('label',/Don’t ask me again/));
+});
+
+void test('someone who chose not to be asked can turn the question back on', async () => {
+  setupDom();
+  stubFetch(defaultHandler);
+  skipQuestion();
+  await render(createElement(NoiseList,{emails:[],demo:false,user:'user-a',onSelect:()=>{}}));
+  await settle();
+  await click(byText('button',/^Ask me again$/));
+  assert.equal(globalThis.localStorage.getItem('brief-skip-block-confirm:user-a'),null);
+  assert.equal(allByText('button',/^Ask me again$/).length,0);
+});
+
+void test('one person’s Don’t ask again does not apply to another', async () => {
+  setupDom();
+  const seen=stubFetch(defaultHandler);
+  skipQuestion();
+  await render(createElement(NoiseList,{emails:[newsletter({id:'q2',oneClick:false})],demo:false,user:'user-b',onSelect:()=>{}}));
+  await settle();
+  await click(byText('button',/^Block sender$/));
+  await settle();
+  assert.equal(seen.filter(r=>r.url.startsWith('/api/block')).length,0,'user-b is still asked');
+});
+
+void test('newsletter state and running requests are isolated across accounts',async()=>{
+  setupDom();
+  let release!:()=>void;
+  const held=new Promise<void>(resolve=>{release=resolve;});
+  const seen=stubFetch(async(url,body)=>{
+    if(url.startsWith('/api/unsubscribe')){
+      if(body?.accountId==='acct-1')await held;
+      return {capability:'one-click',outcome:'accepted',reason:'accepted'};
+    }
+    return defaultHandler(url,body);
+  });
+  await render(createElement(NoiseList,{emails:[newsletter({id:'same',accountId:'acct-1',listId:'shared.example'}),
+    newsletter({id:'same',accountId:'acct-2',listId:'shared.example'})],demo:false,onSelect:()=>{}}));
+  const buttons=allByText('button',/^Unsubscribe$/);
+  await click(buttons[0]);
+  assert.equal((buttons[1] as HTMLButtonElement).disabled,false);
+  await click(buttons[1]);await settle();
+  assert.equal(allByText('output',/accepted your unsubscribe request/).length,1);
+  assert.equal(seen.filter(r=>r.url.startsWith('/api/unsubscribe')).length,2);
+  release();await settle();
+  assert.equal(allByText('output',/accepted your unsubscribe request/).length,2);
+});
+
+void test('newsletter group chooses an older verified message and confirms uncertain retries',async()=>{
+  setupDom();
+  const seen=stubFetch(async(url,body)=>url.startsWith('/api/unsubscribe')
+    ?{capability:'one-click',outcome:'unknown',reason:'uncertain'}:defaultHandler(url,body));
+  await render(createElement(NoiseList,{emails:[newsletter({id:'new',listId:'same.example',oneClick:false}),
+    newsletter({id:'verified',listId:'same.example',oneClick:true})],demo:false,onSelect:()=>{}}));
+  await click(byText('button',/^Unsubscribe$/));await settle();
+  assert.equal(seen.find(r=>r.url.startsWith('/api/unsubscribe'))?.body?.id,'verified');
+  await click(byText('button',/I checked — retry unsubscribe/));await settle();
+  assert.equal(seen.filter(r=>r.url.startsWith('/api/unsubscribe'))[1].body?.confirmRetry,true);
+});
+
+void test('switching signed-in users resets the block-confirmation preference display',async()=>{
+  setupDom();stubFetch(defaultHandler);
+  const props={emails:[newsletter({id:'news',oneClick:false})],demo:false,onSelect:()=>{}};
+  globalThis.localStorage.setItem('brief-skip-block-confirm:first-user','true');
+  await render(createElement(NoiseList,{...props,user:'first-user'}));
+  assert.ok(allByText('button',/Ask me again/).length);
+  await rerender(createElement(NoiseList,{...props,user:'second-user'}));await settle();
+  assert.equal(allByText('button',/Ask me again/).length,0);
+});
+
+// ── Audit 2026-09-29, section 3: Noise controls ───────────────────────────────
+
+void test('one running unsubscribe labels only its own button', async () => {
+  setupDom();
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  stubFetch(async (url, body) => {
+    if (url.startsWith('/api/unsubscribe')) { await held; return { capability: 'one-click', outcome: 'accepted', reason: 'accepted' }; }
+    return defaultHandler(url, body);
+  });
+  await render(createElement(NoiseList, { emails: [
+    newsletter({ id: 'a', sender: 'Alpha', address: 'a@alpha.example', listId: 'a.list' }),
+    newsletter({ id: 'b', sender: 'Beta', address: 'b@beta.example', listId: 'b.list' }),
+    newsletter({ id: 'c', sender: 'Gamma', address: 'c@gamma.example', oneClick: false, unsubscribeCapability: 'none' }),
+  ], demo: false, onSelect: () => {} }));
+  await click(allByText('button', /^Unsubscribe$/)[0]);
+  assert.equal(allByText('button', /Unsubscribing…/).length, 1, 'only the pressed button says it is working');
+  assert.equal(allByText('button', /Blocking…/).length, 0);
+  const other = allByText('button', /^Unsubscribe$/)[0] as HTMLButtonElement;
+  assert.equal(other.disabled, false, 'another newsletter in the same account is still available');
+  assert.equal((allByText('button', /Block sender/)[0] as HTMLButtonElement).disabled, false);
+  release(); await settle();
+});
+
+void test('a late unsubscribe answer is dropped when its newsletter has left the screen', async () => {
+  setupDom();
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  stubFetch(async (url, body) => {
+    if (url.startsWith('/api/unsubscribe')) { await held; return { capability: 'one-click', outcome: 'failed', reason: 'provider-rejected' }; }
+    return defaultHandler(url, body);
+  });
+  const first = newsletter({ id: 'first', listId: 'first.list' });
+  const props = { demo: false, onSelect: () => {} };
+  await render(createElement(NoiseList, { ...props, emails: [first] }));
+  await click(byText('button', /^Unsubscribe$/));
+  await rerender(createElement(NoiseList, { ...props, emails: [newsletter({ id: 'other', accountId: 'acct-2', listId: 'other.list' })] }));
+  release(); await settle();
+  await rerender(createElement(NoiseList, { ...props, emails: [first] })); await settle();
+  assert.equal(allByText('output', /couldn’t accept/).length, 0, 'the answer did not attach itself after the list changed');
+});
+
+void test('a link the server will not call is offered to open, not described as missing', async () => {
+  setupDom();
+  stubFetch(async (url, body) => url.startsWith('/api/unsubscribe')
+    ? { capability: 'manual-page', outcome: 'none', reason: 'open-page', page: 'https://unknown-provider.example/u?id=1' }
+    : defaultHandler(url, body));
+  await render(createElement(NoiseList, { emails: [newsletter({ id: 'stale', listId: 'stale.list' })], demo: false, onSelect: () => {} }));
+  await click(byText('button', /^Unsubscribe$/)); await settle();
+  assert.equal(allByText('output', /doesn’t include a supported unsubscribe option/).length, 0);
+  const link = byText('a', /Open unsubscribe page/) as HTMLAnchorElement;
+  assert.equal(link.getAttribute('href'), 'https://unknown-provider.example/u?id=1');
+});
+
+void test('a sender with no real address is not offered Block sender', async () => {
+  setupDom(); stubFetch(defaultHandler);
+  await render(createElement(NoiseList, { emails: [
+    newsletter({ id: 'ghost', sender: 'Unknown', address: 'unattributed:ghost', oneClick: false, unsubscribeCapability: 'none' }),
+    newsletter({ id: 'real', sender: 'Real', address: 'real@real.example', oneClick: false, unsubscribeCapability: 'none' }),
+  ], demo: false, onSelect: () => {} }));
+  assert.equal(allByText('button', /Block sender/).length, 1, 'only the real sender can be blocked');
 });

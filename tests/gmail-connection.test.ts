@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { database } from './database';
 import { GET as startGoogle } from '../app/api/auth/google/route';
 import { GET as googleCallback } from '../app/api/auth/google/callback/route';
@@ -7,7 +8,11 @@ import { GET as connectionStatus } from '../app/api/connection/route';
 import { GET as mailbox } from '../app/api/mailbox/route';
 import { POST as syncMailbox } from '../app/api/sync/route';
 import { loadConnectedInbox, type InboxSnapshot } from '../lib/inbox-client';
-import { syncInbox } from '../server/sync';
+import { CONTENT_VERSION, syncInbox } from '../server/sync';
+import { loadMessages, snapshotSentIds } from '../server/messages';
+import { POST as unsubscribeRoute } from '../app/api/unsubscribe/route';
+import { POST as replyRoute } from '../app/api/reply/route';
+import { POST as disconnectRoute } from '../app/api/disconnect/route';
 import {
   decrypt,
   encode,
@@ -24,6 +29,12 @@ const scopes = ['gmail.readonly', 'gmail.send', 'gmail.compose']
   .map((s) => 'https://www.googleapis.com/auth/' + s)
   .join(' ');
 let requests: { url: string; init?: RequestInit }[];
+/** Lets a test make the Gmail list report a continuation page. */
+let paging: 'done' | 'more';
+/** Lets a test choose what the newsletter service answers, and when. */
+let provider: { status: number; delay?: { promise: Promise<void>; resolve: () => void }; started?: { promise: Promise<void>; resolve: () => void } };
+/** The messages Gmail reports, and the headers each carries. */
+let inbox: { id: string; from?: string; headers?: [string, string][] }[];
 
 beforeEach(() => {
   storage = database();
@@ -41,6 +52,9 @@ beforeEach(() => {
   });
   profileEmail = 'Me@Example.com';
   requests = [];
+  paging = 'done';
+  provider = { status: 200 };
+  inbox = [{ id: 'message' }];
   globalThis.fetch = async (input, init) => {
     const url = requestUrl(input);
     requests.push({ url, init });
@@ -57,23 +71,45 @@ beforeEach(() => {
     if (url.endsWith('/users/me/profile'))
       return Response.json({ emailAddress: profileEmail });
     if (url.includes('/users/me/messages?maxResults=100&q='))
-      return Response.json({ messages: [{ id: 'message' }] });
-    if (url.endsWith('/users/me/messages/message?format=full'))
+      return Response.json(
+        paging === 'more'
+          ? { messages: inbox.map((m) => ({ id: m.id })), nextPageToken: 'next-page' }
+          : { messages: inbox.map((m) => ({ id: m.id })) },
+      );
+    const wanted = /\/users\/me\/messages\/([^?]+)\?format=full/.exec(url)?.[1];
+    if (wanted) {
+      const described = inbox.find((m) => m.id === wanted);
+      if (!described) return new Response('not found', { status: 404 });
+      // A signed one-click newsletter unless the test says otherwise.
+      const headers = described.headers ?? [
+        ['List-Id', 'Daily <daily.news.example.com>'],
+        ['List-Unsubscribe', '<https://news.list-manage.com/u?id=1>'],
+        ['List-Unsubscribe-Post', 'List-Unsubscribe=One-Click'],
+        ['Authentication-Results', 'mx.google.com; dkim=pass header.d=list-manage.com'],
+        ['DKIM-Signature', 'v=1; d=list-manage.com; h=from:subject:list-unsubscribe:list-unsubscribe-post; b=x'],
+      ];
       return Response.json({
-        id: 'message',
-        threadId: 'thread',
+        id: described.id,
+        threadId: 'thread-' + described.id,
         snippet: 'Hello',
         internalDate: '1788960000000',
         labelIds: ['INBOX'],
         payload: {
           mimeType: 'text/plain',
           headers: [
-            { name: 'From', value: 'Sender <sender@example.com>' },
+            { name: 'From', value: described.from ?? 'Sender <sender@example.com>' },
             { name: 'Subject', value: 'Hello' },
+            ...headers.map(([name, value]) => ({ name, value })),
           ],
           body: { data: encode('Hello') },
         },
       });
+    }
+    if (url.startsWith('https://news.list-manage.com/')) {
+      provider.started?.resolve();
+      if (provider.delay) await provider.delay.promise;
+      return new Response(null, { status: provider.status });
+    }
     throw new Error(`Unexpected provider request: ${url}`);
   };
 });
@@ -134,11 +170,6 @@ async function seed(
       user,
       JSON.stringify({ emails: [{ id: 'cached' }], ai: false, updated: 123 }),
     );
-  storage.sql
-    .prepare(
-      'INSERT INTO unsubscribed (id,user_id,account_id,address,created) VALUES (?,?,?,?,123)',
-    )
-    .run(account + ':newsletter', user, account, 'newsletter@example.com');
   storage.sql
     .prepare(
       "INSERT INTO operations (id,user_id,account_id,status,result) VALUES (?,?,?,'complete','receipt')",
@@ -324,7 +355,7 @@ void test('mailbox scans resume through Gmail pages and retain earlier pages',as
   assert.deepEqual(new Set(second.emails.map(email=>email.id)),new Set(['newer','older']));
   assert.ok(!second.emails.some(email=>email.id==='cached'),'a completed scan removes mail it never saw');
   assert.equal(row('connections')!.sync_page_token,null);
-  assert.equal(row('connections')!.content_version,1,'the rich-body backfill is complete only after the last page');
+  assert.equal(row('connections')!.content_version,CONTENT_VERSION,'the backfill is complete only after the last page');
 });
 
 void test('a corrupt override row falls back to empty tags without aborting sync', async () => {
@@ -538,6 +569,367 @@ for (const [googleError, expected] of [
   });
 }
 
+/** One unsubscribe request for the message the Gmail stub describes. */
+function unsubscribeRequest(id = 'message', accountId = 'user-a', confirmRetry=false) {
+  return unsubscribeRoute(
+    new Request(`${env.APP_URL}/api/unsubscribe`, {
+      method: 'POST',
+      headers: { origin: env.APP_URL!, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, accountId, confirmRetry }),
+    }),
+  );
+}
+const sentToProvider = () =>
+  requests.filter((r) => r.url.startsWith('https://news.list-manage.com/')).length;
+
+void test('a second click while the first is running does not reach the provider twice', async () => {
+  await seed();
+  const started=deferred();
+  provider = { status: 200, delay: deferred(), started };
+  const first = unsubscribeRequest();
+  await started.promise;
+  // The second arrives while the first still holds the claim, so it is answered from the
+  // stored row instead of producing another request to the newsletter service.
+  const second = (await (await unsubscribeRequest()).json()) as { outcome: string; saved?: boolean };
+  assert.equal(second.outcome, 'pending', 'the request already in flight is reported');
+  assert.equal(second.saved, true, 'and it came from the record, not from a new request');
+
+  provider.delay!.resolve();
+  const firstBody = (await (await first).json()) as { outcome: string };
+  assert.equal(firstBody.outcome, 'accepted');
+  assert.equal(sentToProvider(), 1, 'exactly one request reached the provider');
+});
+
+void test('an uncertain outcome is never retried by itself, a refusal can be', async () => {
+  await seed();
+  provider = { status: 504 };
+  const uncertain = (await (await unsubscribeRequest()).json()) as { outcome: string };
+  assert.equal(uncertain.outcome, 'unknown', 'a broken service is not a refusal');
+
+  // Clicking again returns what is stored rather than repeating a request that may already
+  // have unsubscribed the person.
+  provider = { status: 200 };
+  const again = (await (await unsubscribeRequest()).json()) as { outcome: string; saved?: boolean };
+  assert.equal(again.outcome, 'unknown');
+  assert.equal(again.saved, true);
+  assert.equal(sentToProvider(), 1, 'no second request was sent for an uncertain outcome');
+
+  // A definite refusal is recoverable: the next attempt really does try again.
+  storage.sql.prepare("UPDATE unsubscribe_requests SET outcome='failed'").run();
+  const retried = (await (await unsubscribeRequest()).json()) as { outcome: string };
+  assert.equal(retried.outcome, 'accepted');
+  assert.equal(sentToProvider(), 2, 'a failed request may be tried again');
+});
+
+void test('a stale attempt cannot overwrite the result of a newer one', async () => {
+  await seed();
+  provider = { status: 200 };
+  await unsubscribeRequest();
+  const row = () =>
+    storage.sql.prepare('SELECT outcome, attempt FROM unsubscribe_requests').get() as
+      { outcome: string; attempt: string | null };
+  assert.equal(row().outcome, 'accepted');
+  assert.ok(row().attempt, 'the winning attempt is recorded on the row');
+
+  // A slow earlier attempt writes against the attempt id it was given, which the row no
+  // longer carries, so nothing is overwritten.
+  const overwritten = storage.sql
+    .prepare("UPDATE unsubscribe_requests SET outcome='failed' WHERE attempt=?")
+    .run('an-attempt-that-lost');
+  assert.equal(overwritten.changes, 0);
+  assert.equal(row().outcome, 'accepted', 'the newer result stands');
+});
+
+void test('the provider response decides the outcome, and no outcome touches the mailbox', async () => {
+  await seed();
+  await syncInbox('user-a', 'user-a', env);
+  const stored = () =>
+    (storage.sql
+      .prepare('SELECT COUNT(*) AS n FROM mailbox_messages WHERE account_id=?')
+      .get('user-a') as { n: number }).n;
+  const before = stored();
+  assert.ok(before > 0, 'there is mail to lose');
+
+  for (const [status, expected] of
+    [[200, 'accepted'], [302, 'action-required'], [400, 'failed'], [500, 'unknown']] as const) {
+    storage.sql.prepare('DELETE FROM unsubscribe_requests').run();
+    provider = { status };
+    const body = (await (await unsubscribeRequest()).json()) as { outcome: string };
+    assert.equal(body.outcome, expected, `status ${status}`);
+  }
+  assert.equal(stored(), before, 'no unsubscribe outcome removes stored mail');
+});
+
+void test('after unsubscribing, receipts and later newsletters from that sender still arrive', async () => {
+  await seed();
+  provider = { status: 200 };
+  await syncInbox('user-a', 'user-a', env);
+  assert.equal((await (await unsubscribeRequest()).json() as { outcome: string }).outcome, 'accepted');
+
+  // The same sending address later delivers a receipt and another newsletter issue. Both are
+  // stored: the sender decides what it sends, and a receipt is not a newsletter.
+  inbox = [
+    { id: 'message' },
+    { id: 'receipt', headers: [['Subject', 'Your receipt']] },
+    { id: 'issue-2' },
+  ];
+  await syncInbox('user-a', 'user-a', env);
+  const ids = (storage.sql
+    .prepare('SELECT message_id FROM mailbox_messages WHERE account_id=? ORDER BY message_id')
+    .all('user-a') as { message_id: string }[]).map((r) => r.message_id);
+  assert.deepEqual(ids, ['issue-2', 'message', 'receipt'],
+    'nothing from that sender is filtered out after an unsubscribe');
+});
+
+void test('an unsubscribe leaves an explicit junk rule exactly as it was', async () => {
+  await seed();
+  storage.sql
+    .prepare(`INSERT INTO sender_rules (user_id,account_id,address,junk_preference,revision,updated,active)
+      VALUES (?,?,?,'junk',3,7,1)`)
+    .run('user-a', 'user-a', 'sender@example.com');
+  const before = storage.sql.prepare('SELECT * FROM sender_rules').get();
+  provider = { status: 200 };
+  await unsubscribeRequest();
+  assert.deepEqual(storage.sql.prepare('SELECT * FROM sender_rules').get(), before,
+    'unsubscribing is not a filing decision and never touches a junk rule');
+});
+
+void test('the same newsletter in two mailboxes is two separate records', async () => {
+  await seed();
+  await seed('user-a', 'second@example.com', 0, 'acct-2');
+  provider = { status: 200 };
+  await unsubscribeRequest('message', 'user-a');
+  await unsubscribeRequest('message', 'acct-2');
+  const rows = storage.sql
+    .prepare('SELECT id, account_id FROM unsubscribe_requests ORDER BY account_id')
+    .all() as { id: string; account_id: string }[];
+  assert.deepEqual(rows.map((r) => r.account_id), ['acct-2', 'user-a']);
+  assert.equal(new Set(rows.map((r) => r.id)).size, 2, 'one mailbox is never the other');
+});
+
+void test('a forged account id and a browser-supplied destination are both refused', async () => {
+  await seed();
+  provider = { status: 200 };
+  // An account belonging to nobody, and one belonging to another user, are indistinguishable.
+  await seed('user-b', 'other@example.com', 0, 'acct-b');
+  for (const accountId of ['acct-b', 'does-not-exist', 'all']) {
+    const response = await unsubscribeRequest('message', accountId);
+    assert.ok(response.status === 404 || response.status === 400, `${accountId} -> ${response.status}`);
+  }
+  assert.equal(
+    (storage.sql.prepare('SELECT COUNT(*) AS n FROM unsubscribe_requests').get() as { n: number }).n,
+    0, 'no record is created for an account the user does not own');
+
+  // A destination in the request body is ignored: the endpoint comes from the message.
+  const response = await unsubscribeRoute(new Request(`${env.APP_URL}/api/unsubscribe`, {
+    method: 'POST', headers: { origin: env.APP_URL!, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: 'message', accountId: 'user-a', url: 'https://attacker.example/steal' }),
+  }));
+  assert.equal((await response.json() as { outcome: string }).outcome, 'accepted');
+  assert.equal(requests.filter((r) => r.url.includes('attacker.example')).length, 0,
+    'the browser cannot choose where the request goes');
+  assert.equal(sentToProvider(), 1);
+});
+
+void test('a dropped connection is reported as uncertain, not as success or refusal', async () => {
+  await seed();
+  provider = { status: 0 };
+  const saved = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    if (requestUrl(input).startsWith('https://news.list-manage.com/')) throw new Error('socket closed');
+    return saved(input, init);
+  };
+  const body = await (await unsubscribeRequest()).json() as { outcome: string; reason: string };
+  globalThis.fetch = saved;
+  assert.equal(body.outcome, 'unknown');
+  assert.equal(body.reason, 'uncertain');
+  const row = storage.sql.prepare('SELECT outcome FROM unsubscribe_requests').get() as { outcome: string };
+  assert.equal(row.outcome, 'unknown', 'and the record says so, so nothing retries it by itself');
+});
+
+void test('a provider acceptance that cannot be recorded is described accurately', async () => {
+  await seed();
+  provider = { status: 200 };
+  // The row vanishes between the claim and the completion write, as a database fault would.
+  const real = env.DB;
+  let dropped = false;
+  env.DB = new Proxy(real, {
+    get(target, property, receiver) {
+      if (property !== 'prepare') return Reflect.get(target, property, receiver) as unknown;
+      return (query: string) => {
+        if (!dropped && query.startsWith('UPDATE unsubscribe_requests SET outcome=?')) {
+          dropped = true;
+          storage.sql.prepare('DELETE FROM unsubscribe_requests').run();
+        }
+        return target.prepare(query);
+      };
+    },
+  });
+  const body = await (await unsubscribeRequest()).json() as { outcome: string; reason: string };
+  assert.equal(body.outcome, 'accepted', 'the provider did accept, and that is what is reported');
+  assert.equal(body.reason, 'record-not-saved', 'and the failure to save it is stated separately');
+});
+
+void test('disconnecting a mailbox takes its unsubscribe history with it', async () => {
+  await seed();
+  provider = { status: 200 };
+  await unsubscribeRequest();
+  assert.equal(
+    (storage.sql.prepare('SELECT COUNT(*) AS n FROM unsubscribe_requests').get() as { n: number }).n,
+    1, 'there is history to leave behind');
+
+  const response = await disconnectAccount(new Request(`${env.APP_URL}/api/disconnect`, {
+    method: 'POST', headers: { origin: env.APP_URL!, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ accountId: 'user-a' }),
+  }));
+  assert.equal(response.status, 200);
+  assert.equal(
+    (storage.sql.prepare('SELECT COUNT(*) AS n FROM unsubscribe_requests').get() as { n: number }).n,
+    0, 'no row survives the account it belonged to');
+});
+
+void test('a disconnected account cannot gain an orphaned record', async () => {
+  await seed();
+  storage.sql.prepare('DELETE FROM connections WHERE id=?').run('user-a');
+  const response = await unsubscribeRequest();
+  assert.equal(response.status, 404);
+  assert.equal(
+    (storage.sql.prepare('SELECT COUNT(*) AS n FROM unsubscribe_requests').get() as { n: number }).n,
+    0);
+});
+
+void test('a recovery scan restores mail an earlier version deleted', async () => {
+  await seed();
+  await syncInbox('user-a', 'user-a', env);
+  const count = () =>
+    (storage.sql.prepare('SELECT COUNT(*) AS n FROM mailbox_messages WHERE account_id=?')
+      .get('user-a') as { n: number }).n;
+  assert.equal(count(), 1);
+
+  // Exactly what the old code did: the rows are gone, and the account is queued.
+  storage.sql.prepare('DELETE FROM mailbox_messages WHERE account_id=?').run('user-a');
+  storage.sql.prepare('UPDATE connections SET recovery_needed=1, last_full_scan=? WHERE id=?')
+    .run(Date.now(), 'user-a');
+  assert.equal(count(), 0);
+
+  // An interrupted scan keeps the flag and its position, then a later run finishes it.
+  paging = 'more';
+  await syncInbox('user-a', 'user-a', env);
+  assert.equal(count(), 1, 'the message still in Gmail comes back');
+  assert.equal((storage.sql.prepare('SELECT recovery_needed FROM connections WHERE id=?')
+    .get('user-a') as { recovery_needed: number }).recovery_needed, 1, 'and recovery is not yet done');
+  paging = 'done';
+  await syncInbox('user-a', 'user-a', env);
+  assert.equal((storage.sql.prepare('SELECT recovery_needed FROM connections WHERE id=?')
+    .get('user-a') as { recovery_needed: number }).recovery_needed, 0);
+  assert.equal(count(), 1);
+});
+
+void test('a request is recorded against the newsletter, not the sender', async () => {
+  await seed();
+  provider = { status: 200 };
+  await unsubscribeRequest();
+  const row = storage.sql
+    .prepare('SELECT id, list_id, scope, message_id FROM unsubscribe_requests')
+    .get() as { id: string; list_id: string | null; scope: string; message_id: string };
+  assert.equal(row.scope, 'list');
+  assert.equal(row.list_id, 'daily.news.example.com', 'the List-ID, not the sender address');
+  assert.equal(row.id, 'user-a:list:daily.news.example.com');
+  assert.equal(row.message_id, 'message', 'the message it was made from is kept too');
+});
+
+void test('unsubscribing keeps every stored message, now and on the next sync', async () => {
+  await seed();
+  const accountId = 'user-a';
+  await syncInbox('user-a', accountId, env);
+  const stored = () =>
+    storage.sql
+      .prepare('SELECT COUNT(*) AS n FROM mailbox_messages WHERE account_id=?')
+      .get(accountId) as { n: number };
+  assert.equal(stored().n, 1, 'the mailbox has the synced message');
+
+  // A history row exists for this sender, as a completed unsubscribe would leave behind.
+  storage.sql
+    .prepare(
+      `INSERT INTO unsubscribe_requests (id,user_id,account_id,message_id,list_id,address,scope,outcome,detail,created,updated)
+       VALUES (?,?,?,?,NULL,?,'message','accepted',NULL,1,1)`,
+    )
+    .run(accountId + ':message:message', 'user-a', accountId, 'message', 'sender@example.com');
+
+  // Nothing is removed by the record's existence, and a later sync writes the sender's
+  // mail again rather than skipping it: the sender still decides what it sends, and its
+  // receipts and account notices travel on the same address as its newsletters.
+  await syncInbox('user-a', accountId, env);
+  assert.equal(stored().n, 1, 'the message survives a sync taken after the unsubscribe');
+  const message = storage.sql
+    .prepare('SELECT message_id FROM mailbox_messages WHERE account_id=?')
+    .get(accountId) as { message_id: string };
+  assert.equal(message.message_id, 'message', 'and it is the same message, not a placeholder');
+});
+
+void test('a legacy unsubscribe row becomes history and schedules a recovery scan', async () => {
+  // Recreate the pre-retirement state before exercising the data migration.
+  storage.sql.exec('DROP TRIGGER unsubscribed_legacy_insert; DROP TRIGGER unsubscribed_no_update;');
+  // Written the way the previous version wrote it: sender-wide, with no outcome recorded.
+  storage.sql
+    .prepare('INSERT INTO unsubscribed (id,user_id,account_id,address,created) VALUES (?,?,?,?,7)')
+    .run('acct-legacy:news@example.com', 'user-legacy', 'acct-legacy', 'news@example.com');
+  storage.sql
+    .prepare(
+      'INSERT INTO connections (id,user_id,provider_identity,email,token,token_version,last_sync,sync_lock,error,created) VALUES (?,?,NULL,?,?,1,123,0,NULL,123)',
+    )
+    .run('acct-legacy', 'user-legacy', 'legacy@example.com', 'token');
+
+  // The harness applies every migration when the database is built, so the schema is
+  // already in place. Replaying only the data statements runs the same conversion this
+  // migration performs on a deployment where rows already exist.
+  for (const statement of readFileSync('drizzle/0014_unsubscribe_requests.sql', 'utf8')
+    .split('--> statement-breakpoint')
+    .map((part) => part.trim())
+    .filter((part) => part && !/^(CREATE|ALTER)\b/i.test(part.replace(/^--[^\n]*\n/gm, '').trim())))
+    storage.sql.exec(statement);
+
+  const history = storage.sql
+    .prepare('SELECT * FROM unsubscribe_requests WHERE account_id=?')
+    .get('acct-legacy') as { scope: string; outcome: string; message_id: string | null };
+  assert.equal(history.scope, 'legacy-sender', 'its limited meaning is recorded, not guessed');
+  assert.equal(history.outcome, 'unknown', 'no provider response was ever stored for it');
+  assert.equal(history.message_id, null, 'it cannot name the newsletter it came from');
+
+  // Emptying the old table is what stops a still-running old version from deleting mail.
+  const legacy = storage.sql
+    .prepare('SELECT COUNT(*) AS n FROM unsubscribed')
+    .get() as { n: number };
+  assert.equal(legacy.n, 0, 'nothing is left for the previous version to act on');
+
+  const connection = storage.sql
+    .prepare('SELECT recovery_needed FROM connections WHERE id=?')
+    .get('acct-legacy') as { recovery_needed: number };
+  assert.equal(connection.recovery_needed, 1, 'the affected account is queued for reconciliation');
+});
+
+void test('recovery is marked complete only when a full scan finishes', async () => {
+  await seed();
+  const accountId = 'user-a';
+  storage.sql.prepare('UPDATE connections SET recovery_needed=1 WHERE id=?').run(accountId);
+  const flag = () =>
+    (storage.sql
+      .prepare('SELECT recovery_needed, sync_page_token FROM connections WHERE id=?')
+      .get(accountId) as { recovery_needed: number; sync_page_token: string | null });
+
+  // A page that reports more to come leaves the scan in progress, so the flag stays set
+  // and the saved cursor is the one the next run resumes from.
+  paging = 'more';
+  await syncInbox('user-a', accountId, env);
+  assert.equal(flag().recovery_needed, 1, 'an unfinished scan has recovered nothing yet');
+  assert.equal(flag().sync_page_token, 'next-page', 'and its position is kept');
+
+  paging = 'done';
+  await syncInbox('user-a', accountId, env);
+  assert.equal(flag().recovery_needed, 0, 'a completed full scan clears it');
+  assert.equal(flag().sync_page_token, null);
+});
+
 void test('renewing the same mailbox preserves unsubscribe history, snapshot and send receipts', async () => {
   const oldToken = await seed();
   const before = ['snapshots', 'unsubscribed', 'operations'].map((table) =>
@@ -578,7 +970,7 @@ void test('connecting another mailbox adds an account and leaves existing data i
     before,
     'the original mailbox keeps its cached mail',
   );
-  for (const table of ['unsubscribed', 'operations'])
+  for (const table of ['operations'])
     assert.ok(
       storage.sql
         .prepare(`SELECT * FROM ${table} WHERE account_id=?`)
@@ -1097,4 +1489,472 @@ void test('disconnecting a mailbox removes its messages from the combined view',
     ['acct-1'],
     'and is no longer listed as part of the combined view',
   );
+});
+
+// ── Blocked senders ─────────────────────────────────────────────────────────
+
+import { POST as blockRoute } from '../app/api/block/route';
+
+const blockRequest = (body: unknown) =>
+  blockRoute(new Request(`${env.APP_URL}/api/block`, {
+    method: 'POST',
+    headers: { origin: env.APP_URL!, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }));
+const viewOf = async (accountId?: string) =>
+  (await (await mailbox(mailboxRequest(accountId))).json()) as InboxSnapshot;
+const storedMail = (account: string) =>
+  storage.sql.prepare('SELECT data FROM snapshots WHERE account_id=?').get(account);
+
+void test('blocking a sender hides its mail without deleting it, and unblocking restores it', async () => {
+  await seed('user-a', 'first@example.com', 0, 'acct-1');
+  seedMail('acct-1', [
+    { id: 'promo', address: 'Deals@Shop.example', receivedAt: 200, subject: 'Sale' },
+    { id: 'friend', address: 'friend@example.com', receivedAt: 100, subject: 'Hi' },
+  ]);
+  const before = storedMail('acct-1');
+
+  // The address is matched without regard to case, as sender rules are.
+  const response = await blockRequest({ accountId: 'acct-1', address: 'deals@shop.example', name: 'Shop', blocked: true });
+  assert.equal(response.status, 200);
+  const view = await viewOf('acct-1');
+  assert.deepEqual(view.emails.map((email) => email.id), ['friend'], 'the blocked sender is hidden');
+  assert.deepEqual(view.blocked?.map((sender) => [sender.address, sender.name, sender.accountEmail]),
+    [['deals@shop.example', 'Shop', 'first@example.com']], 'and listed so it can be unblocked');
+  assert.deepEqual(storedMail('acct-1'), before, 'the stored mail itself is untouched');
+  assert.equal(requests.filter((r) => !r.url.includes('oauth2')).length, 0, 'nothing is sent anywhere');
+
+  // Blocking twice is harmless.
+  assert.equal((await blockRequest({ accountId: 'acct-1', address: 'deals@shop.example', blocked: true })).status, 200);
+
+  await blockRequest({ accountId: 'acct-1', address: 'DEALS@shop.example', blocked: false });
+  const restored = await viewOf('acct-1');
+  assert.deepEqual(restored.emails.map((email) => email.id), ['promo', 'friend'], 'unblocking brings every message back');
+  assert.deepEqual(restored.blocked, []);
+});
+
+void test('a block applies only to the mailbox it was made in', async () => {
+  await seed('user-a', 'first@example.com', 0, 'acct-1');
+  await seed('user-a', 'second@example.com', 0, 'acct-2');
+  seedMail('acct-1', [{ id: 'one', address: 'news@example.org', receivedAt: 200, subject: 'A' }]);
+  seedMail('acct-2', [{ id: 'two', address: 'news@example.org', receivedAt: 100, subject: 'B' }]);
+  await blockRequest({ accountId: 'acct-1', address: 'news@example.org', blocked: true });
+  const combined = await viewOf();
+  assert.deepEqual(combined.emails.map((email) => `${email.accountId}:${email.id}`), ['acct-2:two']);
+  assert.deepEqual(combined.blocked?.map((sender) => sender.accountId), ['acct-1'],
+    'the combined view lists blocks from every mailbox');
+});
+
+void test('blocking refuses another user’s mailbox, the combined view and invalid input', async () => {
+  await seed('user-a', 'mine@example.com', 0, 'acct-1');
+  await seed('user-b', 'theirs@example.com', 0, 'acct-b');
+  assert.equal((await blockRequest({ accountId: 'acct-b', address: 'x@example.com', blocked: true })).status, 404);
+  assert.notEqual((await blockRequest({ accountId: 'all', address: 'x@example.com', blocked: true })).status, 200);
+  assert.equal((await blockRequest({ accountId: 'acct-1', address: 'not an address', blocked: true })).status, 400);
+  assert.equal((await blockRequest({ accountId: 'acct-1', address: 'x@example.com' })).status, 400,
+    'block or unblock must be stated, never assumed');
+  assert.equal(storage.sql.prepare('SELECT COUNT(*) AS n FROM blocked_senders').get()?.n, 0);
+});
+
+void test('disconnecting a mailbox removes its blocked senders', async () => {
+  await seed('user-a', 'first@example.com', 0, 'acct-1');
+  await blockRequest({ accountId: 'acct-1', address: 'news@example.org', blocked: true });
+  await disconnectAccount(disconnectRequest({ accountId: 'acct-1' }));
+  assert.equal(storage.sql.prepare('SELECT COUNT(*) AS n FROM blocked_senders').get()?.n, 0);
+});
+
+// ── Rule changes reach mail that is already stored ─────────────────────────
+
+const listQueries = () =>
+  requests
+    .filter((r) => r.url.includes('/users/me/messages?maxResults=100&q='))
+    .map((r) => decodeURIComponent(new URL(r.url).searchParams.get('q') || ''));
+
+void test('a classification rule change rescans older mail once, then refreshes return to two days', async () => {
+  await seed();
+  // A mailbox whose last complete scan ran under the previous rules.
+  storage.sql
+    .prepare('UPDATE connections SET backfill_complete=1, last_full_scan=?, content_version=? WHERE id=?')
+    .run(Date.now() - 86400000, CONTENT_VERSION - 1, 'user-a');
+  await syncInbox('user-a', 'user-a', env);
+  assert.ok(!listQueries()[0].includes('newer_than'), 'the whole mailbox is revisited under the new rules');
+  assert.equal(row('connections')!.content_version, CONTENT_VERSION, 'recorded once the scan reaches its last page');
+
+  requests = [];
+  await syncInbox('user-a', 'user-a', env);
+  assert.ok(listQueries()[0].includes('newer_than:2d'), 'the next refresh is incremental again');
+});
+
+void test('an interrupted rescan resumes from its cursor and records the new rules only at the end', async () => {
+  await seed();
+  storage.sql
+    .prepare('UPDATE connections SET backfill_complete=1, last_full_scan=?, content_version=? WHERE id=?')
+    .run(Date.now() - 86400000, CONTENT_VERSION - 1, 'user-a');
+  paging = 'more';
+  await syncInbox('user-a', 'user-a', env);
+  assert.equal(row('connections')!.sync_page_token, 'next-page');
+  assert.equal(row('connections')!.content_version, CONTENT_VERSION - 1, 'not recorded mid-scan');
+  paging = 'done';
+  requests = [];
+  await syncInbox('user-a', 'user-a', env);
+  assert.ok(requests.some((r) => r.url.includes('pageToken=next-page')), 'the scan resumes where it stopped');
+  assert.equal(row('connections')!.content_version, CONTENT_VERSION);
+});
+
+void test('a model result from older rules is rechecked locally; a current one is reused', async () => {
+  env.GEMINI_API_KEY = 'test-gemini-key';
+  await seed();
+  let calls = 0;
+  const provider = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = requestUrl(input);
+    if (url.startsWith('https://generativelanguage.googleapis.com/')) {
+      calls++;
+      const request = JSON.parse(init!.body as string) as { contents: { parts: { text: string }[] }[] };
+      const ids = (JSON.parse(request.contents[0].parts[0].text) as { id: string }[]).map((m) => m.id);
+      const items = ids.map((id) => ({ id, context: 'personal', topics: [], disposition: 'useful', replyRequired: false,
+        securityEvent: false, summary: 'A greeting.', reason: 'A short greeting.', obligations: [] }));
+      return Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify({ items }) }] }, finishReason: 'STOP' }] });
+    }
+    return provider(input, init);
+  };
+  const stored = () => JSON.parse((storage.sql.prepare('SELECT data FROM mailbox_messages WHERE message_id=?').get('message') as { data: string }).data) as { analysisVersion: string; classificationSource: string };
+
+  await syncInbox('user-a', 'user-a', env);
+  assert.equal(calls, 1);
+  assert.equal(stored().classificationSource, 'ai');
+
+  await syncInbox('user-a', 'user-a', env);
+  assert.equal(calls, 1, 'unchanged content under the current prompt is not sent again');
+
+  // A result produced by the previous prompt, before the purpose checks existed.
+  const older = 'gemini:gemini-3.5-flash-lite:2026-09-21-categories';
+  const data = JSON.parse((storage.sql.prepare('SELECT data FROM mailbox_messages WHERE message_id=?').get('message') as { data: string }).data) as Record<string, unknown> & { automaticClassification: Record<string, unknown> };
+  storage.sql.prepare('UPDATE mailbox_messages SET data=? WHERE message_id=?')
+    .run(JSON.stringify({ ...data, analysisVersion: older,
+      automaticClassification: { ...data.automaticClassification, version: 'policy-2026-09-22-1' } }), 'message');
+  await syncInbox('user-a', 'user-a', env);
+  assert.equal(calls, 1, 'unchanged mail is rechecked locally without a mailbox-wide AI bill');
+  assert.equal(stored().classificationSource, 'ai', 'the model’s result is kept, not replaced by the rule-based one');
+  assert.equal(stored().analysisVersion, older, 'the version names the model call that actually happened');
+  await syncInbox('user-a', 'user-a', env);
+  assert.equal(calls, 1, 'once rechecked, the result is reused');
+});
+
+void test('an uncertain unsubscribe can be retried only after an explicit confirmation',async()=>{
+  await seed();provider={status:504};
+  await unsubscribeRequest();
+  provider={status:200};
+  const result=await (await unsubscribeRequest('message','user-a',true)).json() as {outcome:string};
+  assert.equal(result.outcome,'accepted');assert.equal(sentToProvider(),2);
+});
+
+// ── Audit 2026-09-29, section 1: duplicate sends and destructive races ─────────
+
+/** The statements an older running version issues when it unsubscribes a sender. */
+function olderInstanceUnsubscribes(address = 'sender@example.com') {
+  storage.sql.prepare('INSERT OR IGNORE INTO unsubscribed (id,user_id,account_id,address,created) VALUES (?,?,?,?,?)')
+    .run('user-a:' + address, 'user-a', 'user-a', address, Date.now());
+  return storage.sql.prepare("DELETE FROM mailbox_messages WHERE account_id=? AND user_id=? AND json_extract(data,'$.address')=?")
+    .run('user-a', 'user-a', address);
+}
+const storedCount = () => (storage.sql.prepare('SELECT COUNT(*) AS n FROM mailbox_messages').get() as { n: number }).n;
+
+void test('an older instance unsubscribing during a rollout cannot delete stored mail', async () => {
+  await seed();
+  await syncInbox('user-a', 'user-a', env);
+  assert.equal(storedCount(), 1);
+  const removed = olderInstanceUnsubscribes();
+  assert.equal(Number(removed.changes), 0, 'the delete is refused while the guard stands');
+  assert.equal(storedCount(), 1);
+  assert.equal((storage.sql.prepare('SELECT COUNT(*) AS n FROM unsubscribed').get() as { n: number }).n, 0,
+    'no suppression row survives for an older sync to act on');
+  assert.equal(row('connections')!.recovery_needed, 1, 'a recovery scan is scheduled anyway');
+  assert.equal(row('unsubscribe_requests')!.scope, 'legacy-sender', 'the request is kept as history');
+
+  // The current version takes over: guards are cleared and recovery completes.
+  await syncInbox('user-a', 'user-a', env);
+  assert.equal(row('connections')!.recovery_needed, 0);
+  assert.equal((storage.sql.prepare('SELECT COUNT(*) AS n FROM legacy_unsubscribe_guards').get() as { n: number }).n, 0);
+  assert.equal(storedCount(), 1);
+});
+
+void test('a guarded sender does not survive disconnecting the account', async () => {
+  await seed();
+  await syncInbox('user-a', 'user-a', env);
+  olderInstanceUnsubscribes();
+  const response = await disconnectRoute(new Request(`${env.APP_URL}/api/disconnect`, {
+    method: 'POST', headers: { origin: env.APP_URL!, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ accountId: 'user-a' }) }));
+  assert.equal(response.status, 200);
+  assert.equal(storedCount(), 0);
+  assert.equal((storage.sql.prepare('SELECT COUNT(*) AS n FROM legacy_unsubscribe_guards').get() as { n: number }).n, 0);
+});
+
+void test('a disconnect during the Gmail read stops the unsubscribe before the provider', async () => {
+  await seed();
+  const original = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const response = await original(input, init);
+    if (requestUrl(input).includes('/messages/message?')) storage.sql.prepare('DELETE FROM connections WHERE id=?').run('user-a');
+    return response;
+  };
+  const result = await (await unsubscribeRequest()).json() as { reason: string };
+  assert.equal(result.reason, 'account-disconnected');
+  assert.equal(sentToProvider(), 0, 'nothing reaches the newsletter service');
+  assert.equal((storage.sql.prepare('SELECT COUNT(*) AS n FROM unsubscribe_requests').get() as { n: number }).n, 0,
+    'no history is recreated for a removed account');
+});
+
+void test('unsubscribe and reply refuse a message id that is not a string', async () => {
+  await seed();
+  const unsubscribe = await unsubscribeRoute(new Request(`${env.APP_URL}/api/unsubscribe`, {
+    method: 'POST', headers: { origin: env.APP_URL!, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: ['message'], accountId: 'user-a' }) }));
+  assert.equal(unsubscribe.status, 400);
+  let sends = 0;
+  const original = globalThis.fetch;
+  globalThis.fetch = async (input, init) => requestUrl(input).endsWith('/messages/send')
+    ? (sends++, Response.json({ id: 'sent-' + sends })) : original(input, init);
+  const send = (id: unknown) => replyRoute(new Request(`${env.APP_URL}/api/reply`, {
+    method: 'POST', headers: { origin: env.APP_URL!, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, accountId: 'user-a', action: 'send', body: 'Thanks!' }) }));
+  assert.equal((await send('message')).status, 200);
+  assert.equal((await send(['message'])).status, 400);
+  assert.equal((await send('message')).status, 200, 'the identical string request is answered from its receipt');
+  assert.equal(sends, 1);
+});
+
+void test('two confirmed retries of the same unconfirmed reply send it once', async () => {
+  await seed();
+  let phase: 'initial' | 'retry' = 'initial';
+  let sends = 0;
+  const release = deferred();
+  const original = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    if (!requestUrl(input).endsWith('/messages/send')) return original(input, init);
+    if (phase === 'initial') return new Response('unknown', { status: 503 });
+    sends++;
+    await release.promise;
+    return Response.json({ id: 'send-' + sends });
+  };
+  const send = (confirmUnsent = false) => replyRoute(new Request(`${env.APP_URL}/api/reply`, {
+    method: 'POST', headers: { origin: env.APP_URL!, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: 'message', accountId: 'user-a', action: 'send', body: 'Same reply', confirmUnsent }) }));
+  assert.equal((await send()).status, 502, 'Gmail did not confirm the send');
+  // The seeded receipt is a different operation; this one is the reply just attempted.
+  const reply = () => (storage.sql.prepare("SELECT status FROM operations WHERE id<>'user-a:sent'").get() as { status: string }).status;
+  assert.equal(reply(), 'unconfirmed');
+  phase = 'retry';
+
+  // Hold both requests after they read the unconfirmed operation, so each believes it may
+  // take it over. Only one may.
+  const db = env.DB;
+  let reads = 0;
+  const bothRead = deferred();
+  const wrapped = Object.create(db) as typeof db;
+  wrapped.prepare = (query: string) => {
+    const statement = db.prepare(query);
+    if (!query.startsWith('SELECT status, result, created, attempt FROM operations')) return statement;
+    const first = statement.first.bind(statement);
+    // `bind` returns the statement itself, so replacing `first` here covers the bound call.
+    return Object.assign(statement, {
+      async first() { const result = await first(); if (++reads === 2) bothRead.resolve(); await bothRead.promise; return result; } });
+  };
+  env.DB = wrapped;
+  globalThis.__briefTestEnv = env;
+  const both = Promise.all([send(true), send(true)]);
+  await bothRead.promise;
+  // Let the winner reach the provider before releasing it.
+  for (let i = 0; i < 20 && sends === 0; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  release.resolve();
+  const statuses = (await both).map((response) => response.status).sort((a, b) => a - b);
+  assert.deepEqual(statuses, [200, 409]);
+  assert.equal(sends, 1, 'one reply reaches Gmail');
+  assert.equal(reply(), 'complete');
+});
+
+// ── Audit 2026-09-29, section 2: AI cache and rule upgrades ────────────────────
+
+/** A model stub: `respond` decides each answer; returns how many calls were made. */
+function modelStub(respond: (ids: string[]) => Response | object[]) {
+  const counter = { calls: 0 };
+  const provider = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = requestUrl(input);
+    if (!url.startsWith('https://generativelanguage.googleapis.com/')) return provider(input, init);
+    counter.calls++;
+    const request = JSON.parse(init!.body as string) as { contents: { parts: { text: string }[] }[] };
+    const ids = (JSON.parse(request.contents[0].parts[0].text) as { id: string }[]).map((m) => m.id);
+    const answer = respond(ids);
+    if (answer instanceof Response) return answer;
+    return Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify({ items: answer }) }] }, finishReason: 'STOP' }] });
+  };
+  return counter;
+}
+const greeting = (ids: string[]) => ids.map((id) => ({ id, context: 'personal', topics: [], disposition: 'useful',
+  replyRequired: false, securityEvent: false, summary: 'A greeting.', reason: 'A short greeting.', obligations: [] }));
+const storedMessage = () => JSON.parse((storage.sql.prepare('SELECT data FROM mailbox_messages WHERE message_id=?')
+  .get('message') as { data: string }).data) as { classificationSource: string; analysisVersion: string; needsReply: boolean;
+  automaticClassification: { obligations: { kind: string; required: boolean }[]; replyRequired: boolean } };
+
+void test('after a model outage, the next sync asks the model again', async () => {
+  env.GEMINI_API_KEY = 'test-gemini-key';
+  await seed();
+  let failing = true;
+  const model = modelStub((ids) => failing ? new Response('unavailable', { status: 503 }) : greeting(ids));
+  const first = await syncInbox('user-a', 'user-a', env);
+  assert.equal(first.pending, 1);
+  assert.equal(first.ai, false);
+  assert.equal(storedMessage().classificationSource, 'deterministic');
+  const failedCalls = model.calls;
+  failing = false;
+  const second = await syncInbox('user-a', 'user-a', env);
+  assert.ok(model.calls > failedCalls, 'the stand-in result is sent to the recovered model');
+  assert.equal(second.pending, 0);
+  assert.equal(storedMessage().classificationSource, 'ai', '“ai” is reported only once the model really answered');
+  const settled = model.calls;
+  await syncInbox('user-a', 'user-a', env);
+  assert.equal(model.calls, settled, 'and then it is reused');
+});
+
+void test('adding a model key later reaches mail classified without one', async () => {
+  await seed();
+  await syncInbox('user-a', 'user-a', env);
+  await syncInbox('user-a', 'user-a', env);
+  assert.equal(storedMessage().classificationSource, 'deterministic');
+  assert.equal(storedMessage().analysisVersion, '', 'a rule-based result never claims a model version');
+  env.GEMINI_API_KEY = 'test-gemini-key';
+  const model = modelStub(greeting);
+  await syncInbox('user-a', 'user-a', env);
+  assert.equal(model.calls, 1);
+  assert.equal(storedMessage().classificationSource, 'ai');
+});
+
+void test('a rule upgrade keeps a request only the model recognised', async () => {
+  env.GEMINI_API_KEY = 'test-gemini-key';
+  await seed();
+  const body = 'Would you mind taking a look at the proposal and sending your decision today?';
+  inbox = [{ id: 'message', headers: [] }];
+  const model = modelStub((ids) => ids.map((id) => ({ id, context: 'work', topics: [], disposition: 'useful', replyRequired: true,
+    securityEvent: false, reason: 'Direct decision request', summary: 'Review proposal',
+    obligations: [{ kind: 'request', description: 'Review proposal', owner: 'recipient', ownerIsUser: 'yes', required: true,
+      evidence: body, state: 'open', datePhrase: 'today' }] })));
+  const provider = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const response = await provider(input, init);
+    if (!requestUrl(input).includes('/messages/message?')) return response;
+    const message = await response.json() as { payload: { body: { data: string } } };
+    message.payload.body.data = encode(body);
+    return Response.json(message);
+  };
+  await syncInbox('user-a', 'user-a', env);
+  assert.equal(storedMessage().automaticClassification.obligations.length, 1);
+
+  // Pretend the result was produced under older rules, with a demotion those rules made.
+  const data = storedMessage() as unknown as Record<string, unknown> & { automaticClassification: Record<string, unknown> & { obligations: Record<string, unknown>[] } };
+  const obligations = data.automaticClassification.obligations.map((o) => ({ ...o, required: false, commercial: true,
+    uncertainty: 'Optional commercial call to action.' }));
+  storage.sql.prepare('UPDATE mailbox_messages SET data=? WHERE message_id=?').run(JSON.stringify({ ...data,
+    analysisVersion: 'gemini:gemini-3.5-flash-lite:2026-09-21-categories',
+    automaticClassification: { ...data.automaticClassification, obligations, version: 'policy-2026-09-22-1' } }), 'message');
+  await syncInbox('user-a', 'user-a', env);
+  assert.equal(model.calls, 1, 'no second model call');
+  const after = storedMessage();
+  assert.equal(after.automaticClassification.obligations.length, 1, 'the request survives');
+  assert.equal(after.automaticClassification.obligations[0].required, true, 'an old demotion is re-decided, and this is not selling');
+  assert.equal(after.automaticClassification.replyRequired, true);
+  assert.equal(after.classificationSource, 'ai');
+});
+
+// ── Audit 2026-09-29, section 9: legacy reply state ─────────────────────────────
+
+void test('a reply sent before the replied marker existed keeps its badge cleared', async () => {
+  await seed();
+  const classification = { context: 'work', topics: [], obligations: [{ id: 'r', kind: 'request', description: 'Review', owner: 'recipient',
+    ownerIsUser: true, required: true, evidence: 'Please review', state: 'open' }], disposition: 'useful', replyRequired: true,
+  securityEvent: false, processingStatus: 'classified', reason: 'request', version: 'older' };
+  const answered = { id: 'old-sent', sender: 'Client', address: 'client@example.com', subject: 'Review', body: 'Please review', summary: 'Review',
+    needsReply: false, category: 'work', priority: 'normal', classification, automaticClassification: classification };
+  const waiting = { ...answered, id: 'still-waiting', needsReply: true };
+  storage.sql.prepare('UPDATE snapshots SET data=?').run(JSON.stringify({ emails: [answered, waiting], updated: Date.now(), ai: false, pending: 0, skipped: 0 }));
+  const result = await (await mailbox(mailboxRequest('user-a'))).json() as { emails: { id: string; needsReply: boolean }[] };
+  assert.equal(result.emails.find((e) => e.id === 'old-sent')?.needsReply, false, 'the legacy send is honoured');
+  assert.equal(result.emails.find((e) => e.id === 'still-waiting')?.needsReply, true, 'an unanswered one is not hidden');
+
+  // Importing the snapshot records the send in the column, so a sync rewriting the row keeps it.
+  inbox = [{ id: 'old-sent' }];
+  await syncInbox('user-a', 'user-a', env);
+  const stored = storage.sql.prepare('SELECT replied FROM mailbox_messages WHERE message_id=?').get('old-sent') as { replied: number } | undefined;
+  assert.equal(stored?.replied, 1);
+});
+
+void test('a stored row showing an earlier send reads as answered even before the migration marks it', async () => {
+  await seed();
+  const data = (id: string, needsReply: boolean) => JSON.stringify({ id, sender: 'Client', address: 'client@example.com', subject: 'Review',
+    body: 'Please review', summary: 'Review', needsReply, category: 'work', priority: 'normal', classification: { replyRequired: true } });
+  const insert = storage.sql.prepare('INSERT INTO mailbox_messages (user_id,account_id,message_id,data,received_at,scan_generation,replied) VALUES (?,?,?,?,0,?,0)');
+  insert.run('user-a', 'user-a', 'sent-row', data('sent-row', false), 'g');
+  insert.run('user-a', 'user-a', 'open-row', data('open-row', true), 'g');
+  const rows = await loadMessages('user-a', 'user-a', env);
+  assert.equal(rows.find((e) => e.id === 'sent-row')?.replied, true);
+  assert.equal(rows.find((e) => e.id === 'open-row')?.replied, undefined);
+});
+
+void test('the migration records earlier sends in the replied column', () => {
+  const statement = readFileSync('drizzle/0018_legacy_unsubscribe_guard.sql', 'utf8').split('--> statement-breakpoint').at(-1)!;
+  const data = (needsReply: boolean, replyRequired: boolean) => JSON.stringify({ needsReply, classification: { replyRequired } });
+  const insert = storage.sql.prepare('INSERT INTO mailbox_messages (user_id,account_id,message_id,data,received_at,scan_generation,replied) VALUES (?,?,?,?,0,?,0)');
+  insert.run('user-a', 'acct', 'sent', data(false, true), 'g');
+  insert.run('user-a', 'acct', 'waiting', data(true, true), 'g');
+  insert.run('user-a', 'acct', 'nothing-owed', data(false, false), 'g');
+  storage.sql.exec(statement);
+  const replied = (id: string) => (storage.sql.prepare('SELECT replied FROM mailbox_messages WHERE message_id=?').get(id) as { replied: number }).replied;
+  assert.deepEqual([replied('sent'), replied('waiting'), replied('nothing-owed')], [1, 0, 0]);
+});
+
+void test('a damaged stored record is not mistaken for an answered one', async () => {
+  await seed();
+  const classification = { replyRequired: true };
+  storage.sql.prepare('UPDATE snapshots SET data=?').run(JSON.stringify({ emails: [{ id: 'damaged', classification }], updated: Date.now(), ai: false }));
+  const insert = storage.sql.prepare('INSERT INTO mailbox_messages (user_id,account_id,message_id,data,received_at,scan_generation,replied) VALUES (?,?,?,?,0,?,0)');
+  insert.run('user-a', 'user-a', 'damaged-row', JSON.stringify({ id: 'damaged-row', classification }), 'g');
+  const rows = await loadMessages('user-a', 'user-a', env);
+  assert.equal(rows.find((e) => e.id === 'damaged-row')?.replied, undefined, 'a missing badge is not a cleared one');
+  assert.equal(snapshotSentIds(JSON.stringify({ emails: [{ id: 'damaged', classification }] })).size, 0);
+});
+
+void test('a recovery requested while a recovery scan runs survives that scan', async () => {
+  await seed();
+  storage.sql.prepare('UPDATE connections SET recovery_needed=1').run();
+  const original = globalThis.fetch;
+  let requested = false;
+  globalThis.fetch = async (input, init) => {
+    // An older instance unsubscribes while this scan is between its start and completion.
+    if (!requested && requestUrl(input).includes('/messages?maxResults')) { requested = true; olderInstanceUnsubscribes(); }
+    return original(input, init);
+  };
+  await syncInbox('user-a', 'user-a', env);
+  assert.equal(row('connections')!.recovery_needed, 1, 'the new request is still outstanding');
+  globalThis.fetch = original;
+  await syncInbox('user-a', 'user-a', env);
+  assert.equal(row('connections')!.recovery_needed, 0);
+  assert.equal((storage.sql.prepare('SELECT COUNT(*) AS n FROM legacy_unsubscribe_guards').get() as { n: number }).n, 0);
+});
+
+void test('a model result stored before the source field existed is still treated as the model’s', async () => {
+  env.GEMINI_API_KEY = 'test-gemini-key';
+  await seed();
+  modelStub((ids) => ids.map((id) => ({ id, context: 'work', topics: [], disposition: 'useful', replyRequired: true, securityEvent: false,
+    reason: 'Direct request', summary: 'Hello', obligations: [{ kind: 'request', description: 'Reply', owner: 'recipient', ownerIsUser: 'yes',
+      required: true, evidence: 'Hello', state: 'open' }] })));
+  await syncInbox('user-a', 'user-a', env);
+  const data = storedMessage() as unknown as Record<string, unknown> & { automaticClassification: Record<string, unknown> };
+  delete data.classificationSource;
+  storage.sql.prepare('UPDATE mailbox_messages SET data=? WHERE message_id=?').run(JSON.stringify({ ...data,
+    automaticClassification: { ...data.automaticClassification, version: 'policy-2026-09-22-1' } }), 'message');
+  delete env.GEMINI_API_KEY;
+  await syncInbox('user-a', 'user-a', env);
+  assert.equal(storedMessage().classificationSource, 'ai');
+  assert.equal(storedMessage().automaticClassification.obligations.length, 1, 'the model’s request is not replaced by the rule-based result');
 });
