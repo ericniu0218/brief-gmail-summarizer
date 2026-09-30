@@ -48,7 +48,7 @@ export const CONTENT_VERSION=4;
 
 /** Whether a stored result came from the model. Older records carry only its version. */
 function fromModel(hit:Pick<StoredEmail,'classificationSource'|'analysisVersion'>|undefined){
-  return !!hit&&(hit.classificationSource==='ai'||(!hit.classificationSource&&/^gemini:/.test(hit.analysisVersion||'')));
+  return !!hit&&(hit.classificationSource==='ai'||(!hit.classificationSource&&(hit.analysisVersion||'').startsWith('gemini:')));
 }
 
 export type Snapshot={emails:StoredEmail[];ai:boolean;pending:number;skipped:number;analysisVersion:string;updated:number;limit:number;hasMore:boolean};
