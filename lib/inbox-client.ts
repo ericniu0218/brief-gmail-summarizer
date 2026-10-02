@@ -1,3 +1,4 @@
+import type { Digest } from './digest';
 import type { Email } from './mail';
 
 /** Browser-side transport shared by inbox hooks and controls. */
@@ -35,6 +36,8 @@ export type InboxSnapshot = {
   refreshed?: number;
   failed?: number;
   failures?: {accountId:string;email:string;error:string}[];
+  /** AI-written wording for the daily digest's items; ranking is recomputed in the browser. */
+  digest?: Digest;
 };
 
 /** Turn a partial 200 sync response into an honest, actionable status message. */
@@ -61,12 +64,14 @@ export async function api<T>(
   body?: unknown,
   signal?: AbortSignal,
 ): Promise<T> {
-  // The presence of a body determines whether this small client sends GET or POST.
+  // The presence of a body determines whether this small client sends GET or POST. Form data
+  // (used for attachments) is sent as-is so the browser sets its own multipart header.
+  const form = typeof FormData !== 'undefined' && body instanceof FormData;
   const response = await fetch(path, {
     method: body === undefined ? 'GET' : 'POST',
     headers:
-      body === undefined ? undefined : { 'Content-Type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
+      body === undefined || form ? undefined : { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : form ? (body as FormData) : JSON.stringify(body),
     signal,
   });
   // Platform timeouts and gateway errors arrive as HTML, not the API's JSON.

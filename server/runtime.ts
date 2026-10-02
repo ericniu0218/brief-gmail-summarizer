@@ -9,7 +9,7 @@ import { chatGPTSignInPath, getChatGPTUser } from '@/app/chatgpt-auth';
 export type Runtime = {
   DB: D1Database; GOOGLE_CLIENT_ID?: string; GOOGLE_CLIENT_SECRET?: string;
   TOKEN_ENCRYPTION_KEY?: string; GEMINI_API_KEY?: string; GEMINI_MODEL?: string; APP_URL?: string; AGENT_CRON_SECRET?: string;
-  UNSUBSCRIBE_ALLOWED_HOSTS?: string;
+  UNSUBSCRIBE_ALLOWED_HOSTS?: string; SEND_DAILY_LIMIT?: string;
 };
 export function runtime() { return env as unknown as Runtime; }
 export class HttpError extends Error { constructor(public status: number, message: string) { super(message); } }

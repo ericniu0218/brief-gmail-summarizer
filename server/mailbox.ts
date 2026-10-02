@@ -6,6 +6,7 @@ import { ALL_INBOXES, getOwnedConnection, ownedConnections } from './gmail';
 import type { Runtime } from './runtime';
 import type { StoredEmail } from './sync';
 import { receivedAtOf } from '@/lib/importance';
+import type { Digest } from '@/lib/digest';
 
 /**
  * Builds the mail view for one mailbox, or the combined view across every connected
@@ -24,6 +25,7 @@ export async function readMailbox(user:string,requested:string,e:Runtime){
   const now=Date.now();
   const emails:StoredEmail[]=[];
   const accounts=[];
+  const digests:Digest[]=[];
   const blocked:(BlockedSender&{accountEmail:string})[]=[];
   let pending=0,skipped=0,hasMore=false,updated:number|null=null,ai=true;
   for(const c of connections){
@@ -65,6 +67,7 @@ export async function readMailbox(user:string,requested:string,e:Runtime){
         senderJunkPreference:activeJunkPreference(senderRule),senderRuleRevision:senderRule?.revision??0,
         automaticClassificationAvailable:true});
     }
+    if(snapshot?.digest)digests.push(snapshot.digest);
     pending+=snapshot?.pending||0;skipped+=snapshot?.skipped||0;
     hasMore=hasMore||!!snapshot?.hasMore;ai=ai&&!!snapshot?.ai;
     if(snapshot)updated=updated===null?snapshot.updated:Math.min(updated,snapshot.updated);
@@ -76,5 +79,8 @@ export async function readMailbox(user:string,requested:string,e:Runtime){
     if(aAt!==bAt)return bAt-aAt;
     return `${a.accountId}:${a.id}`.localeCompare(`${b.accountId}:${b.id}`);
   });
-  return {emails,accounts,blocked,ai,updated,pending,skipped,hasMore};
+  // Wording written for each mailbox's items, merged for the combined view. Keys already carry the
+  // account, so entries from different mailboxes cannot collide.
+  const digest=digests.length?{generated:Math.max(...digests.map(entry=>entry.generated)),items:digests.flatMap(entry=>entry.items)}:undefined;
+  return {emails,accounts,blocked,ai,updated,pending,skipped,hasMore,...(digest?{digest}:{})};
 }

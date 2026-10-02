@@ -134,6 +134,13 @@
       "when": 1790753055519,
       "tag": "0018_legacy_unsubscribe_guard",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1790971913906,
+      "tag": "0019_send_digest_profile_and_schedule",
+      "breakpoints": true
     }
   ]
 }

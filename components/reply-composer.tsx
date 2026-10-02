@@ -4,6 +4,7 @@ import { Sparkles, Send, FilePenLine, RefreshCw, ExternalLink, Wand2, Check, Che
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { api, ApiError } from '@/hooks/use-inbox';
 import { actionAccountId, gmailLink, type Email } from '@/lib/mail';
+import { replyAllCc } from '@/lib/recipients';
 
 /**
  * Review-first reply workflow. Users may generate or polish text, edit it locally, then
@@ -22,6 +23,11 @@ export function ReplyComposer({email,demo,aiReady,onSent}:{email:Email;demo:bool
   const [variation,setVariation]=useState(0);
   const [sent,setSent]=useState('');
   const [unconfirmed,setUnconfirmed]=useState<'send'|'draft'|null>(null);
+  const [replyAll,setReplyAll]=useState(false);
+  // Others on the original message. The server works the real list out from Gmail's own headers;
+  // this only shows who a reply-all would copy.
+  const others=!demo?replyAllCc(email,[email.accountEmail||'',email.address]):[];
+  const copying=replyAll&&others.length>0;
   function endpoint(){return demo?'/api/suggest':'/api/reply';}
   async function generate(){
     // Regeneration increments a bounded variation number so the server can request a
@@ -52,14 +58,14 @@ export function ReplyComposer({email,demo,aiReady,onSent}:{email:Email;demo:bool
     setBusy(action);setMessage('');setError(false);setUnconfirmed(null);
     try{
       if(demo){setMessage(action==='send'?'Demo reply complete. No email was sent.':'Demo draft saved for this conversation.');if(action==='send'){setSent(text);onSent();}}
-      else{await api('/api/reply',{id:email.id,accountId:actionAccountId(email),action,body:text,confirmUnsent});setMessage(action==='send'?'Reply sent through Gmail.':'Draft saved in Gmail.');if(action==='send'){setSent(text);onSent();}}
+      else{await api('/api/reply',{id:email.id,accountId:actionAccountId(email),action,body:text,confirmUnsent,replyAll:copying});setMessage(action==='send'?'Reply sent through Gmail.':'Draft saved in Gmail.');if(action==='send'){setSent(text);onSent();}}
     }catch(error){setMessage(error instanceof Error?error.message:'Could not complete your reply.');setError(true);if(error instanceof ApiError&&error.status===409&&error.message.includes('still unconfirmed'))setUnconfirmed(action);}
     finally{setBusy('');}
   }
   function writeAnother(){setSent('');setText('');setOptions([]);setChosen(-1);setNotes('');setMessage('');setError(false);}
   if(sent)return <div className="reply-area">
     <div className="reply-sent"><CheckCircle2 size={18}/><strong>{demo?'Demo reply sent':'Reply sent through Gmail'}</strong></div>
-    <div className="reply-sent-body"><span>To {email.sender}</span><p>{sent}</p></div>
+    <div className="reply-sent-body"><span>To {email.sender}{copying?` and ${others.length} ${others.length===1?'other':'others'}`:''}</span><p>{sent}</p></div>
     <p className="reply-disclaimer">{demo?'Demo mode · This reply was never sent to Gmail — it only updated the sample inbox.':'Delivered to Gmail. You can still send another reply to this conversation.'}</p>
     <button className="button white full" onClick={writeAnother}><FilePenLine size={14}/>Write another reply</button>
     {!demo&&<a className="gmail-link" href={gmailLink(email)} target="_blank" rel="noreferrer">Open conversation in Gmail <ExternalLink size={12}/></a>}
@@ -69,6 +75,7 @@ export function ReplyComposer({email,demo,aiReady,onSent}:{email:Email;demo:bool
     {/* The sending mailbox is the one this message arrived in, shown so the address is
         never a surprise when several accounts are connected. */}
     {!demo&&email.accountEmail&&<span className="reply-sender">Sending as {email.accountEmail}</span>}
+    {others.length>0&&<div className="reply-mode"><button type="button" aria-pressed={!replyAll} onClick={()=>setReplyAll(false)}>Reply</button><button type="button" aria-pressed={replyAll} onClick={()=>setReplyAll(true)}>Reply all ({others.length})</button>{replyAll&&<span className="reply-also">Also copies {others.join(', ')}</span>}</div>}
     <div className="reply-controls">
       <Tabs value={tone} onValueChange={v=>setTone(String(v))}><TabsList>{['Concise','Friendly','Professional'].map(t=><TabsTrigger key={t} value={t}>{t}</TabsTrigger>)}</TabsList></Tabs>
       <button className="generate-button" disabled={!!busy||!aiReady} onClick={generate}>{busy==='options'?<RefreshCw className="spinning" size={14}/>:<Sparkles size={14}/>} {options.length?'Regenerate options':'Generate options'}</button>

@@ -1778,13 +1778,20 @@ void test('two confirmed retries of the same unconfirmed reply send it once', as
 
 /** A model stub: `respond` decides each answer; returns how many calls were made. */
 function modelStub(respond: (ids: string[]) => Response | object[]) {
-  const counter = { calls: 0 };
+  // `calls` counts classification requests only. The daily digest asks the model a different
+  // question (wording for the top items), which is counted apart so these assertions keep
+  // meaning "no second classification".
+  const counter = { calls: 0, digestCalls: 0 };
   const provider = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
     const url = requestUrl(input);
     if (!url.startsWith('https://generativelanguage.googleapis.com/')) return provider(input, init);
+    const request = JSON.parse(init!.body as string) as { systemInstruction?: { parts: { text: string }[] }; contents: { parts: { text: string }[] }[] };
+    if (/daily digest/.test(request.systemInstruction?.parts[0]?.text ?? '')) {
+      counter.digestCalls++;
+      return Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify({ items: [] }) }] }, finishReason: 'STOP' }] });
+    }
     counter.calls++;
-    const request = JSON.parse(init!.body as string) as { contents: { parts: { text: string }[] }[] };
     const ids = (JSON.parse(request.contents[0].parts[0].text) as { id: string }[]).map((m) => m.id);
     const answer = respond(ids);
     if (answer instanceof Response) return answer;
