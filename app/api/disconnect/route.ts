@@ -34,7 +34,7 @@ export async function POST(request:Request){
       // `unsubscribed` is the emptied legacy table, kept for rollback; `unsubscribe_requests`
       // is the live history. Both go with the account so nothing is left behind for an id
       // that no longer exists.
-      ...['snapshots','mailbox_messages','sender_rules','blocked_senders','unsubscribed','unsubscribe_requests','legacy_unsubscribe_guards','operations','overrides'].map(table=>
+      ...['snapshots','mailbox_messages','sender_rules','blocked_senders','unsubscribed','unsubscribe_requests','legacy_unsubscribe_guards','operations','overrides','scheduled_emails'].map(table=>
         e.DB.prepare(`DELETE FROM ${table} WHERE account_id = ? AND user_id = ?`).bind(owned.id,user)),
     ]);
 

@@ -154,3 +154,15 @@ export function polishReply(email:Email,notes:string,tone:string,e=runtime(),sig
     {sender:email.sender,subject:email.subject,body:email.body.slice(0,7000),notes:notes.slice(0,4000),tone,seed:crypto.randomUUID()},
     {type:'object',properties:{reply:{type:'string'}},required:['reply'],additionalProperties:false},e);
 }
+/**
+ * Writes a brand-new email from the user's own rough notes, for the user to review and edit.
+ * It only drafts text; sending is a separate explicit action the AI cannot take.
+ */
+export function composeDraft(notes:string,tone:string,e=runtime(),signer?:string) {
+  return generate<{subject:string;body:string}>(
+    `The \`notes\` field is the user’s own rough description of a brand-new email they want to send. Write one complete email from it: a short, specific subject line (one line, at most 80 characters) and the body, ${signOff(signer)}. Tone: `+tone+'. '+(toneGuide[tone]||toneGuide.Concise)+
+    ' Preserve every fact, number, name, date, and request the notes state, and only those — fix grammar, wording, and structure, but do not add promises, approvals, availability, attachments, links, or details the notes did not include.'+
+    ' Greet the recipient by a name only if the notes give one; otherwise use a plain greeting. Never send anything.',
+    {notes:notes.slice(0,4000),tone,seed:crypto.randomUUID()},
+    {type:'object',properties:{subject:{type:'string'},body:{type:'string'}},required:['subject','body'],additionalProperties:false},e);
+}

@@ -1,10 +1,13 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { Digest } from '@/lib/digest';
 import { demoEmails } from '@/lib/mail';
 import { api, ApiError, loadConnectedInbox, syncFailureMessage, type BlockedSender, type InboxSnapshot as Snapshot } from '@/lib/inbox-client';
 export { api, ApiError } from '@/lib/inbox-client';
 export type GmailAccount={id:string;email:string;lastSync:number|null;error:string|null;reconnectRequired?:boolean};
-export type ConnectionStatus={userId?:string;accounts:GmailAccount[];defaultAccountId:string|null;connected:boolean;configured:boolean;missingSettings?:string[];callbackUrl?:string|null;aiConfigured:boolean;schedulerActive:boolean;intervalMinutes:number};
+/** The person's own sending settings, shared by every connected mailbox. */
+export type Profile={name:string;signature:string};
+export type ConnectionStatus={userId?:string;profile?:Profile;accounts:GmailAccount[];defaultAccountId:string|null;connected:boolean;configured:boolean;missingSettings?:string[];callbackUrl?:string|null;aiConfigured:boolean;schedulerActive:boolean;intervalMinutes:number};
 
 /** The reserved selection meaning "every connected mailbox". */
 export const ALL_INBOXES='all';
@@ -72,6 +75,7 @@ export function useInbox(){
   const [selectedView,setSelectedView]=useState<string>(ALL_INBOXES);
   const [accountStates,setAccountStates]=useState<Snapshot['accounts']>([]);
   const [blocked,setBlocked]=useState<BlockedSender[]>([]);
+  const [digest,setDigest]=useState<Digest|undefined>();
   // Preferences are keyed by the signed-in user so one person's selection never leaks
   // into another's session on a shared browser.
   const userKey=status?.userId||'';
@@ -93,7 +97,7 @@ export function useInbox(){
   // running sync frees the mutex, instead of staying stale until the next poll.
   const queuedAccount=useRef<string|null>(null);
   const release=useRef(()=>{});
-  const apply=useCallback((data:Snapshot)=>{setEmails(data.emails);setUpdated(data.updated);setAi(data.ai);setHasMore(!!data.hasMore);setSkipped(data.skipped||0);setAccountStates(data.accounts||[]);setBlocked(data.blocked||[]);},[]);
+  const apply=useCallback((data:Snapshot)=>{setEmails(data.emails);setUpdated(data.updated);setAi(data.ai);setHasMore(!!data.hasMore);setSkipped(data.skipped||0);setAccountStates(data.accounts||[]);setBlocked(data.blocked||[]);setDigest(data.digest);},[]);
   const resetToDemo=useCallback(()=>{
     // Invalidate connected-account work first, then replace it with the server's current
     // demo snapshot if that request still belongs to this generation.
@@ -215,7 +219,7 @@ export function useInbox(){
     const request=++generation.current;
     setSelectedView(view);
     if(userKey)rememberSelection(userKey,view);
-    setEmails([]);setUpdated(null);setAi(false);setHasMore(false);setSkipped(0);setAccountStates([]);setBlocked([]);
+    setEmails([]);setUpdated(null);setAi(false);setHasMore(false);setSkipped(0);setAccountStates([]);setBlocked([]);setDigest(undefined);
     const accountId=view===ALL_INBOXES?undefined:view;
     const cached=accountId?`/api/mailbox?accountId=${encodeURIComponent(accountId)}`:'/api/mailbox';
     // If another Gmail request is still running, switch views from the server's cache and
@@ -274,6 +278,6 @@ export function useInbox(){
   return {emails,setEmails,status,setStatus,accounts,accountStates,blocked,activeAccount,activeAccountId,
     setActiveAccountId:selectAccount,
     defaultAccountId:status?.defaultAccountId||null,
-    connected,busy,notice,setNotice,signInUrl,updated,ai,hasMore,skipped,refresh,resetToDemo,
+    connected,busy,notice,setNotice,signInUrl,updated,ai,hasMore,skipped,digest,refresh,resetToDemo,
     reload:async()=>{await refresh(true)},reloadCached,setDefaultAccount,disconnectAccount};
 }

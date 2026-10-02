@@ -30,6 +30,8 @@ export type Email = {
   senderJunkPreference?:'junk'|'not-junk';
   senderRuleRevision?:number;
   receivedAt?: number; messageId?: string; unsubscribe?: string; oneClick?: boolean;
+  /** Other people on the original message, kept so a reply-all can show who it would copy. */
+  to?: string[]; cc?: string[];
   /** What the app can do about this message's newsletter; see lib/unsubscribe. */
   unsubscribeCapability?: import('./unsubscribe').UnsubscribeCapability;
   /** The newsletter this message belongs to, when it named one. Two lists from one sender

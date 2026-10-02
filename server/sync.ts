@@ -8,6 +8,8 @@ import { loadMessageMap, loadMessages, parseStoredEmail, snapshotSentIds } from 
 import { deterministicClassify } from '@/lib/deterministic';
 import { POLICY_VERSION, type Classification } from '@/lib/classification';
 import { analysisVersion, summarize } from './ai';
+import { buildDigest, type Digest } from './digest';
+import { sendDueScheduled } from './scheduled';
 import { HttpError, type Runtime } from './runtime';
 import type { Email } from '@/lib/mail';
 
@@ -51,7 +53,9 @@ function fromModel(hit:Pick<StoredEmail,'classificationSource'|'analysisVersion'
   return !!hit&&(hit.classificationSource==='ai'||(!hit.classificationSource&&(hit.analysisVersion||'').startsWith('gemini:')));
 }
 
-export type Snapshot={emails:StoredEmail[];ai:boolean;pending:number;skipped:number;analysisVersion:string;updated:number;limit:number;hasMore:boolean};
+export type Snapshot={emails:StoredEmail[];ai:boolean;pending:number;skipped:number;analysisVersion:string;updated:number;limit:number;hasMore:boolean;
+  /** AI-written wording for the daily digest's items. Ranking is recomputed on every read. */
+  digest?:Digest};
 export async function summarizeInbox(emails:Email[],e:Runtime){
   try{return await summarize(emails,e);}
   catch{
@@ -270,9 +274,15 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
       .bind(accountId,user).first<{total:number;pending:number|null}>();
     pending=totals?.pending||0;
     const totalSkipped=(pageToken?lock.sync_skipped:0)+skipped;
+    // The digest is worded from everything stored for this mailbox, recent mail only. A problem
+    // writing it must never stop the inbox from refreshing, so the earlier wording is kept.
+    const stored=await loadMessages(user,accountId,e);
+    let digest=old?.digest;
+    try{digest=await buildDigest(stored.filter(email=>!email.receivedAt||email.receivedAt>now-60*86400000),e,old?.digest);}
+    catch{console.error('Digest wording failed; keeping the previous digest.');}
     // Keep only this bounded page in the legacy snapshot for rolling compatibility. The
     // complete mailbox lives in `mailbox_messages` and is never serialized as one blob.
-    const snapshot:Snapshot={emails:pageEmails,ai:pending===0&&!!e.GEMINI_API_KEY,pending,skipped:totalSkipped,analysisVersion:currentAnalysisVersion,updated:Date.now(),limit:totals?.total||0,hasMore:!!list.nextPageToken};
+    const snapshot:Snapshot={emails:pageEmails,ai:pending===0&&!!e.GEMINI_API_KEY,pending,skipped:totalSkipped,analysisVersion:currentAnalysisVersion,updated:Date.now(),limit:totals?.total||0,hasMore:!!list.nextPageToken,...(digest?{digest}:{})};
     await renewLease();
     // Both the lease and the encrypted credential identify this refresh's owner.
     // A reconnect changes the credential even if it renews the same mailbox.
@@ -295,7 +305,7 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
           accountId,user,lock.token,leaseUntil,snapshot.updated),
     ]);
     if(!writes[0].meta.changes)throw new HttpError(409,'This Gmail connection or refresh changed. Please refresh the inbox again.');
-    return {...snapshot,emails:await loadMessages(user,accountId,e)};
+    return {...snapshot,emails:stored};
   }catch(error){
     // An account-level failure records its error on that account alone and leaves the
     // previous snapshot in place, so a failed refresh never empties a working mailbox.
@@ -308,6 +318,8 @@ export async function runAgent(e:Runtime) {
   // Record scheduler health before processing accounts, then cap each run so one cron
   // invocation cannot grow without bound as the number of connections increases.
   await e.DB.prepare('INSERT INTO agent_status (id, last_run) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET last_run=excluded.last_run').bind('scheduler',now).run();
+  // Emails scheduled for later are time-sensitive, so they go first and never block the inbox refresh.
+  try{await sendDueScheduled(e);}catch{console.error('Scheduled email delivery failed; the next run will try again.');}
   // Accounts are selected independently of their owner, so one user's stalled mailbox
   // cannot starve another's. Ordering by last_sync gives the longest-waiting account the
   // next slot, which stops a repeatedly failing mailbox from monopolising every run.

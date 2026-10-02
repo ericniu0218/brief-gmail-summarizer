@@ -1,5 +1,6 @@
 import { failure, googleCallbackUrl, json, missingSettings, runtime, userId } from '@/server/runtime';
 import { ownedConnections } from '@/server/gmail';
+import { userProfile } from '@/server/profile';
 
 /**
  * Connection status for settings and inbox startup. It exposes only safe metadata for
@@ -25,6 +26,8 @@ export async function GET(){
         reconnectRequired:!!c.error&&/reconnect|renew|expired/i.test(c.error),
       })),
       defaultAccountId,
+      // The person's own sending settings, shared by every connected mailbox.
+      profile:await userProfile(user,e),
       connected:connections.length>0,
       configured:!missing.length,missingSettings:missing,callbackUrl:googleCallbackUrl(e),
       aiConfigured:!!e.GEMINI_API_KEY,

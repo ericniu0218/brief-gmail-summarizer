@@ -2,7 +2,8 @@ import type { Email } from '@/lib/mail';
 import { deterministicClassify } from '@/lib/deterministic';
 import { applyPolicy, type Classification } from '@/lib/classification';
 import { normalizeMessage, type GmailMessage, type NormalizedMessage } from './message';
-import { decryptToken, googleClient, HttpError, runtime, type Runtime } from './runtime';
+import { encode, decryptToken, googleClient, HttpError, runtime, type Runtime } from './runtime';
+import { normalizeAddress } from '@/lib/recipients';
 
 export type Connection = {
   id:string; user_id:string; provider_identity:string|null; email:string; token:string;
@@ -52,15 +53,25 @@ export async function accessToken(user:string,accountId:string,e=runtime()) {
   const data=await result.json() as {access_token:string};
   return data.access_token;
 }
+function gmailFailure(status:number){
+  const mapped=[400,401,403,429].includes(status)?status:502;
+  const message=status===429?'Gmail is busy. Please try again in a minute.'
+    :status===401||status===403?'Your Gmail connection needs to be renewed. Reconnect in settings.'
+    :'Gmail could not complete that request. Please try again.';
+  return new HttpError(mapped,message);
+}
 export async function gmail<T>(path:string, token:string, init:RequestInit={}) {
   const result=await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${path}`,{...init,headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},signal:AbortSignal.timeout(20000)});
-  if(!result.ok){
-    const status=[400,401,403,429].includes(result.status)?result.status:502;
-    const message=result.status===429?'Gmail is busy. Please try again in a minute.'
-      :result.status===401||result.status===403?'Your Gmail connection needs to be renewed. Reconnect in settings.'
-      :'Gmail could not complete that request. Please try again.';
-    throw new HttpError(status,message);
-  }
+  if(!result.ok)throw gmailFailure(result.status);
+  return await result.json() as T;
+}
+/**
+ * Sends or drafts a complete message (including attachments) by uploading it as-is, which
+ * avoids base64-encoding a large message a second time inside JSON.
+ */
+export async function gmailUpload<T>(path:string, token:string, mime:string) {
+  const result=await fetch(`https://gmail.googleapis.com/upload/gmail/v1/users/me/${path}?uploadType=media`,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'message/rfc822'},body:mime,signal:AbortSignal.timeout(60000)});
+  if(!result.ok)throw gmailFailure(result.status);
   return await result.json() as T;
 }
 export type { GmailMessage } from './message';
@@ -91,6 +102,7 @@ export function emailFrom(n:NormalizedMessage,proposed:Classification,now=Date.n
     classification,
     contentComplete:n.contentComplete,incompleteReasons:n.incompleteReasons,
     messageId:n.messageId,unsubscribe,
+    to:n.to.map(party=>party.address).filter(Boolean).slice(0,50),cc:n.cc.map(party=>party.address).filter(Boolean).slice(0,50),
     oneClick:(n.headers['list-unsubscribe-post']||'').toLowerCase().includes('list-unsubscribe=one-click'),
   };
 }
@@ -152,3 +164,70 @@ export function safeUnsubscribe(url:string,e:Runtime) {
   const host=target.hostname.toLowerCase().replace(/\.$/,'');
   return allowed.some(entry=>host===entry||host.endsWith('.'+entry));
 }
+
+// ---- Composing a message -------------------------------------------------------------------
+export const MAX_RECIPIENTS=20;
+function addressList(input:unknown,required:boolean):string[] {
+  if(!required&&(input===undefined||input===null||input===''))return [];
+  if(typeof input!=='string')throw new HttpError(400,required?'Add at least one recipient.':'Cc and Bcc must be email addresses.');
+  if(!input.trim()){if(required)throw new HttpError(400,'Add at least one recipient.');return [];}
+  const seen=new Map<string,string>();
+  for(const token of input.split(/[\s,;]+/).filter(Boolean)){
+    const address=normalizeAddress(token);
+    if(!address)throw new HttpError(400,`"${token.slice(0,60)}" is not a plain email address. Use addresses like name@example.com, separated by commas.`);
+    if(!seen.has(address.toLowerCase()))seen.set(address.toLowerCase(),address);
+  }
+  return [...seen.values()];
+}
+/**
+ * Accepts plain addresses separated by commas, semicolons, or whitespace. Anything that is not
+ * a bare address is rejected, so a pasted value can never add hidden recipients or headers.
+ * An address appears once overall (To wins over Cc, Cc over Bcc) and To+Cc+Bcc is capped.
+ */
+export function parseRecipientGroups(input:{to?:unknown;cc?:unknown;bcc?:unknown}):{to:string[];cc:string[];bcc:string[]} {
+  const to=addressList(input.to,true);
+  const taken=new Set(to.map(a=>a.toLowerCase()));
+  const unseen=(list:string[])=>list.filter(a=>{const key=a.toLowerCase();if(taken.has(key))return false;taken.add(key);return true;});
+  const cc=unseen(addressList(input.cc,false));const bcc=unseen(addressList(input.bcc,false));
+  if(to.length+cc.length+bcc.length>MAX_RECIPIENTS)throw new HttpError(400,`Send to at most ${MAX_RECIPIENTS} people at a time.`);
+  return {to,cc,bcc};
+}
+// Encodes in pieces whose length is a multiple of three so large attachments never build a huge
+// intermediate string or array.
+function base64(bytes:Uint8Array){
+  let out='';
+  for(let i=0;i<bytes.length;i+=24576)out+=btoa(String.fromCharCode(...bytes.subarray(i,i+24576)));
+  return out;
+}
+const wrap76=(text:string)=>text.match(/.{1,76}/g)?.join('\r\n')||'';
+// RFC 2047 encoded words are limited to 75 characters, so long or non-ASCII subjects are split
+// on character boundaries (45 bytes of text per word) and folded onto continuation lines.
+function encodeSubject(subject:string) {
+  const encoder=new TextEncoder();const words:string[]=[];let chunk:number[]=[];
+  const flush=()=>{if(chunk.length)words.push(`=?UTF-8?B?${base64(Uint8Array.from(chunk))}?=`);chunk=[];};
+  for(const char of subject){
+    const bytes=encoder.encode(char);
+    if(chunk.length+bytes.length>45)flush();
+    chunk.push(...bytes);
+  }
+  flush();
+  return words.join('\r\n ');
+}
+export type MimeAttachment={name:string;type:string;bytes:Uint8Array};
+export function buildMime({to,cc=[],bcc=[],subject,body,inReplyTo,attachments=[]}:{to:string[];cc?:string[];bcc?:string[];subject:string;body:string;inReplyTo?:string;attachments?:MimeAttachment[]}) {
+  if(!to.length||![...to,...cc,...bcc].every(address=>normalizeAddress(address)===address))throw new HttpError(400,'Add at least one valid recipient.');
+  if(/[\r\n]/.test(inReplyTo||''))throw new HttpError(400,'The conversation reference is not valid.');
+  const headers=[`To: ${to.join(', ')}`,...(cc.length?[`Cc: ${cc.join(', ')}`]:[]),...(bcc.length?[`Bcc: ${bcc.join(', ')}`]:[]),`Subject: ${encodeSubject(subject)}`,...(inReplyTo?[`In-Reply-To: ${inReplyTo}`,`References: ${inReplyTo}`]:[]),'MIME-Version: 1.0'];
+  const text=wrap76(base64(new TextEncoder().encode(body)));
+  if(!attachments.length)return [...headers,'Content-Type: text/plain; charset=UTF-8','Content-Transfer-Encoding: base64','',text].join('\r\n');
+  // Base64 never contains "-", so this boundary cannot appear inside any encoded part.
+  const boundary='----=_brief_'+crypto.randomUUID();
+  const parts=[`--${boundary}\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n${text}`];
+  for(const file of attachments){
+    const ascii=file.name.replace(/[^\x20-\x7e]/g,'_').replace(/["\\]/g,'_');
+    parts.push(`--${boundary}\r\nContent-Type: ${file.type}; name="${ascii}"\r\nContent-Disposition: attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(file.name)}\r\nContent-Transfer-Encoding: base64\r\n\r\n${wrap76(base64(file.bytes))}`);
+  }
+  return [...headers,`Content-Type: multipart/mixed; boundary="${boundary}"`,'',parts.join('\r\n')+`\r\n--${boundary}--`].join('\r\n');
+}
+/** The same message as base64url text, the form the Gmail JSON API expects. */
+export function buildRawMessage(message:{to:string[];cc?:string[];bcc?:string[];subject:string;body:string;inReplyTo?:string}) {return encode(buildMime(message));}

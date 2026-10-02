@@ -113,7 +113,41 @@ export const operations = sqliteTable('operations', {
   // The attempt that owns this operation. Every completion or failure write names it, so
   // overlapping confirmed retries cannot both send.
   attempt: text('attempt'),
+  // 'send' or 'draft'. The daily sending limit counts the sends among a user's recent operations.
+  action: text('action'),
 }, table => [index('operations_account').on(table.accountId)]);
+/**
+ * Settings that belong to the person rather than to one mailbox, so they apply whichever
+ * connected account an email leaves from. Both are text the user typed themselves.
+ */
+export const userProfiles = sqliteTable('user_profiles', {
+  userId: text('user_id').primaryKey(),
+  // Signs AI-written replies and drafts. Never taken from a mail header or an account name.
+  displayName: text('display_name'),
+  // Added under every new email and forward the user writes.
+  signature: text('signature'),
+});
+/**
+ * Emails queued to send later, from one connected mailbox. The payload holds the recipients,
+ * subject and body as JSON and is cleared once the email is sent or cancelled.
+ */
+export const scheduledEmails = sqliteTable('scheduled_emails', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull(),
+  accountId: text('account_id').notNull(),
+  sendAt: integer('send_at').notNull(),
+  payload: text('payload').notNull(),
+  status: text('status').notNull(),
+  error: text('error'),
+  attempts: integer('attempts').notNull().default(0),
+  created: integer('created').notNull(),
+  updated: integer('updated').notNull(),
+}, table => [
+  index('scheduled_due').on(table.status, table.sendAt),
+  index('scheduled_user').on(table.userId),
+  index('scheduled_account').on(table.accountId),
+  check('scheduled_status', sql`${table.status} IN ('scheduled','sending','sent','failed','cancelled')`),
+]);
 export const unsubscribed = sqliteTable('unsubscribed', {
   id: text('id').primaryKey(),
   userId: text('user_id').notNull(),
