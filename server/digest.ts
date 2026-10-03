@@ -1,5 +1,6 @@
 import { generateRaw } from './ai';
-import { DIGEST_ACTIONS, digestItems, type Digest, type DigestAction, type DigestItem, type DigestText } from '@/lib/digest';
+import { DIGEST_ACTIONS, digestItems, digestMembership, type Digest, type DigestAction, type DigestItem, type DigestText } from '@/lib/digest';
+import type { FoldPreferences } from '@/lib/folding';
 import { encode, type Runtime } from './runtime';
 import type { Email } from '@/lib/mail';
 
@@ -13,7 +14,7 @@ const WHY_LIMIT=170;
 // Identifies what the wording was written from, so unchanged items keep their wording between refreshes.
 async function fingerprint(item:DigestItem){
   const {email,keys,group}=item;
-  const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify([email.subject,email.summary,email.label,email.needsReply,email.priority,keys.length,group||'',item.importance.reasonCode])));
+  const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify([email.subject,email.summary,email.label,email.needsReply,email.priority,digestMembership(keys),group||'',!!item.conversation,item.importance.reasonCode])));
   return encode(new Uint8Array(digest)).slice(0,16);
 }
 const tidy=(text:unknown,limit:number)=>{
@@ -36,7 +37,9 @@ async function writeText(missing:{item:DigestItem;fp:string}[],e:Runtime):Promis
     const headline=tidy(item.headline,HEADLINE_LIMIT);const why=tidy(item.why,WHY_LIMIT);
     if(!headline||!why)continue;
     const action=(DIGEST_ACTIONS as string[]).includes(item.action as string)?item.action as DigestAction:target.item.action;
-    written.set(target.item.key,{id:target.item.key,fp:target.fp,headline,why,action});
+    written.set(target.item.key,{id:target.item.key,fp:target.fp,headline,why,action,
+      members:target.item.keys.length,grouping:target.item.conversation?'conversation':target.item.group?'notifications':'single',
+      membership:digestMembership(target.item.keys)});
   }
   return [...written.values()];
 }
@@ -45,18 +48,37 @@ async function writeText(missing:{item:DigestItem;fp:string}[],e:Runtime):Promis
  * already had, so an unchanged inbox costs no AI calls and the list does not reword itself on
  * every refresh.
  */
-export async function buildDigest(emails:Email[],e:Runtime,previous?:Digest,now=Date.now()):Promise<Digest|undefined> {
-  const candidates=digestItems(emails,now);
-  const known=new Map((previous?.items||[]).map(item=>[item.id,item]));
+export async function buildDigest(emails:Email[],e:Runtime,previous?:Digest,now=Date.now(),preferences:FoldPreferences={}):Promise<Digest|undefined> {
+  const candidates=digestItems(emails,now,preferences);
+  // Wording is matched by message *and* fingerprint: the same lead message grouped with and
+  // without the reader's fold preferences has two different, equally valid wordings.
+  const known=new Map((previous?.items||[]).map(item=>[`${item.id}\n${item.fp}`,item]));
   const items:DigestText[]=[];const missing:{item:DigestItem;fp:string}[]=[];
   for(const item of candidates){
-    const fp=await fingerprint(item);const old=known.get(item.key);
-    if(old&&old.fp===fp)items.push(old);else missing.push({item,fp});
+    const fp=await fingerprint(item);const old=known.get(`${item.key}\n${fp}`);
+    if(old)items.push(old);else missing.push({item,fp});
   }
   if(missing.length&&e.GEMINI_API_KEY){
     try{items.push(...await writeText(missing,e));}
     catch{console.error('Gemini digest wording failed; showing rule-based wording until the next refresh.');}
   }
-  if(!items.length&&!candidates.length)return undefined;
-  return {generated:Date.now(),items};
+  // Keep a bounded number of wordings written for other groupings (a browser's fold
+  // preferences) so they are not paid for again after every refresh.
+  const used=new Set(items.map(item=>`${item.id}\n${item.fp}`));
+  const others=(previous?.items||[]).filter(item=>!used.has(`${item.id}\n${item.fp}`)).slice(-KEPT_OTHER_WORDINGS);
+  if(!items.length&&!candidates.length&&!others.length)return undefined;
+  return {generated:Date.now(),items:[...items,...others]};
 }
+const KEPT_OTHER_WORDINGS=24;
+
+/**
+ * Wording written for one browser's grouping, saved beside the mailbox's own so the next
+ * page load or refresh reuses it. Each item goes to the mailbox its message belongs to.
+ */
+export function mergeWording(previous:Digest|undefined,written:DigestText[]):Digest{
+  const merged=new Map((previous?.items||[]).map(item=>[`${item.id}\n${item.fp}`,item]));
+  for(const item of written)merged.set(`${item.id}\n${item.fp}`,item);
+  const items=[...merged.values()];
+  return {generated:previous?.generated||Date.now(),items:items.slice(-(DIGEST_KEPT))};
+}
+const DIGEST_KEPT=40;

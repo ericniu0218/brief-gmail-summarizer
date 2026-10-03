@@ -1,0 +1,1 @@
+ALTER TABLE `overrides` ADD `reply_preference` text;

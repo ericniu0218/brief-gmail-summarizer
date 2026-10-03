@@ -36,8 +36,9 @@ export async function gmailPreview(
   if (!snapshot)
     throw new HttpError(409, 'This Gmail cache is damaged. Refresh the mailbox before sharing.');
   const emails = await Promise.all(ids.map(async(id) => {
-    const email = snapshot.emails.find((e) => e?.id === id)
-      ||await loadMessage(userId,accountId,id,{DB:db} as import('../runtime').Runtime);
+    // The stored message first: the snapshot keeps only a slim copy without the body.
+    const email = await loadMessage(userId,accountId,id,{DB:db} as import('../runtime').Runtime)
+      ||snapshot.emails.find((e) => e?.id === id);
     if (!email)
       throw new HttpError(
         409,

@@ -1,5 +1,5 @@
 'use client';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Sparkles, Send, FilePenLine, RefreshCw, ExternalLink, Wand2, Check, CheckCircle2 } from 'lucide-react';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { api, ApiError } from '@/hooks/use-inbox';
@@ -24,9 +24,12 @@ export function ReplyComposer({email,demo,aiReady,onSent}:{email:Email;demo:bool
   const [sent,setSent]=useState('');
   const [unconfirmed,setUnconfirmed]=useState<'send'|'draft'|null>(null);
   const [replyAll,setReplyAll]=useState(false);
+  const [draftId,setDraftId]=useState('');
+  const sendKey=useRef(crypto.randomUUID());
+  const draftSaveKey=useRef('');
   // Others on the original message. The server works the real list out from Gmail's own headers;
   // this only shows who a reply-all would copy.
-  const others=!demo?replyAllCc(email,[email.accountEmail||'',email.address]):[];
+  const others=!demo?replyAllCc(email,[email.accountEmail||'',email.address,email.replyTo||'']):[];
   const copying=replyAll&&others.length>0;
   function endpoint(){return demo?'/api/suggest':'/api/reply';}
   async function generate(){
@@ -56,13 +59,14 @@ export function ReplyComposer({email,demo,aiReady,onSent}:{email:Email;demo:bool
     // Demo mode exercises the interface locally. Connected mode is the only branch that
     // calls the Gmail-changing reply endpoint.
     setBusy(action);setMessage('');setError(false);setUnconfirmed(null);
+    if(action==='draft'&&!draftSaveKey.current)draftSaveKey.current=crypto.randomUUID();
     try{
       if(demo){setMessage(action==='send'?'Demo reply complete. No email was sent.':'Demo draft saved for this conversation.');if(action==='send'){setSent(text);onSent();}}
-      else{await api('/api/reply',{id:email.id,accountId:actionAccountId(email),action,body:text,confirmUnsent,replyAll:copying});setMessage(action==='send'?'Reply sent through Gmail.':'Draft saved in Gmail.');if(action==='send'){setSent(text);onSent();}}
+      else{const receipt=await api<{id:string}>('/api/reply',{id:email.id,accountId:actionAccountId(email),action,body:text,sendKey:sendKey.current,saveKey:action==='draft'?draftSaveKey.current:undefined,draftId:draftId||undefined,confirmUnsent,replyAll:copying});setMessage(action==='send'?'Reply sent through Gmail.':'Draft updated in Gmail.');if(action==='send'){setDraftId('');setSent(text);onSent();}else{setDraftId(receipt.id);draftSaveKey.current='';}}
     }catch(error){setMessage(error instanceof Error?error.message:'Could not complete your reply.');setError(true);if(error instanceof ApiError&&error.status===409&&error.message.includes('still unconfirmed'))setUnconfirmed(action);}
     finally{setBusy('');}
   }
-  function writeAnother(){setSent('');setText('');setOptions([]);setChosen(-1);setNotes('');setMessage('');setError(false);}
+  function writeAnother(){sendKey.current=crypto.randomUUID();draftSaveKey.current='';setDraftId('');setSent('');setText('');setOptions([]);setChosen(-1);setNotes('');setMessage('');setError(false);}
   if(sent)return <div className="reply-area">
     <div className="reply-sent"><CheckCircle2 size={18}/><strong>{demo?'Demo reply sent':'Reply sent through Gmail'}</strong></div>
     <div className="reply-sent-body"><span>To {email.sender}{copying?` and ${others.length} ${others.length===1?'other':'others'}`:''}</span><p>{sent}</p></div>

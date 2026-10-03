@@ -119,7 +119,7 @@ let env:Runtime;
 beforeEach(()=>{
   storage=database();env={DB:storage.db,APP_URL:'https://brief.example'};
   globalThis.__briefTestEnv=env;
-  globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
+  globalThis.__briefTestHeaders=new Headers({'x-brief-identity-secret':'test-ingress-secret-for-authenticated-proxy', 'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
 });
 afterEach(()=>{storage.sql.close();globalThis.__briefTestHeaders=new Headers();});
 

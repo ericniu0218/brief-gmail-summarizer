@@ -3,7 +3,11 @@ import { failure, HttpError, inputObject, json, mutation, runtime, userId } from
 
 /** The signed-in user's queued emails (pending and failed), so they can be reviewed, edited or cancelled. */
 export async function GET(){
-  try{return json({items:await listScheduled(await userId(),runtime())});}
+  try{
+    const e=runtime();
+    const heartbeat=await e.DB.prepare('SELECT last_run FROM agent_status WHERE id = ?').bind('scheduler').first<{last_run:number}>();
+    return json({items:await listScheduled(await userId(),e),schedulerActive:!!heartbeat&&Date.now()-heartbeat.last_run<40*60000});
+  }
   catch(error){return failure(error);}
 }
 export async function POST(request:Request){

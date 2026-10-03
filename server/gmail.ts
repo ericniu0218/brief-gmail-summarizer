@@ -1,9 +1,11 @@
 import type { Email } from '@/lib/mail';
 import { deterministicClassify } from '@/lib/deterministic';
 import { applyPolicy, type Classification } from '@/lib/classification';
+import { gmailSignals } from '@/lib/gmail-signals';
 import { normalizeMessage, type GmailMessage, type NormalizedMessage } from './message';
 import { encode, decryptToken, googleClient, HttpError, runtime, type Runtime } from './runtime';
 import { normalizeAddress } from '@/lib/recipients';
+import { replyAddress } from '@/lib/reply-address';
 
 export type Connection = {
   id:string; user_id:string; provider_identity:string|null; email:string; token:string;
@@ -53,26 +55,59 @@ export async function accessToken(user:string,accountId:string,e=runtime()) {
   const data=await result.json() as {access_token:string};
   return data.access_token;
 }
+// Gmail reports per-user rate limits as 403 as well as 429. Those mean "slow down", not
+// "this connection is broken", so they are treated as busy and retried rather than asking
+// the person to reconnect.
+const RATE_LIMITED=/rateLimitExceeded|userRateLimitExceeded|tooManyConcurrentRequests|backendError|RESOURCE_EXHAUSTED/i;
+async function failureFrom(result:Response){
+  let detail='';
+  try{detail=(await result.text()).slice(0,4000);}catch{/* The status alone still decides. */}
+  return gmailFailure(result.status===403&&RATE_LIMITED.test(detail)?429:result.status);
+}
+const busy=(status:number)=>status===429||status>=500;
+const pause=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
+/** How long to wait before retry `attempt`: Gmail's Retry-After when given, else 0.5 s, 1 s, 2 s, with jitter. */
+function retryDelay(result:Response,attempt:number){
+  const after=Number(result.headers.get('retry-after'));
+  const base=Number.isFinite(after)&&after>0?after*1000:500*2**attempt;
+  return Math.min(base,8000)+Math.floor(Math.random()*250);
+}
+const READ_ATTEMPTS=4;
 function gmailFailure(status:number){
-  const mapped=[400,401,403,429].includes(status)?status:502;
+  const mapped=[400,401,403,404,429].includes(status)?status:502;
   const message=status===429?'Gmail is busy. Please try again in a minute.'
     :status===401||status===403?'Your Gmail connection needs to be renewed. Reconnect in settings.'
+    :status===404?'That Gmail item is no longer available.'
     :'Gmail could not complete that request. Please try again.';
   return new HttpError(mapped,message);
 }
+/**
+ * One Gmail API call. Reads are retried a few times when Gmail is busy or briefly failing;
+ * anything that changes Gmail (send, draft, delete) is never retried here, because a
+ * timeout there may already have taken effect — the send protocol handles that case.
+ */
 export async function gmail<T>(path:string, token:string, init:RequestInit={}) {
-  const result=await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${path}`,{...init,headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},signal:AbortSignal.timeout(20000)});
-  if(!result.ok)throw gmailFailure(result.status);
-  return await result.json() as T;
+  const read=!init.method||init.method.toUpperCase()==='GET';
+  for(let attempt=0;;attempt++){
+    const result=await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${path}`,{...init,headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},signal:init.signal??AbortSignal.timeout(20000)});
+    if(result.ok)return await result.json() as T;
+    const failure=await failureFrom(result);
+    if(!read||!busy(failure.status===502?500:failure.status)||attempt+1>=READ_ATTEMPTS)throw failure;
+    await pause(retryDelay(result,attempt));
+  }
 }
 /**
  * Sends or drafts a complete message (including attachments) by uploading it as-is, which
  * avoids base64-encoding a large message a second time inside JSON.
  */
-export async function gmailUpload<T>(path:string, token:string, mime:string) {
-  const result=await fetch(`https://gmail.googleapis.com/upload/gmail/v1/users/me/${path}?uploadType=media`,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'message/rfc822'},body:mime,signal:AbortSignal.timeout(60000)});
-  if(!result.ok)throw gmailFailure(result.status);
+export async function gmailUpload<T>(path:string, token:string, mime:string,method:'POST'|'PUT'='POST') {
+  const result=await fetch(`https://gmail.googleapis.com/upload/gmail/v1/users/me/${path}?uploadType=media`,{method,headers:{Authorization:`Bearer ${token}`,'Content-Type':'message/rfc822'},body:mime,signal:AbortSignal.timeout(60000)});
+  if(!result.ok)throw await failureFrom(result);
   return await result.json() as T;
+}
+export async function gmailDelete(path:string,token:string){
+  const result=await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${path}`,{method:'DELETE',headers:{Authorization:`Bearer ${token}`},signal:AbortSignal.timeout(20000)});
+  if(!result.ok&&result.status!==404)throw await failureFrom(result);
 }
 export type { GmailMessage } from './message';
 
@@ -91,25 +126,29 @@ export function emailFrom(n:NormalizedMessage,proposed:Classification,now=Date.n
     initials:sender.split(/\s+/).slice(0,2).map(part=>part[0]).join('').toUpperCase(),
     subject:n.subject,
     summary:classification.summary||n.text.replace(/\s+/g,' ').trim().slice(0,140),
-    body:n.text,quoted:n.quoted,html:n.html,
+    body:n.text,quoted:n.quoted,signature:n.signature,html:n.html,
     time:new Date(n.receivedAt).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}),
-    receivedAt:n.receivedAt,
+    receivedAt:n.receivedAt,senderFamiliarity:n.senderFamiliarity,
     category,tags,priority,
     needsReply:classification.replyRequired,
     unread:n.labels.includes('UNREAD'),
+    gmailLabels:gmailSignals(n.labels)||[],
+    inInbox:n.labels.includes('INBOX'),
     color:['purple','blue','rose','green'][sender.length%4],
     label,
     classification,
-    contentComplete:n.contentComplete,incompleteReasons:n.incompleteReasons,
+    contentComplete:n.contentComplete,incompleteReasons:n.incompleteReasons,hasAttachments:n.attachments.length>0,
     messageId:n.messageId,unsubscribe,
     to:n.to.map(party=>party.address).filter(Boolean).slice(0,50),cc:n.cc.map(party=>party.address).filter(Boolean).slice(0,50),
+    replyTo:replyAddress((n.headerValues?.['reply-to']||
+      (n.headers['reply-to']?[n.headers['reply-to']]:[])).map(value=>({name:'Reply-To',value})),n.from.address),
     oneClick:(n.headers['list-unsubscribe-post']||'').toLowerCase().includes('list-unsubscribe=one-click'),
   };
 }
 
 export function parseMessage(m:GmailMessage,userAddress=''):Email {
   const normalized=normalizeMessage(m);
-  return emailFrom(normalized,deterministicClassify(normalized,userAddress));
+  return {...emailFrom(normalized,deterministicClassify(normalized,userAddress)),readerWasRecipient:[...normalized.to,...normalized.cc].some(party=>party.address.toLowerCase()===userAddress.toLowerCase())};
 }
 /**
  * Addresses this server must never call, whatever a header says.
@@ -214,6 +253,21 @@ function encodeSubject(subject:string) {
   return words.join('\r\n ');
 }
 export type MimeAttachment={name:string;type:string;bytes:Uint8Array};
+/** RFC 2231 continuation lines keep long UTF-8 filenames within mail header limits. */
+function filenameParameters(name:string){
+  const fallback=name.replace(/[^\x20-\x7e]/g,'_').replace(/["\\]/g,'_').slice(0,60);
+  const encoded=encodeURIComponent(name).replace(/[!'()*]/g,char=>`%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+  const atoms=encoded.match(/%[0-9A-F]{2}|[^%]/g)||[];
+  const chunks:string[]=[];
+  for(let index=0;index<atoms.length;){
+    let chunk='';
+    while(index<atoms.length&&chunk.length+atoms[index].length<=48)chunk+=atoms[index++];
+    chunks.push(chunk);
+  }
+  const extended=chunks.length<=1?`filename*=UTF-8''${chunks[0]||''}`:
+    chunks.map((chunk,index)=>`filename*${index}*=${index===0?"UTF-8''":''}${chunk}`).join(';\r\n ');
+  return {fallback,extended};
+}
 export function buildMime({to,cc=[],bcc=[],subject,body,inReplyTo,attachments=[]}:{to:string[];cc?:string[];bcc?:string[];subject:string;body:string;inReplyTo?:string;attachments?:MimeAttachment[]}) {
   if(!to.length||![...to,...cc,...bcc].every(address=>normalizeAddress(address)===address))throw new HttpError(400,'Add at least one valid recipient.');
   if(/[\r\n]/.test(inReplyTo||''))throw new HttpError(400,'The conversation reference is not valid.');
@@ -224,8 +278,8 @@ export function buildMime({to,cc=[],bcc=[],subject,body,inReplyTo,attachments=[]
   const boundary='----=_brief_'+crypto.randomUUID();
   const parts=[`--${boundary}\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n${text}`];
   for(const file of attachments){
-    const ascii=file.name.replace(/[^\x20-\x7e]/g,'_').replace(/["\\]/g,'_');
-    parts.push(`--${boundary}\r\nContent-Type: ${file.type}; name="${ascii}"\r\nContent-Disposition: attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(file.name)}\r\nContent-Transfer-Encoding: base64\r\n\r\n${wrap76(base64(file.bytes))}`);
+    const {fallback,extended}=filenameParameters(file.name);
+    parts.push(`--${boundary}\r\nContent-Type: ${file.type}; name="${fallback}"\r\nContent-Disposition: attachment;\r\n filename="${fallback}";\r\n ${extended}\r\nContent-Transfer-Encoding: base64\r\n\r\n${wrap76(base64(file.bytes))}`);
   }
   return [...headers,`Content-Type: multipart/mixed; boundary="${boundary}"`,'',parts.join('\r\n')+`\r\n--${boundary}--`].join('\r\n');
 }

@@ -1,6 +1,7 @@
 import { sameOrganization } from './addresses';
 import { POLICY_VERSION, type Classification, type MeetingState, type Obligation, type ObligationState } from './classification';
 import { resolveDate } from './dates';
+import { assessReply, replyRequiredFrom, type RecipientContext } from './reply';
 import { applyPurposeChecks, assessPurpose, isCampaignFooter, isCommercialSentence, promotionalWithoutPurpose, securityEvidence, transactionEvidence, type PurposeAssessment } from './purpose';
 
 /**
@@ -11,13 +12,15 @@ import { applyPurposeChecks, assessPurpose, isCampaignFooter, isCommercialSenten
 /** The subset of a normalized message this classifier reads. */
 export type ClassifiableMessage={
   id:string;subject:string;text:string;quoted:string;
-  from:{name:string;address:string};to:{address:string}[];cc:{address:string}[];
+  from:{name:string;address:string};to:{name?:string;address:string}[];cc:{name?:string;address:string}[];
   receivedAt:number;labels:string[];attachments:{filename:string}[];
   contentComplete:boolean;
   /** Parsed iCalendar invitation, when the message carried one. */
   calendar?:{method?:string;summary?:string;start?:string;end?:string;status?:string;uid?:string};
   /** Campaign headers derived at normalization. Absent on older records and fixtures. */
   distribution?:{listUnsubscribe?:boolean;bulkPrecedence?:boolean};
+  /** Lower-cased message headers, read only for automatic-reply markers. Optional for fixtures. */
+  headers?:Record<string,string>;
 };
 
 // Signal patterns are intentionally narrow because false positives can hide or
@@ -155,7 +158,7 @@ function inviteDueOf(start:string|undefined):Obligation['due']|undefined{
  * is deliberately excluded from obligation detection so an old request is not revived
  * as a new task. Used as the AI-outage fallback and as the measurable baseline.
  */
-export function deterministicClassify(message:ClassifiableMessage,userAddress=''):Classification{
+export function deterministicClassify(message:ClassifiableMessage,userAddress='',recipient?:RecipientContext):Classification{
   // Obligations are read only from what this message itself says.
   const current=`${message.subject}\n${message.text}`;
   const whole=`${current}\n${message.quoted}`;
@@ -333,15 +336,26 @@ export function deterministicClassify(message:ClassifiableMessage,userAddress=''
 
   // The same checks the model's results pass through: a sales call to action is optional,
   // however it is worded, and research vocabulary does not make a pitch research.
+  // Whether an email answer is owed is decided by the shared reply policy, request by
+  // request, not by the presence of a request-shaped obligation.
+  const assessedReply=assessReply(message,{userAddress,context:recipient});
   const checked=applyPurposeChecks({context:'unknown',topics:rawResearch?['research']:[],obligations,disposition:'useful',
-    replyRequired:true,securityEvent:claimedSecurity,processingStatus:'classified',reason:'',version:''},purpose);
+    replyRequired:replyRequiredFrom(assessedReply),reply:assessedReply,securityEvent:claimedSecurity,processingStatus:'classified',reason:'',version:''},purpose);
+  const reply=checked.reply!;
   const research=checked.topics.includes('research');
   const securityEvent=checked.securityEvent;
   const credible=checked.obligations;
 
   // No false task can protect a promotion any more: the obligations here have already
   // been through the checks, so only a real one keeps a sales message out of Noise.
-  const junk=spamLabel||promotionalWithoutPurpose(checked,purpose);
+  // Gmail's Promotions and Social tabs hold bulk mail by design. When nothing real is in the
+  // message (no order, account event, registration, earned record or task of the user's),
+  // Gmail's verdict settles what the wording alone left open. Mail from the user's own
+  // organisation or a personal address is never buried on a tab's say-so, and neither is a
+  // message whose content could not be read in full: nothing found is not nothing there.
+  const bulkTab=labels.includes('CATEGORY_PROMOTIONS')&&message.contentComplete!==false&&!sameOrganisation&&!PERSONAL_DOMAIN.test(address)&&!purpose.preserve.length
+    &&!transactional&&!concreteSecurity&&!credible.some(o=>o.required&&o.ownerIsUser!==false);
+  const junk=spamLabel||promotionalWithoutPurpose(checked,purpose)||bulkTab;
   // Commercial content with nothing real behind it becomes uncertain rather than useful.
   const uncertain=!junk&&purpose.promotion!=='absent'&&!transactional&&!concreteSecurity&&
     !purpose.preserve.some(p=>p.kind==='registration')&&!credible.some(o=>o.required&&o.ownerIsUser!==false);
@@ -356,25 +370,29 @@ export function deterministicClassify(message:ClassifiableMessage,userAddress=''
     (!bulkSender&&!personalSender&&(INSTITUTIONAL.test(address)||credible.some(o=>o.ownerIsUser===true&&o.required)));
   const context=worksWithUser?'work':personalSender?'personal':'unknown';
 
+  const replyReview=reply.reasonCode==='suspicious_request'?'suspicious-request':reply.status==='uncertain'?'reply-uncertain':undefined;
   const reasons:string[]=[];
   if(securityEvent)reasons.push('Contains an account-security event.');
   if(research)reasons.push('Substantive research content.');
   const required=credible.filter(o=>o.required).length;
   if(required)reasons.push(`${required} obligation${required===1?'':'s'} detected.`);
   if(purpose.promotion==='clear')reasons.push(`Promotional content (${purpose.families.join(', ')}).`);
-  if(junk)reasons.push('Bulk promotional content with no personal or transactional purpose.');
+  if(junk)reasons.push(bulkTab&&purpose.promotion==='absent'
+    ?'Gmail filed this under Promotions, and nothing in it needs the user.'
+    :'Bulk promotional content with no personal or transactional purpose.');
 
   return {
     context,
     topics:research?['research']:[],
     obligations:credible,
     disposition:junk?'junk':uncertain?'uncertain':'useful',
-    // An optional request only owes a reply when nothing in the message is selling.
-    replyRequired:credible.some(o=>o.kind==='request'&&o.ownerIsUser!==false&&o.state==='open'&&(o.required||purpose.promotion==='absent')),
+    replyRequired:replyRequiredFrom(reply),
+    reply,
     securityEvent,
-    processingStatus:'classified',
+    // An unsettled reply decision or an impersonation pattern is held for review.
+    processingStatus:replyReview?'needs_review':'classified',
     reason:reasons.join(' ')||'No obligations or promotional signals found.',
-    uncertainty:!message.contentComplete?'Message content was incomplete.':onlyCopied?'Recipient was only copied.':undefined,
+    uncertainty:!message.contentComplete?'Message content was incomplete.':onlyCopied?'Recipient was only copied.':replyReview,
     version:`${POLICY_VERSION}:deterministic`,
   };
 }

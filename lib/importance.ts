@@ -34,11 +34,12 @@ export const IMPORTANCE = {
   futureSkew: 5 * 60 * 1000,
 } as const;
 
-export type ImportanceTier = 'due-now' | 'recent-request' | 'overdue' | 'aging' | 'routine';
+/** `flagged` is mail Gmail predicts matters, with nothing here to say so: above routine, not Important. */
+export type ImportanceTier = 'due-now' | 'recent-request' | 'overdue' | 'aging' | 'flagged' | 'routine';
 
 /** Lower sorts first. Tiers are ordered, so the list never needs an opaque score. */
-const TIER_RANK: Record<ImportanceTier, number> = {
-  'due-now': 0, 'recent-request': 1, overdue: 2, aging: 3, routine: 4,
+export const TIER_RANK: Record<ImportanceTier, number> = {
+  'due-now': 0, 'recent-request': 1, overdue: 2, aging: 3, flagged: 4, routine: 5,
 };
 
 export type Importance = {
@@ -220,6 +221,21 @@ export function evaluateImportance(email: Email, now: number): Importance {
   if (classification.securityEvent && received !== undefined && now - received <= IMPORTANCE.recentRequest) {
     const security = at('recent-request', true, 'recent-security-event', 'A recent account or security notice.');
     if (!best || !best.important || security.rank < best.rank) best = security;
+  }
+
+  // Gmail's own signals rank mail that nothing above settles. A star is the recipient's own
+  // mark, so a recent starred message is Important, below anything actually due. Gmail's
+  // Important marker is a prediction from their habits: it lifts a recent message above
+  // routine mail but never into Important on its own. Once the user has corrected or
+  // answered the message here, their decision stands and neither signal reopens it.
+  const labels = Array.isArray(email.gmailLabels) ? email.gmailLabels : [];
+  if (!best?.important && received !== undefined && !email.manuallyCorrected && !email.replied) {
+    const age = now - received;
+    const kept = best?.dueAt === undefined ? {} : { dueAt: best.dueAt };
+    if (labels.includes('STARRED') && age <= IMPORTANCE.agingRequest)
+      best = at('aging', true, 'starred-in-gmail', 'You starred this in Gmail.', kept);
+    else if (labels.includes('IMPORTANT') && age <= IMPORTANCE.recentRequest && (!best || best.rank > TIER_RANK.flagged))
+      best = at('flagged', false, 'gmail-important', 'Gmail marked this important.', kept);
   }
 
   return best ?? at('routine', false, 'no-current-obligation', 'Nothing here needs attention now.');

@@ -1,11 +1,23 @@
 'use client';
 import { useState } from 'react';
-import { Info, Quote, RotateCcw, ShieldQuestion } from 'lucide-react';
+import { Info, MessageSquareText, Quote, RotateCcw, ShieldQuestion } from 'lucide-react';
 import { actionAccountId, type Email } from '@/lib/mail';
 import { SECTIONS, sectionName, tagName, type Section, type Tag } from '@/lib/categories';
 import { appliesToUser, isOverdue, isResolved, obligationCorrectionKey, reviewExplanation } from '@/lib/classification';
 import { api, ApiError } from '@/hooks/use-inbox';
 import { useSenderRule } from '@/hooks/use-sender-rule';
+import type { FoldPreference } from '@/lib/folding';
+
+/** The reply decision in a few words, from the message's actual state. */
+function replyHeading(email:Email){
+  const reply=email.classification?.reply;
+  if(email.manualCorrection?.replyPreference==='answered')return 'Marked answered.';
+  if(email.manualThreadAnswered)return 'Marked answered.';
+  if(email.replied)return 'Replied.';
+  if(email.needsReply)return reply?.urgency==='prompt'?'Needs a reply soon.':'Needs a reply.';
+  if(reply?.status==='uncertain')return 'Reply unclear.';
+  return 'No reply needed.';
+}
 
 const CORRECTABLE_TAGS:Tag[]=['deadlines','meetings','requests','actions','research','low-priority'];
 
@@ -13,7 +25,9 @@ const CORRECTABLE_TAGS:Tag[]=['deadlines','meetings','requests','actions','resea
  * Full explanation for one message: why it landed where it did, the evidence behind each
  * obligation, and the controls to correct it. Row chips stay compact; detail lives here.
  */
-export function ClassificationDetail({email,demo,onApplied,onRefresh}:{email:Email;demo:boolean;onApplied:(email:Email)=>void;onRefresh?:()=>Promise<boolean>}){
+export function ClassificationDetail({email,demo,onApplied,onRefresh,grouping,onGrouping}:{email:Email;demo:boolean;onApplied:(email:Email)=>void;onRefresh?:()=>Promise<boolean>;
+  /** How this message folds in the inbox: by the automatic rules, always with its sender, or never. */
+  grouping?:'automatic'|FoldPreference;onGrouping?:(value:FoldPreference|undefined)=>void}){
   const [open,setOpen]=useState(false);
   const [busy,setBusy]=useState(false);
   const [message,setMessage]=useState('');
@@ -32,6 +46,8 @@ export function ClassificationDetail({email,demo,onApplied,onRefresh}:{email:Ema
         expectedSenderRevision:email.senderRuleRevision||0,action,
       });
       if(result.email)onApplied(result.email);
+      if((action.type==='set-reply-preference'||action.type==='clear-reply-preference'||action.type==='reset-all')&&onRefresh)
+        await onRefresh();
       setMessage(action.type==='reset-all'?'Automatic classification restored.':'Saved. This correction survives future syncs.');
     }catch(error){
       // A conflict means another tab or refresh has newer state. Reload just this account
@@ -49,11 +65,19 @@ export function ClassificationDetail({email,demo,onApplied,onRefresh}:{email:Ema
   }
 
   const obligations=classification?.obligations||[];
+  const reply=classification?.reply;
   return <section className="classification-detail">
+    {email.senderFamiliarity?.status==='previously-emailed'&&<div className="classification-summary"><Info size={15}/><p>You previously emailed this sender.</p></div>}
     <div className="classification-summary">
       <Info size={15}/>
       <p>{classification?.reason||'This message has not been classified yet.'}</p>
     </div>
+    {reply&&<div className="classification-summary reply-decision">
+      <MessageSquareText size={15}/>
+      <p><strong>{replyHeading(email)}</strong> {email.replied?'This conversation has been answered.':email.manualThreadAnswered?'You marked this conversation as answered.':reply.explanation}
+        {email.needsReply&&reply.due?<> Answer by {reply.due.date||reply.due.phrase}.</>:null}</p>
+    </div>}
+    {reply?.evidence&&!email.replied&&!email.manualThreadAnswered&&<blockquote className="reply-evidence"><Quote size={11}/> {reply.evidence}</blockquote>}
     {classification&&reviewExplanation(classification)&&<p className="classification-review"><ShieldQuestion size={14}/> {reviewExplanation(classification)}{classification.proposedDisposition==='junk'&&<span className="classification-proposed">Automatic prediction was Junk.</span>}</p>}
     {email.manuallyCorrected&&<p className="classification-proposed">Manual corrections are active for this message.</p>}
     {classification?.uncertainty&&classification.uncertainty!==classification.reviewReason&&<p className="classification-uncertain"><ShieldQuestion size={14}/> {classification.uncertainty}</p>}
@@ -85,12 +109,23 @@ export function ClassificationDetail({email,demo,onApplied,onRefresh}:{email:Ema
         <button type="button" disabled={busy} data-active={manual?.junkPreference==='junk'||undefined}
           onClick={()=>void correct(manual?.junkPreference==='junk'?{type:'clear-junk-preference'}:{type:'set-junk-preference',value:'junk'})}>Move to Junk</button>
       </div></div>
+      <div className="control-row"><span>Reply</span><div>
+        <button type="button" disabled={busy} data-active={manual?.replyPreference==='answered'||undefined}
+          onClick={()=>void correct(manual?.replyPreference==='answered'?{type:'clear-reply-preference'}:{type:'set-reply-preference',value:'answered'})}>I already replied</button>
+        <button type="button" disabled={busy} data-active={manual?.replyPreference==='not-needed'||undefined}
+          onClick={()=>void correct(manual?.replyPreference==='not-needed'?{type:'clear-reply-preference'}:{type:'set-reply-preference',value:'not-needed'})}>No reply needed</button>
+      </div></div>
       <div className="control-row"><span>This sender</span><div>
         <button type="button" disabled={busy||senderRule.pending!==null} data-active={email.senderJunkPreference==='not-junk'||undefined}
           onClick={()=>void senderRule.save('mark',email.senderJunkPreference==='not-junk'?undefined:'not-junk',{success:email.senderJunkPreference==='not-junk'?'Sender preference removed.':'This sender will always be kept.'})}>Always keep</button>
         <button type="button" disabled={busy||senderRule.pending!==null} data-active={email.senderJunkPreference==='junk'||undefined}
           onClick={()=>void (email.senderJunkPreference==='junk'?senderRule.clearRule():senderRule.markJunk())}>Always move to Junk</button>
       </div></div>
+      {onGrouping&&<div className="control-row"><span>Grouping</span><div>
+        {([['automatic','Automatic','Fold by conversation, topic and time'],['group','Always group this sender','Fold every message from this sender together'],['separate','Keep separate','Never fold messages from this sender']] as const).map(([value,label,title])=>
+          <button key={value} type="button" title={title} data-active={grouping===value||undefined} aria-pressed={grouping===value}
+            onClick={()=>onGrouping(value==='automatic'?undefined:value)}>{label}</button>)}
+      </div></div>}
       <div className="control-row"><span>Tags</span><div>
         {CORRECTABLE_TAGS.map(tag=>{const added=manual?.addTags.includes(tag),removed=manual?.removeTags.includes(tag),corrected=added||removed;return <button key={tag} type="button" disabled={busy}
           data-active={corrected||undefined} title={removed?`Manually removed ${tagName(tag)}`:added?`Manually added ${tagName(tag)}`:undefined}

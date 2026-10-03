@@ -1,3 +1,4 @@
+import { env } from 'cloudflare:workers';
 import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 
@@ -26,6 +27,20 @@ const CALLBACK_PATH = '/callback';
 export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
   // Missing either stable identifier means the request is anonymous.
   const requestHeaders = await headers();
+  // Behind the Sites dispatcher (and the local stand-in), the host strips client copies of
+  // these headers and injects the verified user, so they are trusted as they are. Any other
+  // ingress must set IDENTITY_PROXY_SECRET: every request then also needs the matching
+  // `x-brief-identity-secret`, and a secret too short to be safe fails closed.
+  const secret=(env as {IDENTITY_PROXY_SECRET?:string}).IDENTITY_PROXY_SECRET;
+  if(secret){
+    const supplied=requestHeaders.get('x-brief-identity-secret');
+    if(secret.length<32||!supplied||supplied.length>512)return null;
+    const hash=async(value:string)=>new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value)));
+    const [expected,actual]=await Promise.all([hash(secret),hash(supplied)]);
+    let difference=0;
+    for(let i=0;i<expected.length;i++)difference|=expected[i]^actual[i];
+    if(difference)return null;
+  }
   const userId = requestHeaders.get(USER_ID_HEADER);
   const email = requestHeaders.get(USER_EMAIL_HEADER);
   if (!userId || !email) return null;

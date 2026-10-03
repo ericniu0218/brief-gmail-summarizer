@@ -231,28 +231,61 @@ function navButton(label:string){
 }
 const isActive=(element:Element)=>element.hasAttribute('data-active');
 
-void test('the email reader switches views and expands without weakening its sandbox',async()=>{
+void test('the email reader switches views and goes full screen without weakening its sandbox',async()=>{
   setupDom();
   const email={...demoEmails[0],body:'Plain fallback https://tracking.example/click?token=secret',
     html:'<table width="900"><tr><td>Formatted newsletter</td></tr></table>'};
-  await render(createElement(EmailBody,{email}));
-  assert.equal(screen().querySelectorAll('iframe.email-document').length,1);
-  assert.equal(byText('button','Formatted').getAttribute('aria-pressed'),'true');
+  let fullScreen=false;
+  const props=()=>({email,fullScreen,onFullScreenChange:(value:boolean)=>{fullScreen=value;}});
+  await render(createElement(EmailBody,props()));
+  // A conversation without images opens as text: no frame, readable links.
+  assert.equal(byText('button','Reading view').getAttribute('aria-pressed'),'true');
+  assert.equal(screen().querySelectorAll('iframe.email-document').length,0,'the reading view has no frame');
+  assert.match(screen().querySelector('.reading-body')?.textContent||'',/Formatted newsletter/);
 
-  await click(byText('button','Plain text'));
-  assert.equal(screen().querySelectorAll('iframe.email-document').length,0,'plain view replaces the frame');
-  assert.match(screen().querySelector('.message-body')?.textContent||'',/tracking\.example/);
-  assert.doesNotMatch(screen().querySelector('.message-body')?.textContent||'',/token=secret/,
-    'the tracking query stays in the href rather than the visible copy');
-
-  await click(byText('button','Formatted'));
+  await click(byText('button','Original'));
   const frame=screen().querySelector('iframe.email-document')!;
-  assert.ok(!frame.classList.contains('expanded'));
-  await click(byText('button','Expand view'));
-  assert.ok(frame.classList.contains('expanded'));
   assert.deepEqual((frame.getAttribute('sandbox')||'').split(' ').sort(),
-    ['allow-popups','allow-popups-to-escape-sandbox'],'expanding grants no new iframe capability');
-  assert.equal(byText('button','Compact view').getAttribute('aria-pressed'),'true');
+    ['allow-popups','allow-popups-to-escape-sandbox'],'switching views grants no new iframe capability');
+
+  await click(byText('button',/Full screen/));
+  assert.equal(fullScreen,true,'the panel is asked to take the whole window');
+  await rerender(createElement(EmailBody,props()));
+  assert.ok(screen().querySelector('iframe.email-document')!.classList.contains('expanded'));
+  assert.equal(byText('button',/Exit full screen/).getAttribute('aria-pressed'),'true');
+});
+
+void test('the reading view shows text tidily: links compact, tables kept, footer folded',async()=>{
+  setupDom();
+  const tracking=`https://u1.ct.sendgrid.net/ls/click?upn=${'x'.repeat(200)}`;
+  const email={...demoEmails[0],category:'work' as const,body:'unused',
+    html:`<p>Hi Alex,</p><p>Thanks&amp;nbsp;for the order. <a href="${tracking}">Track it</a>.</p><table><tr><th>Item</th><th>Qty</th></tr><tr><td>Seats</td><td>12</td></tr></table><p>Unsubscribe | Manage preferences</p>`};
+  await render(createElement(EmailBody,{email}));
+  const body=screen().querySelector('.reading-body')!;
+  assert.match(body.textContent||'',/Thanks for the order/,'a stray &nbsp; is decoded');
+  assert.doesNotMatch(body.textContent||'',/x{50}/,'the tracking query is not printed');
+  assert.equal(body.querySelectorAll('a.reading-link').length,1);
+  assert.equal(body.querySelectorAll('.reading-table td').length,4,'a table keeps its cells');
+  const footer=body.querySelector('details.reading-footer')!;
+  assert.ok(footer&&!footer.hasAttribute('open'),'the mailing-list footer is folded, not removed');
+  assert.match(footer.textContent||'',/Unsubscribe/);
+});
+
+void test('the sender’s frame is held back until the panel has opened, and the view choice is remembered',async()=>{
+  setupDom();
+  const email={...demoEmails[0],category:'noise' as const,address:'news@letters.example',html:'<img src="https://x.example/a.png"><p>Big newsletter</p>'};
+  await render(createElement(EmailBody,{email,ready:false}));
+  assert.equal(byText('button','Original').getAttribute('aria-pressed'),'true','a newsletter opens in its original layout');
+  assert.equal(screen().querySelectorAll('iframe').length,0,'no frame while the panel slides in');
+  assert.ok(screen().querySelector('.email-document-pending'),'a placeholder keeps the space');
+  await rerender(createElement(EmailBody,{email,ready:true}));
+  assert.equal(screen().querySelectorAll('iframe.email-document').length,1);
+  await click(byText('button','Reading view'));
+  assert.equal(globalThis.localStorage.getItem('brief:email-view:demo:news@letters.example'),'reading');
+  await unmountTree();
+  await render(createElement(EmailBody,{email:{...email,id:'next'}}));
+  await settle();
+  assert.equal(byText('button','Reading view').getAttribute('aria-pressed'),'true','the next message from this sender opens the same way');
 });
 
 void test('the dashboard opens on the default mailbox, not the combined view', async () => {
@@ -308,6 +341,41 @@ void test('categories and subcategories filter across every connected mailbox', 
   // Returning to the combined inbox restores every message, so scope was never lost.
   await click(navButton('All inboxes'));
   assert.equal(subjects().length,4,'the combined scope survived category navigation');
+});
+
+void test('Inbox returns to the selected individual mailbox after All inboxes and a reload',async()=>{
+  setupDom();
+  localStorage.setItem('brief:selected-view:user-a','acct-2');
+  const seen=stubFetch(defaultHandler);
+  await render(createElement(Dashboard));await settle();
+  await click(navButton('Inbox'));
+  assert.deepEqual(subjects(),['Second account personal mail','Second account work mail']);
+  await click(navButton('All inboxes'));
+  assert.equal(subjects().length,4);
+  assert.equal(localStorage.getItem('brief:selected-account:user-a'),'acct-2');
+  await unmountTree();
+  await render(createElement(Dashboard));await settle();
+  assert.equal(allByText('strong','All inboxes').length,1,'the combined view restores independently');
+  seen.length=0;
+  await click(navButton('Inbox'));
+  assert.deepEqual(subjects(),['Second account personal mail','Second account work mail'],'Inbox keeps the chosen account, not the default or the combined scope');
+  assert.ok(isActive(navButton('Inbox')));
+  assert.ok(!isActive(navButton('All inboxes')));
+  assert.ok(seen.some(request=>request.url.includes('/api/mailbox?accountId=acct-2')));
+  assert.ok(!seen.some(request=>request.url==='/api/mailbox'));
+  assert.equal(localStorage.getItem('brief:selected-view:user-a'),'acct-2');
+});
+
+void test('Inbox falls back to an owned account when the previously selected mailbox is gone',async()=>{
+  setupDom();
+  localStorage.setItem('brief:selected-view:user-a','all');
+  localStorage.setItem('brief:selected-account:user-a','disconnected-account');
+  const seen=stubFetch(defaultHandler);
+  await render(createElement(Dashboard));await settle();
+  await click(navButton('Inbox'));
+  assert.deepEqual(subjects(),['First account personal mail','First account work mail']);
+  assert.ok(seen.some(request=>request.url.includes('/api/mailbox?accountId=acct-1')));
+  assert.ok(!seen.some(request=>request.url.includes('disconnected-account')));
 });
 
 void test('an expand arrow opens subcategories without navigating to the category', async () => {
@@ -664,7 +732,8 @@ void test('expanded folded mail labels each message by its own live importance',
   const baseClassification:Omit<Classification,'obligations'>={context:'work',topics:[],disposition:'useful',replyRequired:false,
     securityEvent:false,processingStatus:'classified',reason:'test',version:'test'};
   const routine=mail({id:'routine-code',accountId:'acct-1',sender:'GitHub',address:'noreply@github.com',
-    subject:'Old GitHub verification code',receivedAt:Date.UTC(2026,7,1),priority:'high',
+    // Five days old: inside the week a topic fold spans, and no longer Important.
+    subject:'Old GitHub verification code',receivedAt:now-5*86400000,priority:'high',
     classification:{...baseClassification,obligations:[]}});
   const urgent=mail({id:'urgent-setup',accountId:'acct-1',sender:'GitHub',address:'security@github.com',
     subject:'Complete your GitHub two-factor setup',receivedAt:now-3600000,
@@ -1375,4 +1444,72 @@ void test('a sender with no real address is not offered Block sender', async () 
     newsletter({ id: 'real', sender: 'Real', address: 'real@real.example', oneClick: false, unsubscribeCapability: 'none' }),
   ], demo: false, onSelect: () => {} }));
   assert.equal(allByText('button', /Block sender/).length, 1, 'only the real sender can be blocked');
+});
+
+// ── Needs a reply: membership, counts, order and late responses ─────────────
+
+/** A classified message whose reply decision is given, with nothing that makes it Important. */
+function replyMail(id:string,accountId:string,reply:{status:'required'|'not_required'|'uncertain';urgency:'prompt'|'routine'|'unknown'},extra:Partial<Email>={}):Email{
+  const classification={context:'work',topics:[],obligations:[],disposition:'useful',replyRequired:reply.status==='required',
+    reply:{...reply,channel:reply.status==='required'?'email':'none',reasonCode:reply.status==='required'?'information_requested':'no_request',
+      evidence:`Question ${id}?`,explanation:`Reply decision for ${id}.`,source:'rules'},
+    securityEvent:false,processingStatus:'classified',reason:'Classified.',version:'test'} as unknown as Classification;
+  return mail({id,accountId,subject:`Subject ${id}`,category:'work',priority:'normal',tags:[],receivedAt:Date.now()-3600000,
+    needsReply:reply.status==='required',classification,...extra});
+}
+
+void test('the reply tab holds every pending reply, Important or routine, with matching counts',async()=>{
+  const inbox=[
+    replyMail('a-routine','acct-1',{status:'required',urgency:'routine'}),
+    replyMail('z-prompt','acct-1',{status:'required',urgency:'prompt'}),
+    replyMail('done-1','acct-1',{status:'not_required',urgency:'unknown'}),
+    replyMail('unclear-1','acct-1',{status:'uncertain',urgency:'unknown'}),
+  ];
+  await openDashboard({handler:(url,body)=>url.startsWith('/api/mailbox')||url.startsWith('/api/sync')?snapshot(inbox):defaultHandler(url,body)});
+  const tab=byText('button',/Needs a reply/);
+  assert.equal(tab.querySelector('.tab-count')?.textContent,'2','the count includes routine replies outside Important');
+  await click(tab);await settle();
+  const subjects=allByText('h3',/^Subject /).map(node=>node.textContent);
+  assert.deepEqual(subjects,['Subject z-prompt','Subject a-routine'],'prompt replies come first, and only pending replies are listed');
+  assert.equal(byText('h2',/Waiting on your reply/).querySelector('span')?.textContent,'2','the heading counts what is listed');
+});
+
+void test('grouped rows count their pending replies, and reply order puts prompt answers first',async()=>{
+  const { buildInboxRows, sortInboxEmails }=await import('../lib/inbox-priority');
+  const fold=(id:string,urgency:'prompt'|'routine',needs:boolean)=>({...replyMail(id,'acct-1',{status:needs?'required':'not_required',urgency}),
+    address:'security@bank.example',sender:'Bank Security',subject:`New sign-in ${id}`,summary:'A new device signed in.',body:'A new device signed in to your account.'});
+  const rows=buildInboxRows([fold('s1','routine',true),fold('s2','prompt',true),fold('s3','routine',false)],Date.now());
+  const group=rows.find(row=>row.kind==='fold');
+  assert.ok(group&&group.kind==='fold');
+  assert.equal(group.needsReplyCount,2);
+  // Identity would put "a" first; urgency must win over that tie-breaker.
+  const ordered=sortInboxEmails([replyMail('a','acct-1',{status:'required',urgency:'routine'}),replyMail('z','acct-1',{status:'required',urgency:'prompt'})],Date.now(),'reply');
+  assert.deepEqual(ordered.map(m=>m.id),['z','a']);
+});
+
+void test('a routine reply shows its own wording, and an unsettled decision says so',async()=>{
+  setupDom();stubFetch(defaultHandler);
+  await render(createElement(PriorityEmailList,{emails:[
+    replyMail('a','acct-1',{status:'not_required',urgency:'unknown'}),
+    replyMail('b','acct-1',{status:'uncertain',urgency:'unknown'}),
+    replyMail('c','acct-1',{status:'required',urgency:'routine'}),
+    {...replyMail('d','acct-1',{status:'required',urgency:'prompt'}),needsReply:false,replied:true},
+  ],now:Date.now(),sortMode:'reply',busy:false,emptyTitle:'x',emptyBody:'y',onSelect:()=>{}}));
+  assert.equal(allByText('span',/^No reply needed$/).length,1);
+  assert.equal(allByText('span',/^Reply unclear$/).length,1);
+  assert.equal(allByText('span',/^Replied$/).length,1);
+  assert.equal(allByText('button',/Quick reply/).length,1);
+});
+
+void test('a sync that started before a send cannot bring the reply badge back',async()=>{
+  const { keepSentReplies }=await import('../hooks/use-inbox');
+  const sent={...replyMail('x','acct-1',{status:'required',urgency:'prompt'}),needsReply:false,replied:true};
+  const stale=replyMail('x','acct-1',{status:'required',urgency:'prompt'});
+  const sameIdOtherAccount=replyMail('x','acct-2',{status:'required',urgency:'prompt'});
+  const newerInThread=replyMail('y','acct-1',{status:'required',urgency:'prompt'},{threadId:'same-thread'} as Partial<Email>);
+  const merged=keepSentReplies([sent],[stale,sameIdOtherAccount,newerInThread]);
+  assert.equal(merged[0].needsReply,false,'the late response keeps the send');
+  assert.equal(merged[0].replied,true);
+  assert.equal(merged[1].needsReply,true,'the same Gmail id in another mailbox is a different message');
+  assert.equal(merged[2].needsReply,true,'a newer message in the thread still needs its own answer');
 });

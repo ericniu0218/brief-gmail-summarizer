@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { POST as compose } from '../app/api/compose/route';
 import { POST as reply } from '../app/api/reply/route';
 import { POST as saveProfile } from '../app/api/profile/route';
-import { buildMime, buildRawMessage, parseRecipientGroups } from '../server/gmail';
+import { buildMime, buildRawMessage, parseMessage, parseRecipientGroups } from '../server/gmail';
 import { MAX_ATTACHMENT_BYTES, attachmentProblem, cleanFileName, cleanMediaType } from '../lib/attachments';
 import { replyAllCc } from '../lib/recipients';
 import { connect, decodeRaw, gmailMessage, headerBlock, origin, post, rig, sends, signIn, type Call, type Rig } from './helpers/google';
@@ -142,6 +142,34 @@ void test('a draft is saved through the drafts endpoint and never sent', async (
   assert.equal(sends(r.calls).length, 0); assert.ok(r.calls.some((c) => c.url.endsWith('/drafts')));
 });
 
+void test('saving an edited draft updates the same Gmail draft and sending clears it', async () => {
+  const first=await (await mail({action:'draft',key:'draft-session-1',saveKey:'first-save-key'})).json() as {id:string};
+  const second=await (await mail({action:'draft',key:'draft-session-1',saveKey:'second-save-key',body:'Revised message',draftId:first.id})).json() as {id:string};
+  assert.equal(second.id,first.id,'the Gmail draft identity stays the same');
+  assert.ok(r.calls.some(call=>call.url.endsWith('/drafts/'+first.id)&&call.method==='PUT'));
+  const reverted=await (await mail({action:'draft',key:'draft-session-1',saveKey:'third-save-key',draftId:first.id})).json() as {id:string};
+  assert.equal(reverted.id,first.id);
+  assert.equal(r.calls.filter(call=>call.url.endsWith('/drafts/'+first.id)&&call.method==='PUT').length,2,'returning to older wording still updates Gmail');
+  assert.equal((await mail({action:'send',key:'draft-session-1',body:'Revised message',draftId:first.id})).status,200);
+  assert.ok(r.calls.some(call=>call.url.endsWith('/drafts/'+first.id)&&call.method==='DELETE'));
+});
+
+void test('saving after the Gmail draft was deleted creates one replacement draft', async () => {
+  const first=await (await mail({action:'draft',key:'deleted-draft-session',saveKey:'first-save-key'})).json() as {id:string};
+  r.deletedDrafts.add(first.id);
+  const saved=await mail({action:'draft',key:'deleted-draft-session',saveKey:'second-save-key',body:'Updated after deletion',draftId:first.id});
+  assert.equal(saved.status,200);
+  const replacement=(await saved.json() as {id:string}).id;
+  assert.notEqual(replacement,first.id);
+  assert.equal(r.calls.filter(call=>call.url.endsWith('/drafts/'+first.id)&&call.method==='PUT').length,1);
+  assert.equal(r.calls.filter(call=>call.url.endsWith('/drafts')&&call.method==='POST').length,2);
+  assert.equal((await mail({action:'draft',key:'deleted-draft-session',saveKey:'second-save-key',body:'Updated after deletion',draftId:first.id})).status,200);
+  assert.equal(r.calls.filter(call=>call.url.endsWith('/drafts')&&call.method==='POST').length,2,'a retried save reuses its receipt');
+  const next=await mail({action:'draft',key:'deleted-draft-session',saveKey:'third-save-key',body:'Final text',draftId:replacement});
+  assert.equal(next.status,200);
+  assert.equal((await next.json() as {id:string}).id,replacement);
+});
+
 void test('the daily sending limit blocks further sends, not drafts, and old sends stop counting', async () => {
   r.env.SEND_DAILY_LIMIT = '2';
   const send = (n: number, action = 'send') => mail({ action, subject: 'Note ' + n, body: 'Body ' + n, key: 'key-number-' + n });
@@ -177,6 +205,21 @@ void test('attachments are uploaded with the message byte for byte, retried requ
   assert.equal(sends(r.calls).length, 2, 'different contents are a different email');
   assert.equal((await compose(multipart({ ...fields, action: 'draft', key: 'attach-key-2' }, [file('a.txt', 'x', 'text/plain')]))).status, 200);
   assert.match(r.calls.at(-1)!.url, /\/upload\/gmail\/v1\/users\/me\/drafts\?uploadType=media$/);
+});
+
+void test('long international attachment filenames use short encoded header lines', () => {
+  const name='日本語'.repeat(55)+"Ethan's (final)*.pdf";
+  const mime=buildMime({to:['sam@example.com'],subject:'File',body:'See attached.',attachments:[{name,type:'application/pdf',bytes:new Uint8Array([1])}]});
+  for(const line of mime.split('\r\n'))assert.ok(line.length<=998,`overlong MIME line: ${line.length}`);
+  assert.match(mime,/filename\*0\*=UTF-8''/);
+  for(const escape of ['%27','%28','%29','%2A'])assert.ok(mime.includes(escape),escape);
+});
+
+void test('the reply-all preview excludes the actual Reply-To recipient', () => {
+  const email=parseMessage(gmailMessage({id:'reply-to',from:'sender@corp.example',to:'me@corp.example',
+    cc:'team@corp.example, lists@corp.example',replyTo:'lists@corp.example'}));
+  assert.equal(email.replyTo,'lists@corp.example');
+  assert.deepEqual(replyAllCc(email,['me@corp.example',email.address,email.replyTo||'']),['team@corp.example']);
 });
 
 void test('bad attachments are refused before Gmail is contacted, with plain explanations', async () => {

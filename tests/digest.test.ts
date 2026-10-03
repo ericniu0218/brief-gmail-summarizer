@@ -7,10 +7,13 @@ import { demoEmails, emailKey } from '../lib/mail';
 import { EMPTY_CLASSIFICATION, type Classification, type Obligation } from '../lib/classification';
 import { ACTION_LABEL, DIGEST_CANDIDATES, digestItems, digestSummary, dueIsSoon, dueLabel, fallbackText, provisionalItems, type Digest } from '../lib/digest';
 import { demoDigest } from '../lib/demo-digest';
+import { evaluateImportance } from '../lib/importance';
 import { DailyBrief } from '../components/daily-brief';
 import { buildDigest } from '../server/digest';
+import { POST as personalizedWording } from '../app/api/digest/wording/route';
 import { syncInbox } from '../server/sync';
 import { readMailbox } from '../server/mailbox';
+import { foldMessageKey } from '../lib/folding';
 import { allByLabel, byText, click, render, screen, settle, setupDom, teardownDom } from './dom';
 import { connect, gmailMessage, rig, type Call, type Rig } from './helpers/google';
 
@@ -36,7 +39,7 @@ void test('only mail the importance policy calls important reaches the digest, a
   assert.deepEqual(ids([]), []);
 });
 
-void test('items follow the app’s own order: due soon, recent requests, overdue, then older unresolved work', () => {
+void test('among equals, items follow the app’s own order, and stale unresolved work leaves the brief', () => {
   const due = (days: number) => obligation({ kind: 'deadline', due: { phrase: 'by then', date: `2026-10-0${3 + days}`, ambiguous: false } });
   const list = [
     email('aging', { receivedAt: NOW - 20 * 24 * HOUR }),
@@ -45,13 +48,17 @@ void test('items follow the app’s own order: due soon, recent requests, overdu
     email('later', { classification: classify([due(1)]) }),
     email('soon', { classification: classify([due(0)]) }),
   ];
-  assert.deepEqual(ids(list), ['soon', 'later', 'request', 'overdue', 'aging']);
-  assert.deepEqual(ids([...list].reverse()), ['soon', 'later', 'request', 'overdue', 'aging'], 'input order does not matter');
+  // Same sender and section, so urgency decides; a three-week-old item no longer earns a place.
+  assert.deepEqual(ids(list), ['soon', 'later', 'request', 'overdue']);
+  assert.deepEqual(ids([...list].reverse()), ['soon', 'later', 'request', 'overdue'], 'input order does not matter');
 });
 
 void test('the digest and the rest of the app can never disagree about what matters', () => {
   const list = [email('a'), email('b', { classification: classify([]) }), email('c', { receivedAt: NOW - 20 * 24 * HOUR })];
-  assert.deepEqual(new Set(ids(list)), new Set(['a', 'c']));
+  // The brief is a subset of Important, never something Important leaves out.
+  assert.deepEqual(ids(list), ['a']);
+  for (const item of digestItems(list, NOW)) assert.equal(evaluateImportance(item.email, NOW).important, true);
+  assert.equal(evaluateImportance(list[2], NOW).important, true, 'older work is still Important, just not top five');
   assert.equal(digestItems([email('fresh')], NOW)[0].importance.important, true);
   assert.deepEqual(ids([email('old', { receivedAt: NOW - 90 * 24 * HOUR })]), [], 'ancient requests age out, as everywhere else');
 });
@@ -73,6 +80,17 @@ void test('several notifications from one company fold into one item without swa
   assert.equal(group.group, 'GitHub'); assert.equal(group.keys.length, 3); assert.equal(group.action, 'security');
   assert.equal(items.find((item) => item.email.id === 'person')!.keys.length, 1);
   assert.equal(fallbackText(group).headline, 'GitHub: 3 notifications');
+});
+
+void test('a conversation is described as messages and respects a keep-separate choice', () => {
+  const pair=[email('a',{threadId:'conversation',sender:'Maya Chen',address:'maya@uni.example'}),
+    email('b',{threadId:'conversation',sender:'Jordan Lee',address:'jordan@uni.example'})];
+  const grouped=digestItems(pair,NOW);
+  assert.equal(grouped.length,1);
+  assert.match(fallbackText(grouped[0]).headline,/2 messages/);
+  assert.doesNotMatch(fallbackText(grouped[0]).headline,/notifications/);
+  const separate={[JSON.stringify(['message','acct-1','b'])]:'separate' as const};
+  assert.equal(digestItems(pair,NOW,separate).length,2);
 });
 
 void test('each item says what kind of attention it needs', () => {
@@ -149,6 +167,9 @@ void test('the card shows the AI’s wording when it has some and the email’s 
   assert.doesNotMatch(worded, /Hi Sam,/, 'and without the greeting');
   assert.match(worded, /AI SUMMARY/); assert.doesNotMatch(worded, /SAMPLE BRIEF/);
   assert.match(renderToStaticMarkup(brief({ emails: list, ai: false })), /INBOX HIGHLIGHTS/);
+  const partlyRecovered=renderToStaticMarkup(brief({emails:list,ai:false,digest:wording(list)}));
+  assert.match(partlyRecovered,/AI SUMMARY/);
+  assert.doesNotMatch(partlyRecovered,/AI summaries are temporarily unavailable/);
 });
 
 void test('the card keeps the dashboard’s status messages, singular wording, and the empty state', () => {
@@ -159,6 +180,11 @@ void test('the card keeps the dashboard’s status messages, singular wording, a
   assert.match(renderToStaticMarkup(brief({ emails: [email('n', { category: 'noise' })] })), /newsletters and promotions/);
   const collapsed = renderToStaticMarkup(brief({ collapsed: true }));
   assert.doesNotMatch(collapsed, /digest-list/); assert.match(collapsed, /all caught up/);
+  assert.doesNotMatch(collapsed, /digest-caught-up/);
+  // Open, the brief is compact: its one control sits in the heading and there is no footer bar.
+  const open = renderToStaticMarkup(brief({ emails: [email('only', { needsReply: true })] }));
+  assert.match(open, /class="digest-caught-up"[^>]*>I’m caught up/);
+  assert.doesNotMatch(open, /brief-footer/);
 });
 
 void test('the server render already shows real content, using stored flags until the browser clock arrives', () => {
@@ -240,6 +266,58 @@ void test('unchanged items keep their wording and cost no AI calls; only changed
   assert.equal(r.calls.length, 2); assert.deepEqual(asked(r.calls[1]).map((item) => item.id), [emailKey(list[1])], 'only the changed item is rewritten');
   const fp = (digest: Digest, mail: Email) => digest.items.find((item) => item.id === emailKey(mail))!.fp;
   assert.equal(fp(changed, list[0]), fp(first, list[0])); assert.notEqual(fp(changed, list[1]), fp(first, list[1]));
+});
+
+void test('the server writes AI text for this browser’s separate conversation items', async () => {
+  const now=Date.now();
+  const pair=[email('a',{threadId:'shared',receivedAt:now-HOUR,sender:'Maya Chen',address:'maya@example.com'}),
+    email('b',{threadId:'shared',receivedAt:now-HOUR+1000,sender:'Jordan Lee',address:'jordan@example.com'})];
+  r.gemini.reply=(request)=>({items:(JSON.parse(request.contents[0].parts[0].text) as {id:string}[])
+    .map(item=>({id:item.id,headline:'AI wording for '+item.id,why:'A person needs an answer.',action:'reply'}))});
+  const standard=(await buildDigest(pair,r.env,undefined,now))!;
+  assert.equal(standard.items.length,1);
+  for(const message of pair)r.storage.sql.prepare('INSERT INTO mailbox_messages (user_id,account_id,message_id,data,received_at,scan_generation) VALUES (?,?,?,?,?,?)')
+    .run('user-a','acct-1',message.id,JSON.stringify(message),message.receivedAt||0,'test');
+  r.storage.sql.prepare('INSERT INTO snapshots (account_id,user_id,data,updated) VALUES (?,?,?,?)')
+    .run('acct-1','user-a',JSON.stringify({emails:[],ai:true,pending:0,skipped:0,updated:now,digest:standard}),now);
+  const preferences={[foldMessageKey(pair[1])]:'separate' as const};
+  const response=await personalizedWording(new Request('https://brief.example/api/digest/wording',{
+    method:'POST',headers:{origin:'https://brief.example','Content-Type':'application/json'},
+    body:JSON.stringify({accountId:'acct-1',preferences})}));
+  assert.equal(response.status,200);
+  const custom=await response.json() as Digest;
+  const separate=custom.items.filter(item=>item.members===1);
+  assert.equal(separate.length,2,'one wording per separate conversation item');
+  assert.ok(separate.every(item=>item.membership));
+  assert.ok(custom.items.some(item=>item.members===2),'the mailbox’s own grouped wording is kept beside it');
+  // Saved with the mailbox: asking again, or rebuilding the digest on a refresh, costs no AI call.
+  const calls=r.calls.length;
+  const again=await personalizedWording(new Request('https://brief.example/api/digest/wording',{
+    method:'POST',headers:{origin:'https://brief.example','Content-Type':'application/json'},
+    body:JSON.stringify({accountId:'acct-1',preferences})}));
+  assert.equal(again.status,200);
+  assert.equal(r.calls.length,calls,'the saved wording is reused');
+  const saved=JSON.parse((r.storage.sql.prepare('SELECT data FROM snapshots WHERE account_id=?').get('acct-1') as {data:string}).data) as {digest:Digest};
+  const rebuilt=(await buildDigest(pair,r.env,saved.digest,now))!;
+  assert.equal(r.calls.length,calls,'a refresh keeps both groupings’ wording without rewriting either');
+  assert.equal(rebuilt.items.filter(item=>item.members===1).length,2);
+  const html=renderToStaticMarkup(brief({emails:pair,now,digest:custom,foldPreferences:preferences}));
+  assert.match(html,/AI wording for/);
+  assert.doesNotMatch(html,/shared \(2 messages\)/);
+  setupDom();
+  const provider=globalThis.fetch;
+  globalThis.fetch=async(input,init)=>{
+    if(input==='/api/digest/wording'){
+      const headers=new Headers(init?.headers);headers.set('origin','https://brief.example');
+      return personalizedWording(new Request('https://brief.example/api/digest/wording',{...init,headers}));
+    }
+    return provider(input,init);
+  };
+  try{
+    await render(brief({emails:pair,now,digest:standard,foldPreferences:preferences,accountId:'acct-1'}));
+    await settle();
+    assert.equal([...screen().querySelectorAll('.digest-item strong')].filter(node=>node.textContent?.startsWith('AI wording for')).length,2);
+  }finally{globalThis.fetch=provider;teardownDom();}
 });
 
 void test('an AI answer with some bad entries still keeps the good ones, and the digest degrades quietly when the AI is down', async () => {

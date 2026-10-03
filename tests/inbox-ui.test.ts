@@ -56,7 +56,8 @@ void test('formatted email is sandboxed and remote images require an explicit ch
   assert.match(allowed,/img-src https: data: blob:/);
   assert.match(allowed,/name="viewport"/,'formatted mail scales to the reading pane');
   assert.match(allowed,/table\{max-width:100%!important\}/,'wide newsletter tables are constrained');
-  const email={...demoEmails[0],html:'<p>Formatted message</p>'};
+  // A designed message (filed as Noise) opens in its original layout, inside the sandbox.
+  const email={...demoEmails[0],category:'noise' as const,html:'<p>Formatted message</p>'};
   const markup=renderToStaticMarkup(createElement(EmailBody,{email}));
   // Popups are granted so a reader can follow a link the document sends to a new tab, and
   // the opened page escapes the sandbox so the destination is an ordinary tab rather than
@@ -70,9 +71,9 @@ void test('formatted email is sandboxed and remote images require an explicit ch
   assert.match(markup,/Remote images are blocked/);
   assert.match(markup,/Load images/);
   assert.match(markup,/Always load from this sender/);
-  assert.match(markup,/Formatted/);
-  assert.match(markup,/Plain text/);
-  assert.match(markup,/Expand view/);
+  assert.match(markup,/Reading view/);
+  assert.match(markup,/Original/);
+  assert.doesNotMatch(markup,/Full screen/,'full screen is offered only where the panel can provide it');
 });
 
 void test('plain email removes spacer walls and presents tracking URLs compactly',()=>{

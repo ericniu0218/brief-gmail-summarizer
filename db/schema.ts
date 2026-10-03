@@ -42,6 +42,9 @@ export const connections = sqliteTable('connections', {
   lastFullScan: integer('last_full_scan'),
   // Version 1 means a completed full scan stored rich HTML for formatted display.
   contentVersion: integer('content_version').notNull().default(0),
+  // The model/prompt version for which a full mailbox pass has finished. A failed
+  // message must not trigger a new full Gmail scan on every refresh.
+  modelBackfillVersion: text('model_backfill_version'),
   // Outstanding requests to reconcile this account against Gmail, set when an earlier
   // version deleted or may have deleted mail. A count, so a request made during a scan
   // survives that scan; a completed full scan subtracts only the requests it started with.
@@ -209,6 +212,7 @@ export const overrides = sqliteTable('overrides', {
   notJunk: integer('not_junk').notNull().default(0), obligationState: text('obligation_state'),
   source: text('source').notNull(), created: integer('created').notNull(), junkPreference: text('junk_preference'),
   obligationStates: text('obligation_states').notNull().default('{}'), revision: integer('revision').notNull().default(1),
+  replyPreference: text('reply_preference'),
   active: integer('active').notNull().default(1),
 }, table => [primaryKey({columns: [table.accountId, table.messageId]}), index('overrides_user').on(table.userId)]);
 export const agentStatus = sqliteTable('agent_status', {

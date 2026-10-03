@@ -36,6 +36,8 @@ export type InboxSnapshot = {
   refreshed?: number;
   failed?: number;
   failures?: {accountId:string;email:string;error:string}[];
+  /** Accounts skipped for a harmless reason (already refreshing, or out of time); not failures. */
+  deferred?: {accountId:string;email:string;reason:'busy'|'time'}[];
   /** AI-written wording for the daily digest's items; ranking is recomputed in the browser. */
   digest?: Digest;
 };
@@ -49,6 +51,14 @@ export function syncFailureMessage(data:InboxSnapshot){
   return (data.refreshed??0)>0
     ?`Some mail could not be refreshed (${who}). Everything that did load is shown.`
     :`Could not refresh ${who}. The mail shown is from the last successful refresh.`;
+}
+/**
+ * What to say when some mailboxes were skipped for a harmless reason. They are finished by a
+ * quiet follow-up refresh, so this is a status, never a warning.
+ */
+export function deferralMessage(data:InboxSnapshot){
+  const names=(data.deferred??[]).map(item=>item.email).filter(Boolean);
+  return names.length?`Finishing ${names.join(', ')} in the background…`:'';
 }
 export class ApiError extends Error {
   constructor(

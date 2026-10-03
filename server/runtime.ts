@@ -9,6 +9,7 @@ import { chatGPTSignInPath, getChatGPTUser } from '@/app/chatgpt-auth';
 export type Runtime = {
   DB: D1Database; GOOGLE_CLIENT_ID?: string; GOOGLE_CLIENT_SECRET?: string;
   TOKEN_ENCRYPTION_KEY?: string; GEMINI_API_KEY?: string; GEMINI_MODEL?: string; APP_URL?: string; AGENT_CRON_SECRET?: string;
+  IDENTITY_PROXY_SECRET?:string;
   UNSUBSCRIBE_ALLOWED_HOSTS?: string; SEND_DAILY_LIMIT?: string;
 };
 export function runtime() { return env as unknown as Runtime; }
@@ -31,12 +32,12 @@ export function mutation(request: Request) {
 export const MAX_REQUEST_BYTES=16384;
 
 /**
- * Read one JSON object, refusing an oversized body before it is parsed.
+ * Read a request body, refusing an oversized stream before it is parsed.
  *
  * A declared Content-Length is checked first so an obvious flood costs nothing, and the
- * decoded text is measured again because that header is not trustworthy on its own.
+ * stream is bounded because that header is not trustworthy on its own.
  */
-export async function inputObject(request:Request,limit=MAX_REQUEST_BYTES):Promise<Record<string,unknown>> {
+export async function inputBytes(request:Request,limit=MAX_REQUEST_BYTES):Promise<Uint8Array> {
   const declared=Number(request.headers.get('content-length'));
   if(Number.isFinite(declared)&&declared>limit)throw new HttpError(413,'That request is too large.');
   // Read the stream in bounded chunks. Checking only after `request.text()` would still
@@ -58,7 +59,10 @@ export async function inputObject(request:Request,limit=MAX_REQUEST_BYTES):Promi
   const bytes=new Uint8Array(length);
   let offset=0;
   for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.byteLength;}
-  const text=new TextDecoder().decode(bytes);
+  return bytes;
+}
+export async function inputObject(request:Request,limit=MAX_REQUEST_BYTES):Promise<Record<string,unknown>> {
+  const text=new TextDecoder().decode(await inputBytes(request,limit));
   let value:unknown;
   try{value=JSON.parse(text);}catch{throw new HttpError(400,'Provide a valid JSON request.');}
   if(!value||typeof value!=='object'||Array.isArray(value))throw new HttpError(400,'Provide a valid JSON object.');

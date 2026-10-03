@@ -1,20 +1,24 @@
 import { emailKey, type Email } from './mail';
 import { buildInboxRows } from './inbox-priority';
-import { cachedImportance, evaluateImportance, type Importance } from './importance';
+import { isAutomatedSender, preferenceFor, type FoldPreferences } from './folding';
+import { cachedImportance, evaluateImportance, TIER_RANK, type Importance } from './importance';
+import { digestScore, fromPerson, MIN_DIGEST_SCORE } from './digest-rank';
 
 /**
  * The daily digest: the few things in the inbox most worth the user's attention.
  *
- * Which items appear, and in what order, is decided by the app's one importance policy
- * (`evaluateImportance`, via `buildInboxRows`) so the digest can never disagree with Overview,
- * the counts or the list order. The AI only writes the words (see server/digest.ts); it never
- * ranks, adds or removes anything, so an email's text cannot steer what is shown.
+ * Only mail the app's one importance policy calls important (`evaluateImportance`) can
+ * appear, so the digest never contradicts Overview or the counts. Among that mail it keeps
+ * the few that matter most, by `digestScore` (lib/digest-rank): people the reader writes to,
+ * work, and what is due soon, above system notices and routine codes. A quiet day shows
+ * fewer than five. The AI only writes the words (see server/digest.ts); it never ranks, adds
+ * or removes anything, so an email's text cannot steer what is shown.
  */
 export type DigestAction='reply'|'decide'|'deadline'|'meeting'|'security'|'review'|'fyi';
 export const DIGEST_ACTIONS:DigestAction[]=['reply','decide','deadline','meeting','security','review','fyi'];
 export const ACTION_LABEL:Record<DigestAction,string>={reply:'Needs your reply',decide:'Needs a decision',deadline:'Has a deadline',meeting:'Meeting',security:'Security',review:'Worth a look',fyi:'FYI'};
 /** Wording for one item, and the saved set for an inbox. `fp` identifies what it was written from. */
-export type DigestText={id:string;fp:string;headline:string;why:string;action:DigestAction};
+export type DigestText={id:string;fp:string;headline:string;why:string;action:DigestAction;members?:number;grouping?:'conversation'|'notifications'|'single';membership?:string};
 export type Digest={generated:number;items:DigestText[]};
 export const DIGEST_SHOWN=5;
 /** A few more than are shown, so ticking something off brings the next one up. */
@@ -28,10 +32,21 @@ export type DigestItem={
   keys:string[];
   /** Company name when several notifications were folded into one item. */
   group?:string;
+  /** A thread between people, whose members are messages rather than notifications. */
+  conversation?:boolean;
   importance:Importance;
   action:DigestAction;
   dueAt?:number;
+  /** How strongly it earned its place; see lib/digest-rank. */
+  score:number;
 };
+
+/** Compact identity of the exact messages behind one item, independent of display order. */
+export function digestMembership(keys:string[]){
+  let hash=0x811c9dc5;
+  for(const key of [...keys].sort())for(const char of `${key}\u0000`){hash^=char.charCodeAt(0);hash=Math.imul(hash,0x01000193)>>>0;}
+  return `${keys.length}:${hash.toString(36)}`;
+}
 
 function actionFor(email:Email,importance:Importance):DigestAction {
   if(email.classification?.securityEvent)return 'security';
@@ -43,55 +58,63 @@ function actionFor(email:Email,importance:Importance):DigestAction {
 const threadKey=(email:Email)=>`${email.accountId||''}:${email.threadId||email.id}`;
 
 /** The digest's items in rank order, already merged by conversation and by company. */
-export function digestItems(emails:Email[],now:number):DigestItem[] {
+export function digestItems(emails:Email[],now:number,preferences:FoldPreferences={}):DigestItem[] {
   const items:DigestItem[]=[];
   const byThread=new Map<string,DigestItem>();
-  for(const row of buildInboxRows(emails.filter(email=>email.category!=='noise'),now)){
+  const people=new Map<DigestItem,boolean>();
+  for(const row of buildInboxRows(emails.filter(email=>email.category!=='noise'),now,'importance',preferences)){
     const lead=row.kind==='email'?row.email:row.lead;
     const importance=evaluateImportance(lead,now);
     if(!importance.important)continue;
     const members=row.kind==='email'?[row.email]:row.emails;
-    const existing=members.map(member=>byThread.get(threadKey(member))).find(Boolean);
+    const mergeable=members.filter(member=>preferenceFor(member,preferences)!=='separate');
+    const existing=mergeable.map(member=>byThread.get(threadKey(member))).find(Boolean);
     if(existing){
       // The same conversation is one thing to act on, however many messages it has.
       for(const member of members)if(!existing.keys.includes(emailKey(member)))existing.keys.push(emailKey(member));
+      if(members.some(fromPerson))people.set(existing,true);
       continue;
     }
-    const item:DigestItem={key:emailKey(lead),email:lead,keys:members.map(emailKey),importance,action:actionFor(lead,importance),dueAt:importance.dueAt,
-      ...(row.kind==='fold'?{group:row.company}:{})};
-    for(const member of members)byThread.set(threadKey(member),item);
+    const item:DigestItem={key:emailKey(lead),email:lead,keys:members.map(emailKey),importance,action:actionFor(lead,importance),dueAt:importance.dueAt,score:0,
+      ...(row.kind==='fold'&&row.reason==='conversation'?{conversation:true}:
+        row.kind==='fold'&&members.every(isAutomatedSender)?{group:row.company}:{})};
+    for(const member of mergeable)byThread.set(threadKey(member),item);
+    people.set(item,members.some(fromPerson));
     items.push(item);
-    if(items.length>=DIGEST_CANDIDATES)break;
   }
-  return items;
+  // A conversation with a person counts as theirs even when a notification leads it.
+  for(const item of items)item.score=digestScore(item.email,item.importance,now,people.get(item));
+  return items.filter(item=>item.score>=MIN_DIGEST_SCORE)
+    .sort((a,b)=>b.score-a.score||a.importance.rank-b.importance.rank
+      ||(a.dueAt??Infinity)-(b.dueAt??Infinity)||(b.email.receivedAt??0)-(a.email.receivedAt??0))
+    .slice(0,DIGEST_CANDIDATES);
 }
 
 /**
  * Items for the server render and the first browser paint, before the browser's clock is known.
  *
  * Nothing time-based can be judged yet, so this reads the flags already stored on each message
- * (exactly as the rest of the dashboard does at this moment) and keeps the server's order. The
+ * (exactly as the rest of the dashboard does at this moment) and scores the clock-free sender, category and flag evidence. The
  * live policy replaces it the instant the clock arrives; it never produces a due date.
  */
 export function provisionalItems(emails:Email[]):DigestItem[] {
-  const waiting:Importance={tier:'routine',rank:4,important:true,overdue:false,reasonCode:'clock-unknown',reason:'Waiting for the clock.'};
+  const waiting:Importance={tier:'routine',rank:TIER_RANK.routine,important:true,overdue:false,reasonCode:'clock-unknown',reason:'Waiting for the clock.'};
   const items:DigestItem[]=[];
   const seen=new Set<string>();
   for(const email of emails){
     if(email.category==='noise'||!cachedImportance(email)||seen.has(threadKey(email)))continue;
     seen.add(threadKey(email));
-    items.push({key:emailKey(email),email,keys:[emailKey(email)],importance:waiting,action:actionFor(email,waiting)});
-    if(items.length>=DIGEST_CANDIDATES)break;
+    items.push({key:emailKey(email),email,keys:[emailKey(email)],importance:waiting,action:actionFor(email,waiting),score:digestScore(email,waiting,null)});
   }
-  return items;
+  return items.filter(item=>item.score>=MIN_DIGEST_SCORE).sort((a,b)=>b.score-a.score||(b.email.receivedAt||0)-(a.email.receivedAt||0)).slice(0,DIGEST_CANDIDATES);
 }
 
 const GREETING=/^(?:hi|hello|hey|dear)\b[^,.:\n]{0,40}[,:]\s*/i;
 const shorten=(text:string,limit:number)=>{const flat=text.replace(/\s+/g,' ').trim();return flat.length>limit?flat.slice(0,limit-1).trimEnd()+'…':flat;};
 /** Wording used when the AI has not written any: the email's own subject and one-line summary. */
-export function fallbackText(item:Pick<DigestItem,'email'|'keys'|'group'>) {
+export function fallbackText(item:Pick<DigestItem,'email'|'keys'|'group'|'conversation'>) {
   return {
-    headline:shorten(item.group?`${item.group}: ${item.keys.length} notifications`:item.email.subject,90),
+    headline:shorten(item.conversation?`${item.email.subject} (${item.keys.length} messages)`:item.group?`${item.group}: ${item.keys.length} notifications`:item.email.subject,90),
     why:shorten(item.email.summary.replace(GREETING,'').replace(/^./,letter=>letter.toUpperCase()),170),
   };
 }

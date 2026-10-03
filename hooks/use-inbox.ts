@@ -1,8 +1,8 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Digest } from '@/lib/digest';
-import { demoEmails } from '@/lib/mail';
-import { api, ApiError, loadConnectedInbox, syncFailureMessage, type BlockedSender, type InboxSnapshot as Snapshot } from '@/lib/inbox-client';
+import { demoEmails, emailKey, type Email } from '@/lib/mail';
+import { api, ApiError, deferralMessage, loadConnectedInbox, syncFailureMessage, type BlockedSender, type InboxSnapshot as Snapshot } from '@/lib/inbox-client';
 export { api, ApiError } from '@/lib/inbox-client';
 export type GmailAccount={id:string;email:string;lastSync:number|null;error:string|null;reconnectRequired?:boolean};
 /** The person's own sending settings, shared by every connected mailbox. */
@@ -18,11 +18,18 @@ export const ALL_INBOXES='all';
  * unavailable (private windows, blocked site data), which is treated as "no memory".
  */
 function selectionKey(user:string){return `brief:selected-view:${user}`;}
+function individualKey(user:string){return `brief:selected-account:${user}`;}
+function rememberedIndividual(user:string){
+  try{return window.localStorage.getItem(individualKey(user))||null;}catch{return null;}
+}
 function rememberedSelection(user:string){
   try{return window.localStorage.getItem(selectionKey(user))||null;}catch{return null;}
 }
 function rememberSelection(user:string,view:string){
-  try{window.localStorage.setItem(selectionKey(user),view);}catch{/* storage is optional */}
+  try{
+    window.localStorage.setItem(selectionKey(user),view);
+    if(view!==ALL_INBOXES)window.localStorage.setItem(individualKey(user),view);
+  }catch{/* storage is optional */}
 }
 
 /**
@@ -60,6 +67,18 @@ export function requestGate(){
  * Gmail connection, loads cached and refreshed snapshots, and rejects stale async results
  * when the account state changes while a request is running.
  */
+/**
+ * A response that left the server before a reply was sent must not bring the reply badge
+ * back. A message this browser saw sent keeps `replied` until the server reports it too.
+ * Matched by account and message, so another mailbox's message with the same Gmail id — or
+ * a newer message in the same thread — is never marked answered by it.
+ */
+export function keepSentReplies(previous:Email[],incoming:Email[]):Email[]{
+  const sent=new Set(previous.filter(email=>email.replied).map(emailKey));
+  if(!sent.size)return incoming;
+  return incoming.map(email=>!email.replied&&sent.has(emailKey(email))?{...email,replied:true,needsReply:false}:email);
+}
+
 export function useInbox(){
   // Data displayed by the inbox and the small set of connection/sync status values the
   // surrounding UI needs. Demo messages provide a useful first render before boot finishes.
@@ -73,6 +92,7 @@ export function useInbox(){
   const [hasMore,setHasMore]=useState(false);
   const [skipped,setSkipped]=useState(0);
   const [selectedView,setSelectedView]=useState<string>(ALL_INBOXES);
+  const [lastIndividual,setLastIndividual]=useState<{user:string;id:string}|null>(null);
   const [accountStates,setAccountStates]=useState<Snapshot['accounts']>([]);
   const [blocked,setBlocked]=useState<BlockedSender[]>([]);
   const [digest,setDigest]=useState<Digest|undefined>();
@@ -85,6 +105,10 @@ export function useInbox(){
   // combined view rather than leaving the dashboard pointed at nothing.
   const activeAccountId=selectedView===ALL_INBOXES||accounts.some(a=>a.id===selectedView)?selectedView:ALL_INBOXES;
   const activeAccount=accounts.find(a=>a.id===activeAccountId);
+  // The combined scope never replaces the user's last individual mailbox selection.
+  const individualAccountId=activeAccountId!==ALL_INBOXES?activeAccountId:resolveSelection(
+    lastIndividual?.user===userKey&&lastIndividual.id!==ALL_INBOXES?lastIndividual.id:null,
+    accounts,status?.defaultAccountId||null);
   const inFlight=useRef(false);
   // Incrementing this value invalidates callbacks started by an older mailbox lifecycle.
   const generation=useRef(0);
@@ -97,7 +121,7 @@ export function useInbox(){
   // running sync frees the mutex, instead of staying stale until the next poll.
   const queuedAccount=useRef<string|null>(null);
   const release=useRef(()=>{});
-  const apply=useCallback((data:Snapshot)=>{setEmails(data.emails);setUpdated(data.updated);setAi(data.ai);setHasMore(!!data.hasMore);setSkipped(data.skipped||0);setAccountStates(data.accounts||[]);setBlocked(data.blocked||[]);setDigest(data.digest);},[]);
+  const apply=useCallback((data:Snapshot)=>{setEmails(previous=>keepSentReplies(previous,data.emails));setUpdated(data.updated);setAi(data.ai);setHasMore(!!data.hasMore);setSkipped(data.skipped||0);setAccountStates(data.accounts||[]);setBlocked(data.blocked||[]);setDigest(data.digest);},[]);
   const resetToDemo=useCallback(()=>{
     // Invalidate connected-account work first, then replace it with the server's current
     // demo snapshot if that request still belongs to this generation.
@@ -105,14 +129,20 @@ export function useInbox(){
     // Discard a mailbox selection queued behind the connected sync. Otherwise releasing
     // that old sync could start Gmail work after the app has already entered demo mode.
     queuedAccount.current=null;
+    setLastIndividual(null);
     setStatus(previous=>previous?{...previous,connected:false,email:null,accounts:[],defaultAccountId:null,lastSync:null,error:null}:null);
     apply({emails:demoEmails,updated:null,ai:false,hasMore:false});
     void api<Snapshot>('/api/demo').then(data=>{if(generation.current===request)apply(data);}).catch(()=>{});
   },[apply]);
-  const refresh=useCallback(async(silent=false)=>{
+  // One quiet follow-up for mailboxes a refresh had to skip (another refresh was running, or it
+  // ran out of time). Only one is pending at a time, so a busy mailbox is never retried in a loop.
+  const followUp=useRef<number|undefined>(undefined);
+  const refreshRef=useRef<(silent?:boolean,finishing?:boolean)=>Promise<void>>(async()=>{});
+  useEffect(()=>()=>window.clearTimeout(followUp.current),[]);
+  const refresh=useCallback(async(silent=false,finishing=false)=>{
     // Only one explicit sync may run at a time. Each response checks its generation before
     // changing state, which prevents a late sync from repopulating a disconnected inbox.
-    if(inFlight.current)return;
+    if(inFlight.current){if(finishing)setNotice(previous=>previous.startsWith('Finishing ')?'A refresh is still running. Your inbox will update when it finishes.':previous);return;}
     if(!connected){if(!silent)setNotice('Sample inbox refreshed. Connect Gmail to receive your own email updates.');return;}
     inFlight.current=true;setBusy(true);
     const syncRequest=++syncGeneration.current;
@@ -128,12 +158,21 @@ export function useInbox(){
       // "up to date" without reading them hides a mailbox that did not refresh at all,
       // and the stale mail still on screen makes that easy to miss.
       const failure=syncFailureMessage(data);
+      const deferral=deferralMessage(data);
       if(failure)setNotice(failure);
+      else if(deferral){
+        if(finishing)setNotice('Some mail is still refreshing. Try Refresh inbox again shortly.');
+        else if(!silent)setNotice(deferral);
+        if(!finishing&&followUp.current===undefined)
+          followUp.current=window.setTimeout(()=>{void refreshRef.current(true,true).finally(()=>{followUp.current=undefined;});},4000);
+      }
+      else if(finishing)setNotice(previous=>previous.startsWith('Finishing ')?'Your inbox is up to date.':previous);
       else if(!silent)setNotice('Your inbox is up to date.');
     }
     catch(error){if(generation.current===request){setNotice(error instanceof Error?error.message:'Could not refresh your inbox.');if(error instanceof ApiError&&error.signInUrl)setSignInUrl(error.signInUrl);}}
     finally{if(syncGeneration.current===syncRequest)release.current();}
   },[connected,apply,activeAccountId]);
+  useEffect(()=>{refreshRef.current=refresh;},[refresh]);
   useEffect(()=>{
     // Initial boot resolves connection state once. Connected accounts stream cached data
     // followed by a refreshed snapshot; disconnected sessions load the shared demo inbox.
@@ -156,6 +195,13 @@ export function useInbox(){
           result.defaultAccountId,
         );
         setSelectedView(restored);
+        const savedIndividual=result.userId?rememberedIndividual(result.userId):null;
+        const individual=restored!==ALL_INBOXES?restored:resolveSelection(
+          savedIndividual===ALL_INBOXES?null:savedIndividual,result.accounts,result.defaultAccountId);
+        setLastIndividual({user:result.userId||'',id:individual});
+        if(result.userId&&individual!==ALL_INBOXES){
+          try{localStorage.setItem(individualKey(result.userId),individual);}catch{/* storage is optional */}
+        }
         syncRequest=++syncGeneration.current;
         inFlight.current=true;setBusy(true);
         apply({emails:[],updated:null,ai:false});
@@ -218,6 +264,7 @@ export function useInbox(){
   const selectAccount=useCallback((view:string)=>{
     const request=++generation.current;
     setSelectedView(view);
+    if(view!==ALL_INBOXES)setLastIndividual({user:userKey,id:view});
     if(userKey)rememberSelection(userKey,view);
     setEmails([]);setUpdated(null);setAi(false);setHasMore(false);setSkipped(0);setAccountStates([]);setBlocked([]);setDigest(undefined);
     const accountId=view===ALL_INBOXES?undefined:view;
@@ -275,7 +322,7 @@ export function useInbox(){
     return result;
   },[activeAccountId,resetToDemo,selectAccount]);
 
-  return {emails,setEmails,status,setStatus,accounts,accountStates,blocked,activeAccount,activeAccountId,
+  return {emails,setEmails,status,setStatus,accounts,accountStates,blocked,activeAccount,activeAccountId,individualAccountId,
     setActiveAccountId:selectAccount,
     defaultAccountId:status?.defaultAccountId||null,
     connected,busy,notice,setNotice,signInUrl,updated,ai,hasMore,skipped,digest,refresh,resetToDemo,

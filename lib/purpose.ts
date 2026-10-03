@@ -151,6 +151,8 @@ export function securityEvidence(value:string){return firstMatch(sentencesOf(val
 export function registrationEvidence(value:string){return firstMatch(sentencesOf(value),REGISTRATION,isCommercialSentence);}
 export function achievementEvidence(value:string){return firstMatch(sentencesOf(value),ACHIEVEMENT,isCommercialSentence);}
 
+const normalizeQuote=(value:string)=>value.toLowerCase().replace(/\s+/g,' ').trim();
+
 /** An obligation backed by something real rather than by wording in a sales message. */
 export function independentlySupported(obligation:Obligation){
   const evidence=obligation.evidence||'';
@@ -250,11 +252,21 @@ export function applyPurposeChecks(input:Classification,assessment:PurposeAssess
   });
   const requests=obligations.filter(o=>o.kind==='request'&&o.required&&o.ownerIsUser!==false&&o.state==='open');
   const concreteSecurity=assessment.preserve.some(p=>p.kind==='security');
+  // The reply decision rests on one sentence. When that sentence is sales copy in a clear
+  // promotion — or is the very call to action just demoted above — answering is optional.
+  const reply=classification.reply;
+  const sellingReply=!!reply&&reply.status==='required'&&!!reply.evidence&&(
+    (clear&&isCommercialSentence(reply.evidence))||
+    obligations.some(o=>o.commercial&&o.evidence&&normalizeQuote(o.evidence)===normalizeQuote(reply.evidence)));
+  const checkedReply=sellingReply?{...reply!,status:'not_required' as const,reasonCode:'optional_engagement' as const,channel:'none' as const,
+    explanation:'This is a sales call to action; answering is optional.'}:reply;
   return {
     ...classification,
     obligations,
-    replyRequired:classification.replyRequired&&(requests.length>0||
-      (!classification.obligations.some(o=>o.kind==='request')&&!obligations.some(o=>o.commercial)&&!clear)),
+    // Classifications from before the reply assessment keep the earlier rule.
+    ...checkedReply?{reply:checkedReply,replyRequired:checkedReply.status==='required'}:{
+      replyRequired:classification.replyRequired&&(requests.length>0||
+        (!classification.obligations.some(o=>o.kind==='request')&&!obligations.some(o=>o.commercial)&&!clear))},
     securityEvent:classification.securityEvent&&(!clear||concreteSecurity),
     topics:clear?(classification.topics||[]).filter(topic=>topic!=='research'):classification.topics,
   };

@@ -10,7 +10,7 @@ const SCOPES = ['readonly', 'send', 'compose'].map((s) => 'https://www.googleapi
 /** The union of what the app sends: a Gmail JSON body or a Gemini request. A test reads only the fields that apply. */
 export type Body = { raw: string; threadId?: string; systemInstruction: { parts: { text: string }[] }; contents: { parts: { text: string }[] }[] };
 /** `body` is present only for JSON requests; uploads carry their message in `text`. */
-export type Call = { url: string; body: Body; text?: string; contentType?: string };
+export type Call = { url: string; body: Body; text?: string; contentType?: string; method?: string };
 export type Behavior = { tokenStatus: number; sendStatus: number; geminiStatus: number };
 export type Rig = ReturnType<typeof rig>;
 
@@ -26,6 +26,7 @@ export function rig(options: { geminiKey?: boolean; env?: Partial<Runtime> } = {
   const original = globalThis.fetch;
   const calls: Call[] = [];
   const behavior: Behavior = { tokenStatus: 200, sendStatus: 200, geminiStatus: 200 };
+  const deletedDrafts=new Set<string>();
   /** What Gmail holds, by message id. */
   const messages: Record<string, object> = {};
   /** Answers Gemini; receives the parsed request body. */
@@ -33,7 +34,7 @@ export function rig(options: { geminiKey?: boolean; env?: Partial<Runtime> } = {
   globalThis.fetch = async (input, init) => {
     const url = input instanceof Request ? input.url : input.toString();
     let body: Body | undefined; try { body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined; } catch { body = undefined; }
-    calls.push({ url, body: body as Body, text: typeof init?.body === 'string' ? init.body : undefined, contentType: new Headers(init?.headers).get('content-type') || undefined });
+    calls.push({ url, body: body as Body, text: typeof init?.body === 'string' ? init.body : undefined, contentType: new Headers(init?.headers).get('content-type') || undefined,method:init?.method });
     if (url.includes('oauth2.googleapis.com/revoke')) return Response.json({});
     if (url.includes('oauth2.googleapis.com/token')) {
       if (behavior.tokenStatus !== 200) return new Response('{}', { status: behavior.tokenStatus });
@@ -41,8 +42,13 @@ export function rig(options: { geminiKey?: boolean; env?: Partial<Runtime> } = {
     }
     if (url.includes('messages/send') || url.includes('/drafts')) {
       if (behavior.sendStatus !== 200) return new Response('{}', { status: behavior.sendStatus });
+      if(init?.method==='DELETE')return new Response(null,{status:204});
+      const draftId=init?.method==='PUT'?/\/drafts\/([^?]+)/.exec(url)?.[1]:undefined;
+      if(draftId&&deletedDrafts.has(draftId))return new Response('{}',{status:404});
+      if(draftId)return Response.json({id:draftId,threadId:'thread-new'});
       return Response.json({ id: 'gmail-' + calls.length, threadId: 'thread-new' });
     }
+    if (url.includes('/users/me/messages?labelIds=SENT')) return Response.json({ messages: [] });
     if (url.includes('/users/me/messages?maxResults=')) return Response.json({ messages: Object.keys(messages).map((id) => ({ id })) });
     const wanted = /\/users\/me\/messages\/([^?/]+)\?format=full/.exec(url)?.[1];
     if (wanted && messages[decodeURIComponent(wanted)]) return Response.json(messages[decodeURIComponent(wanted)]);
@@ -54,13 +60,13 @@ export function rig(options: { geminiKey?: boolean; env?: Partial<Runtime> } = {
     throw new Error('Unexpected request ' + url);
   };
   return {
-    storage, env, calls, behavior, messages, gemini,
+    storage, env, calls, behavior, messages, gemini, deletedDrafts,
     restore() { globalThis.fetch = original; globalThis.__briefTestHeaders = new Headers(); },
   };
 }
 
 export function signIn(user: string) {
-  globalThis.__briefTestHeaders = new Headers({ 'oai-authenticated-user-id': user, 'oai-authenticated-user-email': user + '@example.com' });
+  globalThis.__briefTestHeaders = new Headers({ 'x-brief-identity-secret':'test-ingress-secret-for-authenticated-proxy', 'oai-authenticated-user-id': user, 'oai-authenticated-user-email': user + '@example.com' });
 }
 export async function connect(r: Rig, user: string, account: string, email = account + '@gmail.example') {
   const token = await encrypt('refresh-token', user, r.env, account);

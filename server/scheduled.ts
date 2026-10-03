@@ -17,6 +17,9 @@ export type ScheduledItem={id:string;accountId:string;accountEmail:string|null;s
 
 export async function scheduleEmail(user:string,accountId:string,e:Runtime,id:string,payload:ScheduledPayload,sendAt:number){
   const now=Date.now();
+  const heartbeat=await e.DB.prepare('SELECT last_run FROM agent_status WHERE id = ?').bind('scheduler').first<{last_run:number}>();
+  if(!heartbeat||now-heartbeat.last_run>=40*MINUTE)
+    throw new HttpError(503,'Scheduled sending is unavailable because the background sender has not checked in recently. Send now or try again after it resumes.');
   if(!Number.isInteger(sendAt)||sendAt<now+MINUTE)throw new HttpError(400,'Choose a time in the future.');
   if(sendAt>now+MAX_SCHEDULE_DAYS*DAY)throw new HttpError(400,`Choose a time within the next ${MAX_SCHEDULE_DAYS} days.`);
   // A repeated request for the same email (a double click) is ignored, so check for it before the limit.
@@ -42,7 +45,13 @@ export async function cancelScheduled(user:string,e:Runtime,id:string){
   const result=await e.DB.prepare("UPDATE scheduled_emails SET status='cancelled', payload='{}', updated=? WHERE id = ? AND user_id = ? AND status IN ('scheduled','failed')").bind(Date.now(),id,user).run();
   if(!result.meta.changes)throw new HttpError(409,'This email has already been sent or cancelled.');
 }
-const failureNote=(error:unknown)=>(error instanceof HttpError?error.message:'Sending failed.')+' It may or may not have gone out, so check your Gmail Sent folder before sending again.';
+const failureNote=(error:unknown)=>{
+  const message=error instanceof HttpError?error.message:'Sending failed.';
+  // The daily limit fires before a Gmail request. A 4xx refusal releases the send
+  // claim, so those cases are known not to have delivered anything.
+  const definitelyUnsent=error instanceof HttpError&&[400,401,403,404,409,429].includes(error.status);
+  return message+(definitelyUnsent?' Nothing was sent.':' It may or may not have gone out, so check your Gmail Sent folder before sending again.');
+};
 /** Sends every email whose time has come. Called from the background agent. */
 export async function sendDueScheduled(e:Runtime){
   const now=Date.now();

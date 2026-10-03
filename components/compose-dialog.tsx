@@ -29,7 +29,7 @@ type Mailbox={id:string;email:string};
  * Writes a brand-new email. Nothing leaves until the person clicks Send, and every send waits a
  * few seconds with an Undo. The AI can draft text here but cannot send.
  */
-export function ComposeDialog({open,onOpenChange,demo,aiReady,fields,onFields,blank,contacts,mailboxes,preferredAccountId,onScheduled}:{open:boolean;onOpenChange:(open:boolean)=>void;demo:boolean;aiReady:boolean;fields:ComposeFields;onFields:Dispatch<SetStateAction<ComposeFields>>;blank:ComposeFields;contacts:Contact[];mailboxes:Mailbox[];preferredAccountId:string|null;onScheduled:()=>void}){
+export function ComposeDialog({open,onOpenChange,demo,aiReady,schedulerActive=true,fields,onFields,blank,contacts,mailboxes,preferredAccountId,onScheduled,initialDraftId=''}:{initialDraftId?:string;open:boolean;onOpenChange:(open:boolean)=>void;demo:boolean;aiReady:boolean;schedulerActive?:boolean;fields:ComposeFields;onFields:Dispatch<SetStateAction<ComposeFields>>;blank:ComposeFields;contacts:Contact[];mailboxes:Mailbox[];preferredAccountId:string|null;onScheduled:()=>void}){
   const {to,cc,bcc,subject,body}=fields;
   const [busy,setBusy]=useState<''|'send'|'draft'|'write'|'schedule'>('');
   const [message,setMessage]=useState('');
@@ -42,12 +42,15 @@ export function ComposeDialog({open,onOpenChange,demo,aiReady,fields,onFields,bl
   const [tone,setTone]=useState('Concise');
   const [countdown,setCountdown]=useState(0);
   const [files,setFiles]=useState<File[]>([]);
+  // Opened from the Drafts tab, saving updates that Gmail draft and sending discards it.
+  const [draftId,setDraftId]=useState(initialDraftId);
   const [scheduling,setScheduling]=useState(false);
   const [presets,setPresets]=useState<[string,Date][]>([]);
   const [when,setWhen]=useState('');
   const [earliest,setEarliest]=useState('');
   // One key per email being written. The server uses it so a retried click can never send twice.
   const key=useRef('');
+  const draftSaveKey=useRef('');
   const timers=useRef<{tick:number;fire:number}|null>(null);
   const aiSubject=useRef('');
   // The mailbox the email leaves from: the one chosen here, else the one being viewed, else the default.
@@ -56,11 +59,17 @@ export function ComposeDialog({open,onOpenChange,demo,aiReady,fields,onFields,bl
   // A saved signature is pre-filled into the body, so a body that is only the signature is still empty.
   const ready=!!to.trim()&&!!subject.trim()&&!!body.trim()&&body.trim()!==blank.body.trim()&&(demo||!!fromId);
   const locked=countdown>0;
-  const set=(field:keyof ComposeFields)=>(value:string)=>onFields(previous=>({...previous,[field]:value}));
+  const set=(field:keyof ComposeFields)=>(value:string)=>{
+    if(field==='accountId'&&value!==fromId){
+      if(draftId){setMessage('This saved draft belongs to its original account. Start a new email to use another account.');setError(true);return;}
+      key.current='';draftSaveKey.current='';
+    }
+    onFields(previous=>({...previous,[field]:value}));
+  };
   const tidy=(list:string)=>list.replace(/[\s,;]+$/,'');
   function stopTimers(){if(timers.current){window.clearInterval(timers.current.tick);window.clearTimeout(timers.current.fire);timers.current=null;}setCountdown(0);}
   useEffect(()=>()=>{if(timers.current){window.clearInterval(timers.current.tick);window.clearTimeout(timers.current.fire);}},[]);
-  function reset(){stopTimers();onFields(blank);setMessage('');setError(false);setUnconfirmed(null);setSent(null);setShowCc(false);setNotes('');setDescribing(false);setFiles([]);setScheduling(false);aiSubject.current='';key.current='';}
+  function reset(){stopTimers();onFields(blank);setMessage('');setError(false);setUnconfirmed(null);setSent(null);setShowCc(false);setNotes('');setDescribing(false);setFiles([]);setDraftId('');setScheduling(false);aiSubject.current='';key.current='';draftSaveKey.current='';}
   function change(next:boolean){
     // Closing the window during the undo countdown cancels the send, so nothing leaves unexpectedly.
     if(!next&&locked){stopTimers();setMessage('Send cancelled. Your email was not sent.');setError(false);}
@@ -79,17 +88,18 @@ export function ComposeDialog({open,onOpenChange,demo,aiReady,fields,onFields,bl
     if(busy||!ready)return;
     setBusy(action);setMessage('');setError(false);setUnconfirmed(null);
     if(!key.current)key.current=crypto.randomUUID();
+    if(action==='draft'&&!draftSaveKey.current)draftSaveKey.current=crypto.randomUUID();
     try{
       if(demo){
         if(action==='send')setSent({to:tidy(to),cc:tidy(cc),from:''});
         else setMessage('Demo draft kept in this window. Nothing was saved to Gmail.');
       }else{
-        const payload:Record<string,string>={action,accountId:fromId,to,cc,bcc,subject,body,key:key.current,...(confirmUnsent?{confirmUnsent:'true'}:{})};
+        const payload:Record<string,string>={action,accountId:fromId,to,cc,bcc,subject,body,key:key.current,...(action==='draft'?{saveKey:draftSaveKey.current}:{}),...(draftId?{draftId}:{}),...(confirmUnsent?{confirmUnsent:'true'}:{})};
         let request:unknown={...payload,confirmUnsent};
         if(files.length){const form=new FormData();for(const [name,value] of Object.entries(payload))form.append(name,value);for(const file of files)form.append('files',file);request=form;}
         const receipt=await api<Receipt>('/api/compose',request);
         if(action==='send')setSent({to:tidy(to),cc:tidy(cc),from:fromEmail,threadId:receipt.threadId});
-        else setMessage(files.length?'Draft saved in Gmail with its attachments.':'Draft saved in Gmail.');
+        else{setDraftId(receipt.id);draftSaveKey.current='';setMessage(files.length?'Draft updated in Gmail with its attachments.':'Draft updated in Gmail.');}
       }
     }catch(failure){
       setMessage(failure instanceof Error?failure.message:'Could not complete that. Please try again.');setError(true);
@@ -141,12 +151,12 @@ export function ComposeDialog({open,onOpenChange,demo,aiReady,fields,onFields,bl
     {sent?<div className="compose-sent">
       <div className="compose-sent-title">{sent.scheduledFor?<CalendarClock size={18}/>:<CheckCircle2 size={18}/>}<strong>{sent.scheduledFor?`Scheduled for ${stamp(sent.scheduledFor)}`:demo?'Demo email complete':'Delivered through Gmail'}</strong></div>
       <div className="compose-sent-body"><span>{subject}</span><p>{body}</p>{files.length>0&&<small>{files.length} attached {files.length===1?'file':'files'}</small>}</div>
-      <p className="compose-note">{sent.scheduledFor?(demo?'Demo mode · This email was never scheduled with Gmail.':'It goes out within about 30 minutes after that time. Review or cancel it under Scheduled.'):demo?'Demo mode · This email was never sent to Gmail.':'A copy is in your Gmail Sent folder.'}</p>
+      <p className="compose-note">{sent.scheduledFor?(demo?'Demo mode · This email was never scheduled with Gmail.':'The background sender checks about every 30 minutes. Review or cancel it under Scheduled.'):demo?'Demo mode · This email was never sent to Gmail.':'A copy is in your Gmail Sent folder.'}</p>
       <div className="compose-actions"><button className="button white" onClick={reset}><FilePenLine size={14}/>Write another email</button><button className="button blue" onClick={()=>change(false)}>Done</button></div>
       {openInGmail&&<a className="gmail-link" href={openInGmail} target="_blank" rel="noreferrer">Open in Gmail <ExternalLink size={12}/></a>}
     </div>:<div className="compose-form">
       <fieldset className="compose-fields" disabled={locked}>
-        {!demo&&mailboxes.length>1&&<div className="compose-field"><label htmlFor="compose-from">From</label><select id="compose-from" value={fromId} onChange={event=>set('accountId')(event.target.value)}>{mailboxes.map(box=><option key={box.id} value={box.id}>{box.email}</option>)}</select></div>}
+        {!demo&&mailboxes.length>1&&<div className="compose-field"><label htmlFor="compose-from">From</label><select id="compose-from" disabled={!!draftId} title={draftId?"Saved drafts stay in their original account":undefined} value={fromId} onChange={event=>set('accountId')(event.target.value)}>{mailboxes.map(box=><option key={box.id} value={box.id}>{box.email}</option>)}</select></div>}
         <RecipientField label="To" value={to} onChange={set('to')} contacts={contacts} placeholder="name@example.com, another@example.com"/>
         {showCc||!!cc||!!bcc?<>
           <RecipientField label="Cc" value={cc} onChange={set('cc')} contacts={contacts}/>
@@ -175,13 +185,13 @@ export function ComposeDialog({open,onOpenChange,demo,aiReady,fields,onFields,bl
         <strong>Send later</strong>
         <div className="compose-presets">{presets.map(([label,date])=><button type="button" key={label} className="compose-preset" aria-pressed={when===localValue(date)} onClick={()=>setWhen(localValue(date))}>{label}</button>)}</div>
         <input type="datetime-local" aria-label="Send time" value={when} min={earliest} onChange={event=>setWhen(event.target.value)}/>
-        <small>Scheduled emails go out within about 30 minutes after the time you choose.</small>
+        <small>The background sender checks about every 30 minutes; delivery may be later if it is delayed.</small>
         <div className="compose-actions"><button className="button white" onClick={()=>setScheduling(false)}>Back</button><button className="button blue" onClick={()=>void scheduleIt()} disabled={!when||!!busy}><CalendarClock size={14}/>{busy==='schedule'?'Scheduling…':'Schedule send'}</button></div>
       </div>
       :<div className="compose-actions">
         <button className="button white" onClick={()=>void submit('draft')} disabled={!ready||!!busy}><FilePenLine size={14}/>{busy==='draft'?'Saving…':'Save draft'}</button>
         <div className="compose-actions-right">
-          <button className="button white" onClick={openScheduling} disabled={!ready||!!busy||files.length>0} title={files.length>0?'Emails with attachments cannot be scheduled yet':undefined}><CalendarClock size={14}/>Schedule</button>
+          <button className="button white" onClick={openScheduling} disabled={!ready||!!busy||files.length>0||!demo&&!schedulerActive} title={files.length>0?'Emails with attachments cannot be scheduled yet':!demo&&!schedulerActive?'The background sender has not checked in recently':undefined}><CalendarClock size={14}/>Schedule</button>
           <button className="button blue" onClick={startSend} disabled={!ready||!!busy}><Send size={14}/>{busy==='send'?'Sending…':'Send email'}</button>
         </div>
       </div>}
