@@ -1,6 +1,7 @@
 import type { StoredEmail } from './sync';
 import type { Runtime } from './runtime';
 import { asCapability } from '@/lib/unsubscribe';
+import { gmailSignals } from '@/lib/gmail-signals';
 
 type Row={data:string;replied?:number};
 
@@ -72,6 +73,8 @@ export function completeStoredEmail(value:unknown):StoredEmail|undefined{
     listId:typeof email.listId==='string'&&email.listId?email.listId.slice(0,255):undefined,
     needsReply:!!email.needsReply,
     unread:!!email.unread,
+    gmailLabels:gmailSignals(email.gmailLabels),
+    inInbox:typeof email.inInbox==='boolean'?email.inInbox:undefined,
   } as StoredEmail;
 }
 
@@ -106,7 +109,16 @@ export async function loadMessageMap(user:string,accountId:string,messageIds:str
 
 /** Record a successful send atomically so a concurrent sync cannot restore the reply badge. */
 export async function markMessageReplied(user:string,accountId:string,messageId:string,e:Runtime){
-  const result=await e.DB.prepare("UPDATE mailbox_messages SET replied=1,data=json_set(data,'$.needsReply',json('false')) WHERE account_id=? AND user_id=? AND message_id=?")
-    .bind(accountId,user,messageId).run();
+  const source=await e.DB.prepare('SELECT data,received_at FROM mailbox_messages WHERE account_id=? AND user_id=? AND message_id=?')
+    .bind(accountId,user,messageId).first<{data:string;received_at:number}>();
+  if(!source)return false;
+  const email=parseStoredEmail(source.data);
+  // A reply answers this message and older requests in its Gmail conversation. Later
+  // requests stay open, and a missing thread id limits the update to this message.
+  const result=email?.threadId
+    ?await e.DB.prepare("UPDATE mailbox_messages SET replied=1,data=json_set(data,'$.needsReply',json('false')) WHERE account_id=? AND user_id=? AND json_extract(data,'$.threadId')=? AND received_at<=?")
+      .bind(accountId,user,email.threadId,source.received_at).run()
+    :await e.DB.prepare("UPDATE mailbox_messages SET replied=1,data=json_set(data,'$.needsReply',json('false')) WHERE account_id=? AND user_id=? AND message_id=?")
+      .bind(accountId,user,messageId).run();
   return !!result.meta.changes;
 }

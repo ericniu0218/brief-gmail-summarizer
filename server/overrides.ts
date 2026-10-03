@@ -10,6 +10,7 @@ import {
   type ObligationState,
 } from '@/lib/classification';
 import type { NormalizedMessage } from './message';
+import { asReplyAssessment, replyRequiredFrom, type ReplyAssessment } from '@/lib/reply';
 
 export type JunkPreference='junk'|'not-junk';
 // Shared with the browser, which needs the same answer before offering a sender action.
@@ -41,6 +42,7 @@ export type Override={
   removeTags:Tag[];
   junkPreference?:JunkPreference;
   obligationStates?:Record<string,ObligationState>;
+  replyPreference?:'answered'|'not-needed';
   /** Legacy compatibility: true means not-junk. */
   notJunk?:boolean;
   /** Legacy compatibility: an old correction applied one state to every obligation. */
@@ -61,12 +63,14 @@ export type CorrectionAction=
   |{type:'clear-tag-correction';tag:Tag}
   |{type:'set-obligation-state';obligationKey:string;state:ObligationState}
   |{type:'clear-obligation-state';obligationKey:string}
+  |{type:'set-reply-preference';value:'answered'|'not-needed'}
+  |{type:'clear-reply-preference'}
   |{type:'reset-all'};
 
 type Row={
   message_id:string;category:string|null;add_tags:string;remove_tags:string;
   not_junk:number;obligation_state:string|null;source:string;created:number;
-  junk_preference:string|null;obligation_states:string;revision:number;active:number;
+  junk_preference:string|null;obligation_states:string;reply_preference:string|null;revision:number;active:number;
 };
 
 const SECTIONS:Section[]=['work','personal','noise'];
@@ -75,7 +79,7 @@ const TAGS:Tag[]=[...CORRECTABLE_TAGS,'junk'];
 export const CORRECTABLE_STATES:ObligationState[]=['open','completed','cancelled','superseded','unknown'];
 // A person correcting the message has reviewed it, so a quoted-history task no longer needs
 // flagging once nothing structural keeps it in review.
-const DERIVED_REVIEW_REASONS=new Set(['junk-with-open-obligation','junk-with-security-event','junk-with-personal-record','unclear-task-owner','ambiguous-date','conflicting-dates','classification-failed','quoted-history-obligation']);
+const DERIVED_REVIEW_REASONS=new Set(['junk-with-open-obligation','junk-with-security-event','junk-with-personal-record','junk-with-prior-correspondence','unclear-task-owner','ambiguous-date','conflicting-dates','classification-failed','quoted-history-obligation','suspicious-request','reply-uncertain']);
 
 function parsedTags(value:string):Tag[]{
   try{
@@ -112,13 +116,14 @@ function toOverride(row:Row):Override{
     category:SECTIONS.includes(row.category as Section)?row.category as Section:undefined,
     addTags:parsedTags(row.add_tags),removeTags:parsedTags(row.remove_tags),junkPreference,
     obligationStates:parsedObligationStates(row.obligation_states),notJunk:junkPreference==='not-junk',
+    replyPreference:row.reply_preference==='answered'||row.reply_preference==='not-needed'?row.reply_preference:undefined,
     obligationState:CORRECTABLE_STATES.includes(row.obligation_state as ObligationState)?row.obligation_state as ObligationState:undefined,
     source:row.source==='rule'?'rule':'message',createdAt:row.created,
     revision:Number.isInteger(row.revision)&&row.revision>=0?row.revision:0,active:row.active!==0,
   };
 }
 
-const SELECT_COLUMNS='message_id, category, add_tags, remove_tags, not_junk, obligation_state, source, created, junk_preference, obligation_states, revision, active';
+const SELECT_COLUMNS='message_id, category, add_tags, remove_tags, not_junk, obligation_state, source, created, junk_preference, obligation_states, reply_preference, revision, active';
 
 /** Corrections are per mailbox, so the same message id in two accounts stays independent. */
 export async function loadOverrides(user:string,accountId:string,e:Runtime,messageIds?:string[]){
@@ -166,9 +171,11 @@ export function reduceOverride(current:Override|undefined,messageId:string,actio
     case 'clear-tag-correction':additions.delete(action.tag);removals.delete(action.tag);break;
     case 'set-obligation-state':next.obligationStates![action.obligationKey]=action.state;break;
     case 'clear-obligation-state':delete next.obligationStates![action.obligationKey];break;
+    case 'set-reply-preference':next.replyPreference=action.value;break;
+    case 'clear-reply-preference':next.replyPreference=undefined;break;
     case 'reset-all':
       next.category=undefined;next.junkPreference=undefined;next.addTags=[];next.removeTags=[];
-      next.obligationStates={};next.obligationState=undefined;next.notJunk=false;next.active=false;
+      next.obligationStates={};next.obligationState=undefined;next.replyPreference=undefined;next.notJunk=false;next.active=false;
       return next;
   }
   next.addTags=[...additions];next.removeTags=[...removals];
@@ -188,15 +195,15 @@ export async function applyCorrection(user:string,accountId:string,messageId:str
   if(revision!==expectedRevision)throw new HttpError(409,'This message changed in another tab. Reload it and try again.');
   const next=reduceOverride(current,messageId,action,Date.now());
   const values=[next.category||null,JSON.stringify(next.addTags),JSON.stringify(next.removeTags),next.notJunk?1:0,
-    next.obligationState||null,next.source,next.createdAt,next.junkPreference||null,JSON.stringify(next.obligationStates||{}),next.revision!,next.active?1:0];
+    next.obligationState||null,next.source,next.createdAt,next.junkPreference||null,JSON.stringify(next.obligationStates||{}),next.replyPreference||null,next.revision!,next.active?1:0];
   if(current){
     const result=await e.DB.prepare(
-      'UPDATE overrides SET category=?, add_tags=?, remove_tags=?, not_junk=?, obligation_state=?, source=?, created=?, junk_preference=?, obligation_states=?, revision=?, active=? WHERE account_id=? AND user_id=? AND message_id=? AND revision=? AND EXISTS (SELECT 1 FROM connections WHERE id=? AND user_id=?)',
+      'UPDATE overrides SET category=?, add_tags=?, remove_tags=?, not_junk=?, obligation_state=?, source=?, created=?, junk_preference=?, obligation_states=?, reply_preference=?, revision=?, active=? WHERE account_id=? AND user_id=? AND message_id=? AND revision=? AND EXISTS (SELECT 1 FROM connections WHERE id=? AND user_id=?)',
     ).bind(...values,accountId,user,messageId,expectedRevision,accountId,user).run();
     if(!result.meta.changes)throw new HttpError(409,'This message changed in another tab. Reload it and try again.');
   }else{
     const result=await e.DB.prepare(
-      'INSERT INTO overrides (category,add_tags,remove_tags,not_junk,obligation_state,source,created,junk_preference,obligation_states,revision,active,account_id,user_id,message_id) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM connections WHERE id=? AND user_id=?) ON CONFLICT(account_id,message_id) DO NOTHING',
+      'INSERT INTO overrides (category,add_tags,remove_tags,not_junk,obligation_state,source,created,junk_preference,obligation_states,reply_preference,revision,active,account_id,user_id,message_id) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM connections WHERE id=? AND user_id=?) ON CONFLICT(account_id,message_id) DO NOTHING',
     ).bind(...values,accountId,user,messageId,accountId,user).run();
     if(!result.meta.changes)throw new HttpError(409,'This message changed in another tab. Reload it and try again.');
   }
@@ -211,7 +218,11 @@ export async function applyCorrection(user:string,accountId:string,messageId:str
 export function automaticBaseline(classification:Classification|undefined):Classification|undefined{
   if(!classification||classification.override)return undefined;
   const disposition=classification.proposedDisposition??classification.disposition;
+  // A stored reply decision is validated on the way in, and the badge is always derived
+  // from it, so a damaged or hand-edited record cannot show one answer and mean another.
+  const reply=asReplyAssessment(classification.reply);
   return {...classification,disposition,proposedDisposition:undefined,reviewReason:undefined,
+    reply,replyRequired:replyRequiredFrom(reply,classification.replyRequired===true),
     obligations:Array.isArray(classification.obligations)?classification.obligations.map(obligation=>({...obligation,due:obligation.due?{...obligation.due}:undefined})):[],
     topics:Array.isArray(classification.topics)?[...classification.topics]:[],override:undefined};
 }
@@ -229,7 +240,7 @@ export function manualCorrectionView(override:Override|undefined){
   if(!override||override.active===false)return undefined;
   const manual=normalizedOverride(override);
   return {category:manual.category,addTags:[...manual.addTags],removeTags:[...manual.removeTags],
-    junkPreference:manual.junkPreference,obligationStates:{...manual.obligationStates}};
+    junkPreference:manual.junkPreference,obligationStates:{...manual.obligationStates},replyPreference:manual.replyPreference};
 }
 
 export async function loadSenderRules(user:string,accountId:string,e:Runtime){
@@ -313,6 +324,21 @@ export async function saveSenderRule(user:string,accountId:string,address:string
   return {address,junkPreference:value,revision,active:true};
 }
 
+const sameQuote=(a:string,b:string)=>{
+  const left=a.toLowerCase().replace(/\s+/g,' ').trim(),right=b.toLowerCase().replace(/\s+/g,' ').trim();
+  return !!left&&!!right&&(left.includes(right)||right.includes(left));
+};
+
+/** A reply decision after the person marked the task it rests on done, cancelled or not theirs. */
+function replyAfterCorrections(reply:ReplyAssessment,obligations:Classification['obligations']):ReplyAssessment{
+  if(reply.status!=='required'||!reply.evidence)return reply;
+  const settled=obligations.find(o=>(o.kind==='request'||o.kind==='action')&&sameQuote(o.evidence||'',reply.evidence)
+    &&(isResolved(o)||o.ownerIsUser===false));
+  if(!settled)return reply;
+  return {...reply,status:'not_required',reasonCode:'already_answered',channel:'none',source:'manual',
+    explanation:settled.ownerIsUser===false?'You marked this request as somebody else’s.':`You marked this request ${settled.state}.`};
+}
+
 /** Apply manual intent to a fresh copy of the automatic result. */
 export function applyOverride(classification:Classification,override?:Override):Classification{
   const base=automaticBaseline(classification)??{...classification,override:undefined,
@@ -348,8 +374,19 @@ export function applyOverride(classification:Classification,override?:Override):
   // A correction in one dimension must not clear an unrelated ambiguous date, ownership
   // question, provider failure, or security review. Recalculate structural reasons and
   // clear only a derived reason that the correction truly resolved.
-  if(next.obligations.some(o=>o.kind==='request'))
+  if(base.reply){
+    // Only the request the reply decision rests on can settle it. Completing an unrelated
+    // task in the same message leaves an open question open.
+    next.reply=replyAfterCorrections(base.reply,next.obligations);
+    next.replyRequired=replyRequiredFrom(next.reply);
+  }else if(next.obligations.some(o=>o.kind==='request'))
     next.replyRequired=base.replyRequired&&next.obligations.some(o=>o.kind==='request'&&o.required&&o.ownerIsUser!==false&&!isResolved(o));
+  if(manual.replyPreference){
+    next.reply={status:'not_required',urgency:'unknown',channel:'none',
+      reasonCode:manual.replyPreference==='answered'?'already_answered':'no_request',
+      evidence:'',explanation:manual.replyPreference==='answered'?'You marked this conversation as answered.':'You marked this as needing no reply.',source:'manual'};
+    next.replyRequired=false;
+  }
   const remainingReview=needsReview(next);
   if(remainingReview){next.processingStatus='needs_review';next.uncertainty=remainingReview;}
   else if(next.processingStatus==='needs_review'&&next.uncertainty&&DERIVED_REVIEW_REASONS.has(next.uncertainty)){

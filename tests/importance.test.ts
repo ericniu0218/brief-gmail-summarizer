@@ -353,7 +353,10 @@ void test('the list order follows the stated tiers and is deterministic', () => 
   const input = [routine, aging, overdue, recent, dueSoon, dueSooner];
 
   const order = sortInboxEmails(input, NOW).map(item => item.id);
-  assert.deepEqual(order, ['due-sooner', 'due-soon', 'recent-ask', 'overdue', 'aging', 'routine']);
+  // Only what needs the reader now is pinned; an older unresolved item follows newer mail.
+  assert.deepEqual(order, ['due-sooner', 'due-soon', 'recent-ask', 'overdue', 'routine', 'aging']);
+  assert.deepEqual(sortInboxEmails(input, NOW, 'reply').map(item => item.id),
+    ['due-sooner', 'due-soon', 'recent-ask', 'overdue', 'aging', 'routine'], 'the reply tab still ranks every tier');
 
   // Same input in another arrangement gives the same answer.
   assert.deepEqual(sortInboxEmails([...input].reverse(), NOW).map(item => item.id), order,

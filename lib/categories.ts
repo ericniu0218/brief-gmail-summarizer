@@ -1,5 +1,6 @@
 import type { Email } from './mail';
 import { hasImportantSignal } from './inbox-priority';
+import { inPrimaryTab } from './gmail-signals';
 
 /**
  * Shared navigation vocabulary and deterministic fallback rules. The sidebar, counts,
@@ -112,12 +113,21 @@ export function parseView(view:string):{section?:Section;tag?:Tag}{
   return {section,tag:tag as Tag|undefined};
 }
 
+/**
+ * Whether a message is on Gmail's own homepage: still in the inbox and on the Primary tab.
+ * The Inbox view mirrors that and nothing else; sorting belongs to Work, Personal and Noise.
+ * A record from before either fact was kept is shown rather than silently hidden.
+ */
+export function inGmailInbox(email:Pick<Email,'inInbox'|'gmailLabels'>){
+  return email.inInbox!==false&&inPrimaryTab(email.gmailLabels);
+}
+
 /** Combined parent views keep section mail that matches no subcategory. */
 export function selectEmails(emails:ReadonlyArray<Email|null|undefined>,view:string):Email[]{
   // Snapshots normally contain only complete records, but this read boundary discards
   // nullish entries before either returning Inbox or evaluating category properties.
   const present=emails.filter((email):email is Email=>email!=null);
-  if(view==='inbox')return present;
+  if(view==='inbox')return present.filter(inGmailInbox);
   const {section,tag}=parseView(view);
   if(!section)return present;
   const inSection=present.filter(email=>email.category===section);

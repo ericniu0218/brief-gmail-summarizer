@@ -1,3 +1,5 @@
+import { attachSenderFamiliarity } from './sender-familiarity';
+import { withSenderFamiliarity } from '@/lib/sender-familiarity';
 import { accessToken, emailFrom, getOwnedConnection, gmail } from './gmail';
 import { describeUnsubscribe } from './unsubscribe';
 import { hydrateDeferredBodies, normalizeMessage, type GmailMessage, type NormalizedMessage } from './message';
@@ -23,11 +25,18 @@ import type { Email } from '@/lib/mail';
 /** Cached messages carry the fingerprint and classifier version their result came from. */
 export type StoredEmail=Email&{
   fingerprint?:string;
+  senderFamiliarityDeferred?:boolean;
+  senderFamiliarityAttemptedAt?:number;
   analysisVersion?:string;
   /** Untouched classifier output. Displayed fields are always derived from this value. */
   automaticClassification?:Email['classification'];
   classificationSource?:'ai'|'deterministic';
   classificationPending?:boolean;
+  modelAttempts?:number;
+  modelRetryAt?:number;
+  modelRetryVersion?:string;
+  /** Last metadata-only check for a sent reply in this Gmail conversation. */
+  replyCheckedAt?:number;
   classifiedAt?:number;
   /** Full-mailbox scan that most recently observed this Gmail message. */
   syncGeneration?:string;
@@ -45,17 +54,66 @@ export type StoredEmail=Email&{
  * 3: contextual purpose checks and local rule upgrades.
  * 4: audit fixes — calendar-file dates, month-end and year rollover, every task per kind,
  *    sentence-scoped optional wording and meeting state, earned-record protection.
+ * 5: reply assessment — whether an email answer is owed, request by request, with its
+ *    channel, condition, urgency and evidence (lib/reply).
+ * 6: preserve the sender's signature for complete forwards.
+ * 7: recognize requests to redirect a payment to changed bank details.
+ * 8: keep Gmail's own tab, Important marker and star (lib/gmail-signals), and use them as
+ *    evidence in the rules, the model request and the importance ranking.
+ * 9: prior sent-mail evidence for existing correspondents.
+ * 10: attachment presence and full-recipient membership, including older mail.
  */
-export const CONTENT_VERSION=4;
+/** Another refresh of this mailbox is still running; it will bring the mail in, so this one stands down. */
+export class RefreshBusy extends HttpError{constructor(){super(409,'This inbox is already being refreshed.');}}
+
+export const CONTENT_VERSION=10;
+/** More rule-based stand-ins than this, after a model or prompt change, justify one full listing. */
+const MODEL_PASS_MIN_FALLBACK=48;
+/** How many of Gmail's newest inbox ids each refresh checks the Inbox view against. */
+const INBOX_MIRROR=500;
+/** How much of the newest mail a scan part-way through the mailbox checks for first. */
+const RECENT_FIRST=50;
 
 /** Whether a stored result came from the model. Older records carry only its version. */
 function fromModel(hit:Pick<StoredEmail,'classificationSource'|'analysisVersion'>|undefined){
   return !!hit&&(hit.classificationSource==='ai'||(!hit.classificationSource&&(hit.analysisVersion||'').startsWith('gemini:')));
 }
 
+/**
+ * The legacy snapshot's copy of a page. One D1 value is capped at about 2 MB, and a page of
+ * 100 newsletters is often larger, so the copy leaves out the message text and HTML that
+ * `mailbox_messages` already holds. If even that is too large, older readers fall back to
+ * the per-message rows, which every current reader prefers anyway.
+ */
+const SNAPSHOT_PAGE_BYTES=1_000_000;
+function snapshotPage(emails:StoredEmail[]):StoredEmail[]{
+  const slim=emails.map(email=>{
+    const copy:StoredEmail={...email,body:''};
+    delete copy.html;delete copy.quoted;delete copy.signature;
+    return copy;
+  });
+  return new TextEncoder().encode(JSON.stringify(slim)).byteLength<=SNAPSHOT_PAGE_BYTES?slim:[];
+}
+
 export type Snapshot={emails:StoredEmail[];ai:boolean;pending:number;skipped:number;analysisVersion:string;updated:number;limit:number;hasMore:boolean;
   /** AI-written wording for the daily digest's items. Ranking is recomputed on every read. */
-  digest?:Digest};
+  digest?:Digest;
+  inboxMirror?:{pageToken:string;generation:string;started:number};
+  /** Messages Gmail was too busy to hand over, fetched again by ID on the next refresh. */
+  fetchRetry?:{id:string;attempts:number}[]};
+/** Tries at a message Gmail keeps refusing as busy, before it is counted as unreadable. */
+const MAX_FETCH_ATTEMPTS=5;
+/** Most retried messages fetched in one refresh, and most remembered. */
+const FETCH_RETRY_BATCH=50;
+const FETCH_RETRY_KEPT=1000;
+/** A Gmail read that failed for a reason that may pass: busy, a server error, or a timeout. */
+class FetchFailure extends Error{
+  readonly transient:boolean;
+  constructor(cause:unknown){
+    super('Gmail read failed');
+    this.transient=cause instanceof HttpError?cause.status===429||cause.status>=500:true;
+  }
+}
 export async function summarizeInbox(emails:Email[],e:Runtime){
   try{return await summarize(emails,e);}
   catch{
@@ -75,9 +133,9 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
   // The token returned by this atomic update identifies both the connection and the
   // refresh that acquired the lease. Concurrent refreshes stop here with a conflict.
   // The lease is per account row, so refreshing one mailbox never blocks another.
-  const lock=await e.DB.prepare('UPDATE connections SET sync_lock = ? WHERE id = ? AND user_id = ? AND sync_lock < ? RETURNING token, sync_page_token, sync_generation, sync_skipped, sync_full_scan, backfill_complete, last_full_scan, content_version, recovery_needed')
-    .bind(leaseUntil,accountId,user,now).first<{token:string;sync_page_token:string|null;sync_generation:string|null;sync_skipped:number;sync_full_scan:number;backfill_complete:number;last_full_scan:number|null;content_version:number;recovery_needed:number}>();
-  if(!lock)throw new HttpError(409,'This inbox is already being refreshed.');
+  const lock=await e.DB.prepare('UPDATE connections SET sync_lock = ? WHERE id = ? AND user_id = ? AND sync_lock < ? RETURNING token, sync_page_token, sync_generation, sync_skipped, sync_full_scan, backfill_complete, last_full_scan, content_version, model_backfill_version, recovery_needed')
+    .bind(leaseUntil,accountId,user,now).first<{token:string;sync_page_token:string|null;sync_generation:string|null;sync_skipped:number;sync_full_scan:number;backfill_complete:number;last_full_scan:number|null;content_version:number;model_backfill_version:string|null;recovery_needed:number}>();
+  if(!lock)throw new RefreshBusy();
   // Long backfills renew their lease at each expensive boundary. The exact previous
   // expiry and credential must still match, so a stale or reconnected worker cannot
   // reclaim ownership after another refresh has taken over.
@@ -110,7 +168,18 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
     // own follow-up delete, which runs immediately. The recovery the same insert scheduled
     // restores anything that got through.
     await e.DB.prepare('DELETE FROM legacy_unsubscribe_guards WHERE account_id=? AND user_id=?').bind(accountId,user).run();
-    const fullScan=pageToken?lock.sync_full_scan!==0:recovering||lock.content_version<CONTENT_VERSION||!lock.backfill_complete||!lock.last_full_scan||now-lock.last_full_scan>=30*86400000;
+    // Fallback backfills may need a full pass. Failed older messages are retried below
+    // by ID in small batches, without listing the entire mailbox again.
+    const modelVersion=e.GEMINI_API_KEY?analysisVersion(e):null;
+    // A new model or prompt version only needs the full listing when many messages still
+    // carry rule-based stand-ins; a few are retried by ID on ordinary refreshes below. Mail
+    // already classified by an older model rotates through the bounded retry queue below.
+    const modelChanged=!pageToken&&!!modelVersion&&lock.model_backfill_version!==modelVersion;
+    const fallbackCount=modelChanged?(await e.DB.prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM mailbox_messages
+      WHERE account_id=? AND user_id=? AND COALESCE(json_extract(data,'$.classificationSource'),'deterministic')='deterministic' LIMIT ?)`)
+      .bind(accountId,user,MODEL_PASS_MIN_FALLBACK+1).first<{n:number}>())?.n||0:0;
+    const modelPass=modelChanged&&fallbackCount>MODEL_PASS_MIN_FALLBACK;
+    const fullScan=pageToken?lock.sync_full_scan!==0:modelPass||recovering||lock.content_version<CONTENT_VERSION||!lock.backfill_complete||!lock.last_full_scan||now-lock.last_full_scan>=30*86400000;
     const query=encodeURIComponent(`${fullScan?'':'newer_than:2d '}-in:sent -in:trash -in:spam -in:drafts`);
     let list:{messages?:{id:string}[];nextPageToken?:string};
     try{list=await gmail(`messages?maxResults=100&q=${query}${pageToken?`&pageToken=${encodeURIComponent(pageToken)}`:''}`,token);}
@@ -138,9 +207,64 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
         .bind(user,accountId,email.id,JSON.stringify(email),email.receivedAt||0,email.syncGeneration||'legacy',email.replied||sentInSnapshot.has(email.id)?1:0)));
     }
     const normalized:NormalizedMessage[]=[];
-    const refs=list.messages||[];
+    const page=list.messages||[];
+    // A scan part-way through the mailbox lists older pages, so mail that arrived since it
+    // began would wait for the last page. Each continuing page therefore also lists the
+    // newest mail and fetches anything not yet stored, ahead of the older page. Stored mail
+    // is not fetched again here, and a failed listing only delays new mail to the next page.
+    let arrived:{id:string}[]=[];
+    if(pageToken){
+      try{
+        const newest=await gmail<{messages?:{id:string}[]}>(`messages?maxResults=${RECENT_FIRST}&q=${encodeURIComponent('newer_than:2d -in:sent -in:trash -in:spam -in:drafts')}`,token);
+        const onPage=new Set(page.map(ref=>ref.id));
+        const ids=(newest.messages||[]).map(ref=>ref.id).filter(id=>!onPage.has(id));
+        const known=ids.length?await loadMessageMap(user,accountId,ids,e):new Map();
+        arrived=ids.filter(id=>!known.has(id)).map(id=>({id}));
+      }catch{console.error('Listing new mail failed; it will be fetched on the next refresh.');}
+    }
+    const listed=[...arrived,...page];
+    // The two-day Gmail query cannot see older mail whose model call failed during a
+    // backfill. Retry a bounded number of due fallback rows by ID on each incremental
+    // refresh. Backoff on each row prevents a permanently bad message from consuming an
+    // unbounded number of model calls or forcing another full mailbox listing.
+    const retryRows=!fullScan&&modelVersion?await e.DB.prepare(`SELECT message_id FROM mailbox_messages
+      WHERE account_id=? AND user_id=? AND COALESCE(json_extract(data,'$.classificationSource'),'deterministic')='deterministic'
+      AND COALESCE(json_extract(data,'$.modelRetryAt'),0)<=?
+      AND message_id NOT IN (SELECT value FROM json_each(?))
+      ORDER BY COALESCE(json_extract(data,'$.modelRetryAt'),0),received_at DESC LIMIT 12`)
+      .bind(accountId,user,now,JSON.stringify(listed.map(ref=>ref.id))).all<{message_id:string}>():undefined;
+    // Refresh stale AI answers gradually, preserving the old answer if this attempt fails.
+    const modelRefreshRows=modelVersion?await e.DB.prepare(`SELECT message_id FROM mailbox_messages
+      WHERE account_id=? AND user_id=?
+      AND (json_extract(data,'$.classificationSource')='ai' OR json_extract(data,'$.analysisVersion') LIKE 'gemini:%')
+      AND COALESCE(json_extract(data,'$.analysisVersion'),'')<>?
+      AND (COALESCE(json_extract(data,'$.modelRetryVersion'),'')<>? OR COALESCE(json_extract(data,'$.modelRetryAt'),0)<=?)
+      ORDER BY COALESCE(json_extract(data,'$.classifiedAt'),0),received_at DESC,message_id LIMIT 8`)
+      .bind(accountId,user,currentAnalysisVersion,currentAnalysisVersion,now).all<{message_id:string}>():undefined;
+    const modelRefreshIds=new Set((modelRefreshRows?.results||[]).map(row=>row.message_id));
+    // Deferred sender evidence rotates ahead of new senders and never forces a full listing.
+    const senderRows=await e.DB.prepare(`SELECT MIN(message_id) AS message_id FROM mailbox_messages
+      WHERE account_id=? AND user_id=? AND json_extract(data,'$.senderFamiliarityDeferred')=1
+      AND COALESCE(json_extract(data,'$.senderFamiliarityAttemptedAt'),0)<=?
+      GROUP BY lower(json_extract(data,'$.address'))
+      ORDER BY MIN(COALESCE(json_extract(data,'$.senderFamiliarityAttemptedAt'),0)),MIN(received_at) LIMIT 10`)
+      .bind(accountId,user,now-30*60000).all<{message_id:string}>();
+    const senderIds=(senderRows.results||[]).map(row=>row.message_id);
+    const retryIds=new Set((retryRows?.results||[]).map(row=>row.message_id));
+    // Messages Gmail was too busy to hand over last time. Waiting for the next monthly full
+    // listing would leave them missing for weeks, so they are asked for again by ID.
+    const fetchRetries=new Map<string,number>((Array.isArray(old?.fetchRetry)?old.fetchRetry:[])
+      .filter(entry=>entry&&typeof entry.id==='string'&&/^[a-zA-Z0-9_-]{1,150}$/.test(entry.id)&&Number.isInteger(entry.attempts))
+      .map(entry=>[entry.id,entry.attempts]));
+    const queued=new Set([...listed.map(ref=>ref.id),...retryIds,...modelRefreshIds,...senderIds]);
+    const fetchAgain=[...fetchRetries.keys()].filter(id=>!queued.has(id)).slice(0,FETCH_RETRY_BATCH);
+    const refs=[...new Set([...senderIds,...listed.map(ref=>ref.id),...retryIds,...modelRefreshIds,...fetchAgain])].map(id=>({id}));
+    // Retries not reached this time stay queued; each one this refresh asks for is decided below.
+    const nextFetchRetry=new Map([...fetchRetries].filter(([id])=>!refs.some(ref=>ref.id===id)));
+    const busyIds=new Set<string>();
     const cached=await loadMessageMap(user,accountId,refs.map(ref=>ref.id),e);
     const unreadableIds=new Set<string>();
+    const missingRetryIds=new Set<string>();
     let skipped=0;
     // Keep Gmail requests in small parallel groups so a refresh is fast without sending
     // an unbounded burst of full-message requests.
@@ -148,19 +272,39 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
       await renewLease();
       const chunk=refs.slice(i,i+6);
       const batch=await Promise.allSettled(chunk.map(async ({id})=>{
-        const raw=await gmail<GmailMessage>('messages/'+encodeURIComponent(id)+'?format=full',token);
-        await hydrateDeferredBodies(raw,attachmentId=>gmail(`messages/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}`,token));
+        let raw:GmailMessage;
+        try{
+          raw=await gmail<GmailMessage>('messages/'+encodeURIComponent(id)+'?format=full',token);
+          await hydrateDeferredBodies(raw,attachmentId=>gmail(`messages/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}`,token));
+        }catch(error){
+          // A message deleted since it was listed is simply gone, not a failure to retry.
+          if(error instanceof HttpError&&error.status===404)throw error;
+          throw new FetchFailure(error);
+        }
         return normalizeMessage(raw);
       }));
       for(const [index,result] of batch.entries()){
+        const id=chunk[index].id;
         if(result.status==='fulfilled')normalized.push(result.value);
-        else{skipped++;unreadableIds.add(chunk[index].id);}
+        else if((retryIds.has(id)||modelRefreshIds.has(id)||senderIds.includes(id))&&result.reason instanceof HttpError&&result.reason.status===404)
+          missingRetryIds.add(id);
+        else if(fetchRetries.has(id)&&result.reason instanceof HttpError&&result.reason.status===404){/* Deleted in Gmail. */}
+        else if(result.reason instanceof FetchFailure&&result.reason.transient&&(fetchRetries.get(id)||0)+1<MAX_FETCH_ATTEMPTS){
+          // Not counted as unreadable: it is asked for again on the next refresh.
+          nextFetchRetry.set(id,(fetchRetries.get(id)||0)+1);busyIds.add(id);
+        }
+        else{skipped++;unreadableIds.add(id);}
       }
     }
+    for(const id of missingRetryIds)
+      await e.DB.prepare('DELETE FROM mailbox_messages WHERE account_id=? AND user_id=? AND message_id=?').bind(accountId,user,id).run();
+    await renewLease();
+    await attachSenderFamiliarity(normalized,user,accountId,token,e,now);
+    await renewLease();
     const overrides=await loadOverrides(user,accountId,e,normalized.map(message=>message.id));
     const senderRules=await loadSenderRules(user,accountId,e);
     // Reuse a stored classification only when the content and the rules that produced it
-    // both still match. Reading or refreshing never triggers reclassification.
+    // both still match. Reading never triggers reclassification; refresh rotates stale versions.
     //
     // A model result and a rule-based one are kept apart, because they mean different
     // things. A model result under older rules keeps the model's facts and has only the
@@ -187,14 +331,19 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
         rechecked.set(message.id,updated);
         return updated;
       }
-      if(aiConfigured)return undefined;
+      if(aiConfigured){
+        // A repeatedly rejected message stays visible under the rules while retries
+        // back off; a new model/prompt version gets a fresh attempt immediately.
+        if(current&&hit.modelRetryVersion===currentAnalysisVersion&&(hit.modelRetryAt||0)>now)return automatic;
+        return undefined;
+      }
       if(current&&automatic.version===localVersion)return automatic;
       const updated=deterministicClassify(message,account);
       rechecked.set(message.id,updated);
       return updated;
     };
-    const fresh=normalized.filter(message=>!reusable(message));
-    // Only new or changed content crosses the model boundary.
+    const fresh=normalized.filter(message=>modelRefreshIds.has(message.id)||!reusable(message));
+    // New content and the bounded stale-version queue cross the model boundary.
     await renewLease();
     const {results,failures}=await classifyMessages(fresh,account,e);
     await renewLease();
@@ -215,6 +364,7 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
           classification={...local,processingStatus:failures.has(message.id)?'needs_review':local.processingStatus,
             uncertainty:failures.get(message.id)||local.uncertainty};
         }
+        classification=withSenderFamiliarity(classification,message);
         // The snapshot retains `classification` as the effective display value for old
         // clients, but `automaticClassification` is the clean cache used by every future
         // sync, mailbox read and reset. Manual intent can never contaminate that cache.
@@ -225,6 +375,8 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
         // Each stored message remembers its source mailbox so the combined view can
         // attribute it and every action can target the right account.
         pageEmails.push({...email,accountId,accountEmail:account,automaticClassification:classification,
+          senderFamiliarityDeferred:message.senderFamiliarityDeferred,senderFamiliarityAttemptedAt:message.senderFamiliarityAttemptedAt,
+          readerWasRecipient:[...message.to,...message.cc].some(party=>party.address.toLowerCase()===account.toLowerCase()),
           correctionRevision:manual?.revision??0,manuallyCorrected:manual?.active!==false&&!!manual,
           manualCorrection:manualCorrectionView(manual),
           senderJunkPreference:activeJunkPreference(senderRule),senderRuleRevision:senderRule?.revision??0,
@@ -234,7 +386,15 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
           // again under new rules keeps the version of the model that actually produced it.
           analysisVersion:results.has(message.id)?currentAnalysisVersion:stored?cached.get(message.id)!.analysisVersion||'':'',
           classificationSource:results.has(message.id)||(stored&&fromModel(cached.get(message.id)))?'ai':'deterministic',
-          classificationPending:failures.has(message.id),
+          classificationPending:failures.has(message.id)||!results.has(message.id)&&!!stored&&!!cached.get(message.id)?.classificationPending,
+          modelAttempts:failures.has(message.id)?Math.min((cached.get(message.id)?.modelRetryVersion===currentAnalysisVersion?cached.get(message.id)?.modelAttempts||0:0)+1,10):stored?cached.get(message.id)?.modelAttempts:0,
+          // Provider outages get another chance at the next scheduled refresh. Invalid
+          // individual answers back off exponentially, so one poison item stays bounded.
+          modelRetryAt:failures.has(message.id)?now+(failures.get(message.id)==='provider-unavailable'?30*60000
+            :Math.min(86400000,60000*2**Math.min((cached.get(message.id)?.modelRetryVersion===currentAnalysisVersion?cached.get(message.id)?.modelAttempts||0:0)+1,10)))
+            :stored?cached.get(message.id)?.modelRetryAt:undefined,
+          modelRetryVersion:failures.has(message.id)?currentAnalysisVersion:stored?cached.get(message.id)?.modelRetryVersion:undefined,
+          replyCheckedAt:cached.get(message.id)?.replyCheckedAt,
           classifiedAt:results.has(message.id)||!stored?Date.now():cached.get(message.id)?.classifiedAt,
           syncGeneration:generation,
           // Both come from one call, so the flag the older interface reads and the richer
@@ -251,7 +411,7 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
     // messages observed in this generation; this safely removes deleted or newly sent
     // mail without blanking the inbox during a partial scan.
     // Preserve the last readable copy of a malformed message and mark it seen in this scan.
-    for(const id of unreadableIds)if(cached.has(id))pageEmails.push({...cached.get(id)!,syncGeneration:generation});
+    for(const id of new Set([...unreadableIds,...busyIds]))if(cached.has(id))pageEmails.push({...cached.get(id)!,syncGeneration:generation});
     for(let i=0;i<pageEmails.length;i+=50){
       await renewLease();
       await e.DB.batch(pageEmails.slice(i,i+50).map(email=>
@@ -259,8 +419,69 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
       // nothing about what this mailbox should show: the sender still controls delivery, and
       // its receipts and account notices must keep arriving normally. Preserve a successful
       // reply recorded concurrently.
-      e.DB.prepare("INSERT INTO mailbox_messages (user_id,account_id,message_id,data,received_at,scan_generation,replied) VALUES (?,?,?,?,?,?,0) ON CONFLICT(account_id,message_id) DO UPDATE SET data=CASE WHEN mailbox_messages.replied=1 THEN json_set(excluded.data,'$.needsReply',json('false')) ELSE excluded.data END,received_at=excluded.received_at,scan_generation=excluded.scan_generation")
+      e.DB.prepare("INSERT INTO mailbox_messages (user_id,account_id,message_id,data,received_at,scan_generation,replied) VALUES (?,?,?,?,?,?,0) ON CONFLICT(account_id,message_id) DO UPDATE SET data=json_set(CASE WHEN mailbox_messages.replied=1 THEN json_set(excluded.data,'$.needsReply',json('false')) ELSE excluded.data END,'$.inboxGeneration',json_extract(mailbox_messages.data,'$.inboxGeneration')),received_at=excluded.received_at,scan_generation=excluded.scan_generation")
         .bind(user,accountId,email.id,JSON.stringify(email),email.receivedAt||0,generation)));
+    }
+    // Gmail replies written on another device never pass through this app's send route.
+    // Check a few unanswered conversations by metadata only, giving recent mail a short
+    // interval while older mail rotates through more slowly. Gmail's SENT label and its
+    // internal timestamp, not a sender-supplied header, determine what was answered.
+    const recentCutoff=now-14*86400000;
+    const dueThreads=await e.DB.prepare(`SELECT json_extract(data,'$.threadId') AS thread_id
+      FROM mailbox_messages WHERE account_id=? AND user_id=? AND replied=0 AND json_extract(data,'$.needsReply')=1
+      AND json_extract(data,'$.threadId') IS NOT NULL
+      AND COALESCE(json_extract(data,'$.replyCheckedAt'),0)<=CASE WHEN received_at>? THEN ? ELSE ? END
+      GROUP BY json_extract(data,'$.threadId')
+      ORDER BY MIN(COALESCE(json_extract(data,'$.replyCheckedAt'),0)),MAX(received_at) DESC LIMIT 8`)
+      .bind(accountId,user,recentCutoff,now-30*60000,now-6*3600000).all<{thread_id:string}>();
+    const threads=(dueThreads.results||[]).filter(row=>!!row.thread_id);
+    for(let i=0;i<threads.length;i+=4){
+      await renewLease();
+      const chunk=threads.slice(i,i+4);
+      const responses=await Promise.allSettled(chunk.map(row=>gmail<{messages?:{labelIds?:string[];internalDate?:string}[]}>(
+        `threads/${encodeURIComponent(row.thread_id)}?format=metadata&fields=messages(internalDate,labelIds)`,token,
+        {signal:AbortSignal.timeout(5000)})));
+      for(const [index,row] of chunk.entries()){
+        const response=responses[index];
+        let checkedAt=Date.now();
+        if(response.status==='fulfilled'){
+          const sentAt=(response.value.messages||[]).reduce((latest,message)=>{
+            const time=Number(message.internalDate);
+            return Array.isArray(message.labelIds)&&message.labelIds.includes('SENT')&&Number.isSafeInteger(time)&&time>0&&time<=Date.now()+300000
+              ?Math.max(latest,time):latest;
+          },0);
+          if(sentAt)await e.DB.prepare("UPDATE mailbox_messages SET replied=1,data=json_set(data,'$.needsReply',json('false')) WHERE account_id=? AND user_id=? AND json_extract(data,'$.threadId')=? AND received_at<=?")
+            .bind(accountId,user,row.thread_id,sentAt).run();
+        }else{
+          // A failed metadata check is retryable without failing the inbox refresh.
+          checkedAt-=30*60000;
+        }
+        await e.DB.prepare("UPDATE mailbox_messages SET data=json_set(data,'$.replyCheckedAt',?) WHERE account_id=? AND user_id=? AND json_extract(data,'$.threadId')=?")
+          .bind(checkedAt,accountId,user,row.thread_id).run();
+      }
+    }
+    // Reconcile the entire Inbox across refreshes. Unseen mail is cleared only after the
+    // final page; rows fetched during the scan retain the marker that a prior page set.
+    await renewLease();
+    let inboxMirror=old?.inboxMirror;
+    try{
+      const cursor=inboxMirror&&typeof inboxMirror.pageToken==='string'&&typeof inboxMirror.generation==='string'&&Number.isSafeInteger(inboxMirror.started)?inboxMirror:undefined;
+      const mirrorGeneration=cursor?.generation||crypto.randomUUID();
+      const started=cursor?.started??now;
+      const inbox=await gmail<{messages?:{id:string}[];nextPageToken?:string}>(
+        `messages?labelIds=INBOX&maxResults=${INBOX_MIRROR}&fields=messages(id),nextPageToken${cursor?`&pageToken=${encodeURIComponent(cursor.pageToken)}`:''}`,token,{signal:AbortSignal.timeout(10000)});
+      const ids=JSON.stringify((inbox.messages||[]).map(message=>message.id));
+      await e.DB.prepare(`UPDATE mailbox_messages SET data=json_set(data,'$.inInbox',json('true'),'$.inboxGeneration',?)
+        WHERE account_id=? AND user_id=? AND message_id IN (SELECT value FROM json_each(?))`)
+        .bind(mirrorGeneration,accountId,user,ids).run();
+      if(!inbox.nextPageToken)await e.DB.prepare(`UPDATE mailbox_messages SET data=json_set(data,'$.inInbox',json('false'))
+        WHERE account_id=? AND user_id=? AND COALESCE(json_extract(data,'$.inboxGeneration'),'')<>?
+        AND received_at<=?`)
+        .bind(accountId,user,mirrorGeneration,started).run();
+      inboxMirror=inbox.nextPageToken?{pageToken:inbox.nextPageToken,generation:mirrorGeneration,started}:undefined;
+    }catch(error){
+      if(error instanceof HttpError&&error.status===400)inboxMirror=undefined;
+      console.error('Inbox listing failed; keeping the last known inbox.');
     }
     await renewLease();
     if(fullScan&&!list.nextPageToken){
@@ -282,7 +503,7 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
     catch{console.error('Digest wording failed; keeping the previous digest.');}
     // Keep only this bounded page in the legacy snapshot for rolling compatibility. The
     // complete mailbox lives in `mailbox_messages` and is never serialized as one blob.
-    const snapshot:Snapshot={emails:pageEmails,ai:pending===0&&!!e.GEMINI_API_KEY,pending,skipped:totalSkipped,analysisVersion:currentAnalysisVersion,updated:Date.now(),limit:totals?.total||0,hasMore:!!list.nextPageToken,...(digest?{digest}:{})};
+    const snapshot:Snapshot={emails:snapshotPage(pageEmails),ai:pending===0&&!!e.GEMINI_API_KEY,pending,skipped:totalSkipped,analysisVersion:currentAnalysisVersion,updated:Date.now(),limit:totals?.total||0,hasMore:!!list.nextPageToken,...(inboxMirror?{inboxMirror}:{}),...(digest?{digest}:{}),...(nextFetchRetry.size?{fetchRetry:[...nextFetchRetry].slice(-FETCH_RETRY_KEPT).map(([id,attempts])=>({id,attempts}))}:{})};
     await renewLease();
     // Both the lease and the encrypted credential identify this refresh's owner.
     // A reconnect changes the credential even if it renews the same mailbox.
@@ -293,10 +514,11 @@ export async function syncInbox(user:string,accountId:string,e:Runtime) {
       previous
         ?e.DB.prepare('UPDATE snapshots SET data=?, updated=?, revision=revision+1 WHERE account_id=? AND user_id=? AND revision=? AND EXISTS (SELECT 1 FROM connections WHERE id=? AND user_id=? AND token=? AND sync_lock=? AND sync_lock>?)').bind(JSON.stringify(snapshot),snapshot.updated,accountId,user,previous.revision,accountId,user,lock.token,leaseUntil,snapshot.updated)
         :e.DB.prepare('INSERT INTO snapshots (account_id,user_id,data,updated,revision) SELECT ?,?,?,?,0 WHERE EXISTS (SELECT 1 FROM connections WHERE id=? AND user_id=? AND token=? AND sync_lock=? AND sync_lock>?) ON CONFLICT(account_id) DO NOTHING').bind(accountId,user,JSON.stringify(snapshot),snapshot.updated,accountId,user,lock.token,leaseUntil,snapshot.updated),
-      e.DB.prepare('UPDATE connections SET last_sync=?,sync_lock=0,error=NULL,sync_page_token=?,sync_generation=?,sync_skipped=?,sync_full_scan=?,backfill_complete=?,last_full_scan=?,content_version=?,recovery_needed=MAX(recovery_needed-?,0) WHERE id=? AND user_id=? AND token=? AND sync_lock=? AND sync_lock>?')
+      e.DB.prepare('UPDATE connections SET last_sync=?,sync_lock=0,error=NULL,sync_page_token=?,sync_generation=?,sync_skipped=?,sync_full_scan=?,backfill_complete=?,last_full_scan=?,content_version=?,model_backfill_version=?,recovery_needed=MAX(recovery_needed-?,0) WHERE id=? AND user_id=? AND token=? AND sync_lock=? AND sync_lock>?')
         .bind(snapshot.updated,list.nextPageToken||null,list.nextPageToken?generation:null,list.nextPageToken?totalSkipped:0,fullScan?1:0,
           fullScan&&!list.nextPageToken?1:lock.backfill_complete,fullScan&&!list.nextPageToken?snapshot.updated:lock.last_full_scan,
           fullScan&&!list.nextPageToken?CONTENT_VERSION:lock.content_version,
+          fullScan&&!list.nextPageToken||modelChanged&&!modelPass?modelVersion:lock.model_backfill_version,
           // Cleared only by a full scan that reached its last page, and only by the number
           // of requests it saw at the start. This write already requires the lease and the
           // credential to be unchanged, so an interrupted or superseded recovery leaves the

@@ -10,9 +10,12 @@ export type Email = {
   tags?: Tag[];
   /** Quoted history, kept separate so old requests are not read as new tasks. */
   quoted?: string;
+  /** Sender's signature, separate from the newest message text. */
+  signature?: string;
   /** Original untrusted rich body, displayed only inside the sandboxed email frame. */
   html?: string;
   contentComplete?: boolean;
+  hasAttachments?: boolean;
   incompleteReasons?: string[];
   classification?: Classification;
   /** Revision of this message's persisted manual intent; zero means no row exists yet. */
@@ -25,6 +28,7 @@ export type Email = {
     removeTags:Tag[];
     junkPreference?:'junk'|'not-junk';
     obligationStates:Record<string,import('./classification').ObligationState>;
+    replyPreference?:'answered'|'not-needed';
   };
   automaticClassificationAvailable?: boolean;
   senderJunkPreference?:'junk'|'not-junk';
@@ -32,11 +36,25 @@ export type Email = {
   receivedAt?: number; messageId?: string; unsubscribe?: string; oneClick?: boolean;
   /** Other people on the original message, kept so a reply-all can show who it would copy. */
   to?: string[]; cc?: string[];
+  /** Computed from all recipients before the display lists are capped. */
+  readerWasRecipient?: boolean;
+  /** Validated Reply-To address, when it differs from From, for an accurate reply-all preview. */
+  replyTo?: string;
   /** What the app can do about this message's newsletter; see lib/unsubscribe. */
   unsubscribeCapability?: import('./unsubscribe').UnsubscribeCapability;
+  /** A reply to this message was sent from this app (a recorded send, never a draft). */
+  replied?: boolean;
+  /** An earlier request in this Gmail conversation was covered by a manual answered mark. */
+  manualThreadAnswered?: boolean;
   /** The newsletter this message belongs to, when it named one. Two lists from one sender
    *  have different values, so one control never implies it covers both. */
   listId?: string;
+  /** Gmail's own tab, Important marker and star for this message; see lib/gmail-signals.
+   *  Absent on records stored before they were kept, which is not the same as none. */
+  senderFamiliarity?: import('./sender-familiarity').SenderFamiliarity;
+  gmailLabels?: import('./gmail-signals').GmailSignal[];
+  /** Whether the message is in Gmail's inbox now (not archived). Absent when never recorded. */
+  inInbox?: boolean;
 };
 // These deterministic classifications keep the demo useful when Gemini is unavailable.
 // AI replaces them with richer summaries and labels when `/api/demo` succeeds.

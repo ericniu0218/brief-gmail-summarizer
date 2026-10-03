@@ -8,10 +8,12 @@ import { GET as connectionStatus } from '../app/api/connection/route';
 import { GET as mailbox } from '../app/api/mailbox/route';
 import { POST as syncMailbox } from '../app/api/sync/route';
 import { loadConnectedInbox, type InboxSnapshot } from '../lib/inbox-client';
+import { analysisVersion } from '../server/ai';
 import { CONTENT_VERSION, syncInbox } from '../server/sync';
-import { loadMessages, snapshotSentIds } from '../server/messages';
+import { loadMessages, markMessageReplied, snapshotSentIds } from '../server/messages';
 import { POST as unsubscribeRoute } from '../app/api/unsubscribe/route';
 import { POST as replyRoute } from '../app/api/reply/route';
+import { POST as classificationRoute } from '../app/api/classification/route';
 import { POST as disconnectRoute } from '../app/api/disconnect/route';
 import {
   decrypt,
@@ -34,7 +36,8 @@ let paging: 'done' | 'more';
 /** Lets a test choose what the newsletter service answers, and when. */
 let provider: { status: number; delay?: { promise: Promise<void>; resolve: () => void }; started?: { promise: Promise<void>; resolve: () => void } };
 /** The messages Gmail reports, and the headers each carries. */
-let inbox: { id: string; from?: string; headers?: [string, string][] }[];
+let inbox: { id: string; from?: string; headers?: [string, string][]; body?:string; threadId?:string; receivedAt?:number }[];
+let sentThreads:Record<string,{labelIds:string[];internalDate:string}[]>;
 
 beforeEach(() => {
   storage = database();
@@ -47,7 +50,7 @@ beforeEach(() => {
   };
   globalThis.__briefTestEnv = env;
   globalThis.__briefTestHeaders = new Headers({
-    'oai-authenticated-user-id': 'user-a',
+    'x-brief-identity-secret':'test-ingress-secret-for-authenticated-proxy', 'oai-authenticated-user-id': 'user-a',
     'oai-authenticated-user-email': 'a@example.com',
   });
   profileEmail = 'Me@Example.com';
@@ -55,6 +58,7 @@ beforeEach(() => {
   paging = 'done';
   provider = { status: 200 };
   inbox = [{ id: 'message' }];
+  sentThreads={};
   globalThis.fetch = async (input, init) => {
     const url = requestUrl(input);
     requests.push({ url, init });
@@ -70,12 +74,15 @@ beforeEach(() => {
     }
     if (url.endsWith('/users/me/profile'))
       return Response.json({ emailAddress: profileEmail });
+    if (url.includes('/users/me/messages?labelIds=SENT'))return Response.json({messages:[]});
     if (url.includes('/users/me/messages?maxResults=100&q='))
       return Response.json(
         paging === 'more'
           ? { messages: inbox.map((m) => ({ id: m.id })), nextPageToken: 'next-page' }
           : { messages: inbox.map((m) => ({ id: m.id })) },
       );
+    const thread=/\/users\/me\/threads\/([^?]+)\?format=metadata/.exec(url)?.[1];
+    if(thread)return Response.json({id:thread,messages:sentThreads[decodeURIComponent(thread)]||[]});
     const wanted = /\/users\/me\/messages\/([^?]+)\?format=full/.exec(url)?.[1];
     if (wanted) {
       const described = inbox.find((m) => m.id === wanted);
@@ -90,9 +97,9 @@ beforeEach(() => {
       ];
       return Response.json({
         id: described.id,
-        threadId: 'thread-' + described.id,
-        snippet: 'Hello',
-        internalDate: '1788960000000',
+        threadId: described.threadId||'thread-' + described.id,
+        snippet: described.body||'Hello',
+        internalDate: String(described.receivedAt||1788960000000),
         labelIds: ['INBOX'],
         payload: {
           mimeType: 'text/plain',
@@ -101,7 +108,7 @@ beforeEach(() => {
             { name: 'Subject', value: 'Hello' },
             ...headers.map(([name, value]) => ({ name, value })),
           ],
-          body: { data: encode('Hello') },
+          body: { data: encode(described.body||'Hello') },
         },
       });
     }
@@ -1634,11 +1641,11 @@ void test('a model result from older rules is rechecked locally; a current one i
     .run(JSON.stringify({ ...data, analysisVersion: older,
       automaticClassification: { ...data.automaticClassification, version: 'policy-2026-09-22-1' } }), 'message');
   await syncInbox('user-a', 'user-a', env);
-  assert.equal(calls, 1, 'unchanged mail is rechecked locally without a mailbox-wide AI bill');
+  assert.equal(calls, 2, 'an older prompt is refreshed through the bounded queue');
   assert.equal(stored().classificationSource, 'ai', 'the model’s result is kept, not replaced by the rule-based one');
-  assert.equal(stored().analysisVersion, older, 'the version names the model call that actually happened');
+  assert.equal(stored().analysisVersion, analysisVersion(env), 'the new version names the successful refresh');
   await syncInbox('user-a', 'user-a', env);
-  assert.equal(calls, 1, 'once rechecked, the result is reused');
+  assert.equal(calls, 2, 'once refreshed, the result is reused');
 });
 
 void test('an uncertain unsubscribe can be retried only after an explicit confirmation',async()=>{
@@ -1805,7 +1812,7 @@ const storedMessage = () => JSON.parse((storage.sql.prepare('SELECT data FROM ma
   .get('message') as { data: string }).data) as { classificationSource: string; analysisVersion: string; needsReply: boolean;
   automaticClassification: { obligations: { kind: string; required: boolean }[]; replyRequired: boolean } };
 
-void test('after a model outage, the next sync asks the model again', async () => {
+void test('after a model outage, retries back off and a due retry reaches the recovered model', async () => {
   env.GEMINI_API_KEY = 'test-gemini-key';
   await seed();
   let failing = true;
@@ -1816,6 +1823,9 @@ void test('after a model outage, the next sync asks the model again', async () =
   assert.equal(storedMessage().classificationSource, 'deterministic');
   const failedCalls = model.calls;
   failing = false;
+  await syncInbox('user-a', 'user-a', env);
+  assert.equal(model.calls, failedCalls, 'an immediate refresh does not repeat the failed call');
+  storage.sql.prepare("UPDATE mailbox_messages SET data=json_set(data,'$.modelRetryAt',0) WHERE account_id=?").run('user-a');
   const second = await syncInbox('user-a', 'user-a', env);
   assert.ok(model.calls > failedCalls, 'the stand-in result is sent to the recovered model');
   assert.equal(second.pending, 0);
@@ -1823,6 +1833,127 @@ void test('after a model outage, the next sync asks the model again', async () =
   const settled = model.calls;
   await syncInbox('user-a', 'user-a', env);
   assert.equal(model.calls, settled, 'and then it is reused');
+});
+
+void test('a permanently rejected model result cannot force repeated full Gmail scans', async () => {
+  env.GEMINI_API_KEY='test-gemini-key';
+  await seed();
+  const model=modelStub(()=>new Response('unavailable',{status:503}));
+  await syncInbox('user-a','user-a',env);
+  const calls=model.calls;
+  const before=requests.length;
+  await syncInbox('user-a','user-a',env);
+  assert.equal(model.calls,calls,'the failed item waits for its retry time');
+  const next=requests.slice(before).find(request=>request.url.includes('/messages?maxResults=100&q='));
+  assert.ok(next?.url.includes('newer_than%3A2d'),'the next refresh uses the incremental Gmail window');
+});
+
+void test('a scan part-way through the mailbox fetches newly arrived mail first', async () => {
+  inbox=[{id:'old-1'},{id:'old-2'},{id:'new-1'}];
+  paging='more';
+  await seed();
+  const provider=globalThis.fetch;
+  const fetched:string[]=[];
+  globalThis.fetch=async(input,init)=>{
+    const url=requestUrl(input);
+    // Every page of the scan holds older mail; only the newest-mail listing sees new-1.
+    if(url.includes('/users/me/messages?maxResults=100&q='))
+      return Response.json({messages:[{id:'old-1'},{id:'old-2'}],nextPageToken:'next-page'});
+    if(url.includes('/users/me/messages?maxResults=50&q='))
+      return Response.json({messages:[{id:'new-1'},{id:'old-1'}]});
+    const full=/\/users\/me\/messages\/([^?]+)\?format=full/.exec(url)?.[1];
+    if(full)fetched.push(full);
+    return provider(input,init);
+  };
+  await syncInbox('user-a','user-a',env);
+  assert.deepEqual(fetched,['old-1','old-2'],'a fresh scan starts at the newest page, so nothing extra is listed');
+  fetched.length=0;
+  const continued=await syncInbox('user-a','user-a',env);
+  assert.equal(fetched[0],'new-1','new mail is fetched ahead of the older page');
+  assert.equal(fetched.filter(id=>id==='new-1').length,1);
+  assert.ok(continued.emails.some(email=>email.id==='new-1'),'and is stored with this page');
+  fetched.length=0;
+  await syncInbox('user-a','user-a',env);
+  assert.ok(!fetched.includes('new-1'),'stored mail is not fetched again by the newest-mail check');
+});
+
+void test('a mailbox already being refreshed is reported as deferred, never as a failure', async () => {
+  inbox=[{id:'m1'}];
+  await seed();
+  await seed('user-a','busy@example.com',Date.now()+600000,'busy-account');
+  const response=await syncMailbox(new Request(`${env.APP_URL}/api/sync`,{method:'POST',headers:{origin:env.APP_URL!,'Content-Type':'application/json'},body:JSON.stringify({explicit:true})}));
+  assert.equal(response.status,200);
+  const body=await response.json() as {refreshed:number;failed:number;failures:unknown[];deferred:{accountId:string;email:string;reason:string}[]};
+  assert.equal(body.refreshed,1,'the free mailbox refreshed');
+  assert.deepEqual([body.failed,body.failures],[0,[]],'nothing failed');
+  assert.deepEqual(body.deferred,[{accountId:'busy-account',email:'busy@example.com',reason:'busy'}]);
+  const real=storage.sql.prepare('SELECT error FROM connections WHERE id=?').get('busy-account') as {error:string|null};
+  assert.equal(real.error,null,'and no error is recorded on it');
+});
+
+void test('the Inbox mirrors Gmail: mail archived there leaves it on the next refresh', async () => {
+  inbox=[{id:'kept'},{id:'archived'}];
+  await seed();
+  const provider=globalThis.fetch;
+  let gmailInbox:string[]|undefined=['kept','archived'];
+  let quiet=false;
+  globalThis.fetch=async(input,init)=>{
+    const url=requestUrl(input);
+    if(url.includes('/users/me/messages?labelIds=INBOX'))
+      return gmailInbox?Response.json({messages:gmailInbox.map(id=>({id}))}):new Response('bad request',{status:400});
+    // Once both messages are older than the two-day window, refreshes no longer fetch them.
+    if(quiet&&url.includes('/users/me/messages?maxResults=100&q='))return Response.json({messages:[]});
+    return provider(input,init);
+  };
+  const state=()=>Object.fromEntries((storage.sql.prepare("SELECT message_id, json_extract(data,'$.inInbox') AS inbox FROM mailbox_messages WHERE account_id=?")
+    .all('user-a') as {message_id:string;inbox:number}[]).map(row=>[row.message_id,row.inbox]));
+  await syncInbox('user-a','user-a',env);
+  assert.deepEqual(state(),{kept:1,archived:1});
+  // Archived in Gmail after the window passed: only the inbox listing can say it left.
+  quiet=true;
+  gmailInbox=['kept'];
+  const mirrored=await syncInbox('user-a','user-a',env);
+  assert.deepEqual(state(),{kept:1,archived:0});
+  assert.equal(mirrored.emails.find(email=>email.id==='archived')?.inInbox,false,'the refresh returns the mirrored state');
+  // A failed listing keeps the last known inbox instead of emptying or refilling it.
+  gmailInbox=undefined;
+  await syncInbox('user-a','user-a',env);
+  assert.deepEqual(state(),{kept:1,archived:0});
+});
+
+void test('older fallback mail is upgraded in bounded batches after a model outage', async () => {
+  env.GEMINI_API_KEY='test-gemini-key';
+  inbox=Array.from({length:10},(_,index)=>({id:`older-${index}`}));
+  await seed();
+  let failing=true;
+  const model=modelStub(ids=>failing?new Response('unavailable',{status:503}):greeting(ids));
+  await syncInbox('user-a','user-a',env);
+  const firstRetry=storage.sql.prepare("SELECT json_extract(data,'$.modelRetryAt') AS retry FROM mailbox_messages WHERE message_id=?").get('older-0') as {retry:number};
+  assert.ok(firstRetry.retry<=Date.now()+30*60000,'a provider outage is retried at the next scheduled refresh');
+  failing=false;
+  // The normal incremental Gmail listing correctly omits these old messages. The
+  // retry queue must fetch their IDs directly once each message's backoff expires.
+  const provider=globalThis.fetch;
+  const queries:string[]=[];
+  globalThis.fetch=async(input,init)=>{
+    const url=requestUrl(input);
+    // Mailbox scans only; the inbox mirror's id listing is not one.
+    if(url.includes('/users/me/messages?')&&!url.includes('labelIds=INBOX')&&!url.includes('labelIds=SENT')){
+      queries.push(new URL(url).searchParams.get('q')||'');
+      if(queries.at(-1)?.includes('newer_than:2d'))return Response.json({messages:[]});
+    }
+    return provider(input,init);
+  };
+  storage.sql.prepare("UPDATE mailbox_messages SET data=json_set(data,'$.modelRetryAt',0) WHERE account_id=?").run('user-a');
+  const before=requests.length;
+  const recovered=await syncInbox('user-a','user-a',env);
+  const queried=requests.slice(before);
+  assert.deepEqual(queries.length,1);
+  assert.ok(queries[0].includes('newer_than:2d'));
+  assert.equal(queried.filter(request=>request.url.includes('/messages/older-')&&request.url.includes('format=full')).length,10);
+  assert.equal(model.calls>0,true);
+  assert.equal(recovered.pending,0);
+  assert.equal(storage.sql.prepare("SELECT COUNT(*) AS n FROM mailbox_messages WHERE account_id=? AND json_extract(data,'$.classificationSource')='ai'").get('user-a')?.n,10);
 });
 
 void test('adding a model key later reaches mail classified without one', async () => {
@@ -1836,6 +1967,58 @@ void test('adding a model key later reaches mail classified without one', async 
   await syncInbox('user-a', 'user-a', env);
   assert.equal(model.calls, 1);
   assert.equal(storedMessage().classificationSource, 'ai');
+});
+
+void test('enabling AI revisits fallback mail outside the incremental window', async () => {
+  await seed();
+  await syncInbox('user-a', 'user-a', env);
+  const provider = globalThis.fetch;
+  const queries: string[] = [];
+  // Gmail correctly excludes this older message from a two-day incremental query.
+  globalThis.fetch = async (input, init) => {
+    const url = requestUrl(input);
+    if (url.includes('/users/me/messages?') && !url.includes('labelIds=INBOX')&&!url.includes('labelIds=SENT')) {
+      const query = new URL(url).searchParams.get('q') || '';
+      queries.push(query);
+      if (query.includes('newer_than:2d')) return Response.json({ messages: [] });
+    }
+    return provider(input, init);
+  };
+  env.GEMINI_API_KEY = 'test-gemini-key';
+  const model = modelStub(greeting);
+  await syncInbox('user-a', 'user-a', env);
+  assert.ok(queries[0].includes('newer_than:2d'), 'one fallback message does not justify listing the whole mailbox');
+  assert.equal(model.calls, 1, 'it is fetched by ID and sent to the model');
+  assert.equal(storedMessage().classificationSource, 'ai');
+  await syncInbox('user-a', 'user-a', env);
+  assert.ok(queries[1].includes('newer_than:2d'), 'and refreshes stay incremental');
+  assert.equal(model.calls, 1, 'already classified mail is not sent again');
+});
+
+void test('a prompt change re-lists the mailbox only when many messages still lack a model result', async () => {
+  await seed();
+  inbox = Array.from({ length: 60 }, (_, index) => ({ id: `older-${index}` }));
+  await syncInbox('user-a', 'user-a', env);
+  const provider = globalThis.fetch;
+  const queries: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    const url = requestUrl(input);
+    if (url.includes('/users/me/messages?') && !url.includes('labelIds=INBOX')&&!url.includes('labelIds=SENT')) queries.push(new URL(url).searchParams.get('q') || '');
+    return provider(input, init);
+  };
+  env.GEMINI_API_KEY = 'test-gemini-key';
+  const model = modelStub(greeting);
+  await syncInbox('user-a', 'user-a', env);
+  assert.ok(!queries[0].includes('newer_than'), 'sixty stand-ins are reached in one full pass');
+  assert.equal(storage.sql.prepare("SELECT COUNT(*) AS n FROM mailbox_messages WHERE account_id=? AND json_extract(data,'$.classificationSource')='ai'").get('user-a')?.n, 60);
+  // Everything now has a model result. A new prompt version must not download it all again.
+  env.GEMINI_MODEL = 'gemini-next';
+  const calls = model.calls;
+  await syncInbox('user-a', 'user-a', env);
+  assert.ok(queries[1].includes('newer_than:2d'), 'a prompt or model change alone stays incremental');
+  assert.equal(model.calls, calls+1, 'eight stale model results are refreshed in one batch');
+  assert.equal(storage.sql.prepare("SELECT COUNT(*) AS n FROM mailbox_messages WHERE json_extract(data,'$.analysisVersion')=?").get(analysisVersion(env))?.n,8);
+  assert.equal((row('connections') as { model_backfill_version: string }).model_backfill_version, 'gemini:gemini-next:' + (row('connections') as { model_backfill_version: string }).model_backfill_version.split(':').slice(2).join(':'), 'the new version is recorded');
 });
 
 void test('a rule upgrade keeps a request only the model recognised', async () => {
@@ -1863,7 +2046,7 @@ void test('a rule upgrade keeps a request only the model recognised', async () =
   const obligations = data.automaticClassification.obligations.map((o) => ({ ...o, required: false, commercial: true,
     uncertainty: 'Optional commercial call to action.' }));
   storage.sql.prepare('UPDATE mailbox_messages SET data=? WHERE message_id=?').run(JSON.stringify({ ...data,
-    analysisVersion: 'gemini:gemini-3.5-flash-lite:2026-09-21-categories',
+    analysisVersion: analysisVersion(env),
     automaticClassification: { ...data.automaticClassification, obligations, version: 'policy-2026-09-22-1' } }), 'message');
   await syncInbox('user-a', 'user-a', env);
   assert.equal(model.calls, 1, 'no second model call');
@@ -1964,4 +2147,289 @@ void test('a model result stored before the source field existed is still treate
   await syncInbox('user-a', 'user-a', env);
   assert.equal(storedMessage().classificationSource, 'ai');
   assert.equal(storedMessage().automaticClassification.obligations.length, 1, 'the model’s request is not replaced by the rule-based result');
+});
+
+// ── Reply state through sends, refreshes, upgrades and accounts ──────────────
+
+/** Gmail serves `body` as the message text, and accepts drafts and sends. */
+function gmailWithBody(body: string, outcome: { send: 'ok' | 'refused' } = { send: 'ok' }) {
+  const provider = globalThis.fetch;
+  const sent: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    const url = requestUrl(input);
+    if (url.endsWith('/messages/send')) {
+      if (outcome.send === 'refused') return new Response('bad request', { status: 400 });
+      sent.push(url); return Response.json({ id: 'sent-' + sent.length });
+    }
+    if (url.endsWith('/drafts')) return Response.json({ id: 'draft-1' });
+    const response = await provider(input, init);
+    if (!/\/messages\/[^/?]+\?format=full/.test(url)) return response;
+    const message = await response.json() as { payload: { body: { data: string } } };
+    message.payload.body.data = encode(body);
+    return Response.json(message);
+  };
+  return { sent, restore: () => { globalThis.fetch = provider; } };
+}
+const replyAs = (action: 'draft' | 'send', accountId = 'user-a', id = 'message') => replyRoute(new Request(`${env.APP_URL}/api/reply`, {
+  method: 'POST', headers: { origin: env.APP_URL!, 'Content-Type': 'application/json' },
+  body: JSON.stringify({ id, accountId, action, body: `Reply ${action} ${Math.random()}` }) }));
+async function needsReply(accountId = 'user-a', id = 'message') {
+  const view = await (await mailbox(mailboxRequest(accountId))).json() as { emails: { id: string; needsReply: boolean; replied?: boolean }[] };
+  return view.emails.find((email) => email.id === id);
+}
+
+void test('a draft or a refused send leaves the reply pending; a send clears it through later refreshes', async () => {
+  await seed();
+  inbox = [{ id: 'message', headers: [] }];
+  const gmail = gmailWithBody('Could you send the signed contract by Friday?');
+  await syncInbox('user-a', 'user-a', env);
+  assert.equal((await needsReply())?.needsReply, true);
+  assert.equal((await replyAs('draft')).status, 200);
+  assert.equal((await needsReply())?.needsReply, true, 'saving a draft is not replying');
+  gmail.restore();
+  const refused = gmailWithBody('Could you send the signed contract by Friday?', { send: 'refused' });
+  assert.notEqual((await replyAs('send')).status, 200);
+  assert.equal((await needsReply())?.needsReply, true, 'a refused send is not a reply');
+  refused.restore();
+  gmailWithBody('Could you send the signed contract by Friday?');
+  assert.equal((await replyAs('send')).status, 200);
+  assert.equal((await needsReply())?.needsReply, false);
+  await syncInbox('user-a', 'user-a', env);
+  assert.equal((await needsReply())?.needsReply, false, 'a refresh keeps the recorded send');
+});
+
+void test('answering a conversation clears earlier requests but leaves later ones open', async () => {
+  await seed();
+  for(const [id,at] of [['old',100],['answered',200],['later',300]] as const)
+    storage.sql.prepare('INSERT INTO mailbox_messages (user_id,account_id,message_id,data,received_at,scan_generation,replied) VALUES (?,?,?,?,?,?,0)')
+      .run('user-a','user-a',id,JSON.stringify({id,threadId:'same-thread',needsReply:true}),at,'test');
+  assert.equal(await markMessageReplied('user-a','user-a','answered',env),true);
+  const rows=storage.sql.prepare('SELECT message_id,replied FROM mailbox_messages ORDER BY received_at').all() as {message_id:string;replied:number}[];
+  assert.deepEqual(rows.map(row=>[row.message_id,row.replied]),[['old',1],['answered',1],['later',0]]);
+});
+
+void test('a reply written in Gmail clears earlier requests but leaves later mail open', async () => {
+  await seed();
+  const start=Date.now()-3600000;
+  inbox=[
+    {id:'old',threadId:'conversation',receivedAt:start,body:'Please reply with your availability.'},
+    {id:'latest',threadId:'conversation',receivedAt:start+60000,body:'Please reply with your decision.'},
+  ];
+  sentThreads.conversation=[{labelIds:['SENT'],internalDate:String(start+30000)}];
+  await syncInbox('user-a','user-a',env);
+  assert.equal((await needsReply('user-a','old'))?.needsReply,false);
+  assert.equal((await needsReply('user-a','latest'))?.needsReply,true);
+  sentThreads.conversation.push({labelIds:['SENT'],internalDate:String(start+120000)});
+  storage.sql.prepare("UPDATE mailbox_messages SET data=json_set(data,'$.replyCheckedAt',0) WHERE account_id=?").run('user-a');
+  await syncInbox('user-a','user-a',env);
+  assert.equal((await needsReply('user-a','latest'))?.needsReply,false);
+  assert.equal(storage.sql.prepare("SELECT COUNT(*) AS n FROM mailbox_messages WHERE account_id=? AND replied=1").get('user-a')?.n,2);
+  assert.equal(requests.filter(request=>request.url.includes('/threads/conversation?format=metadata')).length,2);
+});
+
+void test('marking a conversation answered clears older requests and undo restores them', async () => {
+  await seed();
+  const start=Date.now()-3600000;
+  inbox=[
+    {id:'old',threadId:'conversation',receivedAt:start,body:'Please reply with your availability.'},
+    {id:'latest',threadId:'conversation',receivedAt:start+60000,body:'Please reply with your decision.'},
+  ];
+  await syncInbox('user-a','user-a',env);
+  assert.equal((await needsReply('user-a','old'))?.needsReply,true);
+  const correct=(revision:number,type:'set-reply-preference'|'clear-reply-preference')=>classificationRoute(new Request(`${env.APP_URL}/api/classification`,{
+    method:'POST',headers:{origin:env.APP_URL!,'Content-Type':'application/json'},
+    body:JSON.stringify({messageId:'latest',accountId:'user-a',expectedRevision:revision,action:type==='set-reply-preference'?{type,value:'answered'}:{type}})}));
+  assert.equal((await correct(0,'set-reply-preference')).status,200);
+  assert.equal((await needsReply('user-a','old'))?.needsReply,false);
+  assert.equal((await needsReply('user-a','latest'))?.needsReply,false);
+  assert.equal((await correct(1,'clear-reply-preference')).status,200);
+  assert.equal((await needsReply('user-a','old'))?.needsReply,true);
+  assert.equal((await needsReply('user-a','latest'))?.needsReply,true);
+});
+
+void test('a deliberate second reply with identical wording sends again', async () => {
+  await seed();
+  inbox=[{id:'message',headers:[]}];
+  const provider=gmailWithBody('Can you confirm?');
+  const send=(sendKey:string)=>replyRoute(new Request(`${env.APP_URL}/api/reply`,{
+    method:'POST',headers:{origin:env.APP_URL!,'Content-Type':'application/json'},
+    body:JSON.stringify({id:'message',accountId:'user-a',action:'send',body:'Thanks!',sendKey})}));
+  try{
+    assert.equal((await send('first-reply-key')).status,200);
+    assert.equal((await send('first-reply-key')).status,200,'a retry reuses the first receipt');
+    assert.equal((await send('second-reply-key')).status,200);
+    assert.equal(provider.sent.length,2);
+  }finally{provider.restore();}
+});
+
+void test('a model result that lands after the reply was sent cannot restore the badge', async () => {
+  await seed();
+  inbox = [{ id: 'message', headers: [] }];
+  gmailWithBody('Could you confirm the venue for Thursday?');
+  await syncInbox('user-a', 'user-a', env);
+  env.GEMINI_API_KEY = 'test-gemini-key';
+  const answer = deferred();
+  const started = deferred();
+  const provider = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    if (!requestUrl(input).startsWith('https://generativelanguage.googleapis.com/')) return provider(input, init);
+    started.resolve();
+    await answer.promise;
+    const items = [{ id: 'message', context: 'work', topics: [], disposition: 'useful', replyRequired: true, securityEvent: false,
+      reason: 'Venue question', summary: 'Venue question',
+      reply: { status: 'required', urgency: 'prompt', channel: 'email', reasonCode: 'information_requested', evidence: 'Could you confirm the venue for Thursday?', explanation: 'Jordan needs the venue.' },
+      obligations: [{ kind: 'request', description: 'Confirm venue', owner: 'recipient', ownerIsUser: 'yes', required: true, evidence: 'Could you confirm the venue for Thursday?', state: 'open' }] }];
+    return Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify({ items }) }] }, finishReason: 'STOP' }] });
+  };
+  const sync = syncInbox('user-a', 'user-a', env);
+  await started.promise;
+  assert.equal((await replyAs('send')).status, 200, 'the reply is sent while classification is still running');
+  answer.resolve();
+  await sync;
+  assert.equal((await needsReply())?.needsReply, false);
+  assert.equal((await needsReply())?.replied, true);
+});
+
+void test('a policy upgrade re-decides stored mail without inventing a send', async () => {
+  await seed();
+  inbox = [{ id: 'message', headers: [] }];
+  gmailWithBody('My timesheet is ready in the time-tracking portal.\nPlease approve it there before Thursday.');
+  await syncInbox('user-a', 'user-a', env);
+  // Pretend the row was written by the previous policy, which put portal approvals in the tab.
+  const row = storage.sql.prepare('SELECT data FROM mailbox_messages WHERE message_id=?').get('message') as { data: string };
+  const data = JSON.parse(row.data) as Record<string, unknown> & { automaticClassification: Record<string, unknown>; classification: Record<string, unknown> };
+  const older = { ...data.automaticClassification, replyRequired: true, reply: undefined, version: 'policy-2026-09-29-audit-fixes:deterministic' };
+  storage.sql.prepare('UPDATE mailbox_messages SET data=? WHERE message_id=?').run(JSON.stringify({ ...data, needsReply: true,
+    automaticClassification: older, classification: { ...data.classification, replyRequired: true, reply: undefined } }), 'message');
+  assert.equal((await needsReply())?.needsReply, true, 'before the rescan the old decision is still shown');
+  await syncInbox('user-a', 'user-a', env);
+  const after = await needsReply();
+  assert.equal(after?.needsReply, false, 'the new policy reaches the stored message');
+  assert.notEqual(after?.replied, true, 'and the change is not mistaken for a sent reply');
+  assert.equal((storage.sql.prepare('SELECT replied FROM mailbox_messages WHERE message_id=?').get('message') as { replied: number }).replied, 0);
+});
+
+void test('the same Gmail id in two mailboxes keeps separate reply state', async () => {
+  await seed('user-a', 'a@example.com', 0, 'acct-1');
+  await seed('user-a', 'b@example.com', 0, 'acct-2');
+  inbox = [{ id: 'message', headers: [] }];
+  gmailWithBody('Could you confirm the delivery address?');
+  await syncInbox('user-a', 'acct-1', env);
+  await syncInbox('user-a', 'acct-2', env);
+  assert.equal((await replyAs('send', 'acct-1')).status, 200);
+  assert.equal((await needsReply('acct-1'))?.needsReply, false);
+  assert.equal((await needsReply('acct-2'))?.needsReply, true, 'answering one mailbox’s copy is not answering the other');
+});
+
+void test('a first page of large newsletters still refreshes: the snapshot keeps a slim copy', async () => {
+  await seed();
+  // D1 refuses any single value over about 2 MB. Forty 60 KB newsletters are 2.4 MB of HTML.
+  inbox = Array.from({ length: 40 }, (_, index) => ({ id: `news-${index}` }));
+  const provider = globalThis.fetch;
+  const html = `<table><tr><td>${'Weekly roundup. '.repeat(3750)}</td></tr></table>`;
+  globalThis.fetch = async (input, init) => {
+    const response = await provider(input, init);
+    if (!/\/messages\/[^/?]+\?format=full/.test(requestUrl(input))) return response;
+    const message = await response.json() as { payload: { mimeType: string; body: { data: string } } };
+    message.payload.mimeType = 'text/html';
+    message.payload.body.data = encode(html);
+    return Response.json(message);
+  };
+  const result = await syncInbox('user-a', 'user-a', env);
+  assert.equal(result.emails.length, 40, 'every message is returned in full');
+  assert.ok(result.emails.every((email) => email.html === html), 'the response keeps each message’s HTML');
+  const stored = storage.sql.prepare('SELECT data FROM snapshots WHERE account_id=?').get('user-a') as { data: string };
+  assert.ok(new TextEncoder().encode(stored.data).byteLength < 1_000_000, 'the snapshot stays well under the 2 MB value limit');
+  const snapshot = JSON.parse(stored.data) as { emails: { html?: string; body: string }[] };
+  assert.equal(snapshot.emails.length, 40);
+  assert.ok(snapshot.emails.every((email) => email.html === undefined && email.body === ''), 'text and HTML live only in the message rows');
+  const row = storage.sql.prepare('SELECT data FROM mailbox_messages WHERE message_id=?').get('news-0') as { data: string };
+  assert.equal((JSON.parse(row.data) as { html?: string }).html, html, 'each message row keeps its full content');
+  const view = await (await mailbox(mailboxRequest('user-a'))).json() as { emails: { html?: string }[] };
+  assert.ok(view.emails.length === 40 && view.emails.every((email) => email.html === html), 'the inbox still shows full messages');
+});
+
+void test('Gmail saying "slow down" is retried, never reported as a broken connection', async () => {
+  await seed();
+  inbox = [{ id: 'message' }];
+  const provider = globalThis.fetch;
+  let refusals = 0;
+  globalThis.fetch = async (input, init) => {
+    // Gmail reports its per-user rate limit as a 403 with this reason.
+    if (/\/messages\/message\?format=full/.test(requestUrl(input)) && refusals < 2) {
+      refusals++;
+      return Response.json({ error: { code: 403, errors: [{ reason: 'userRateLimitExceeded' }] } }, { status: 403, headers: { 'retry-after': '0' } });
+    }
+    return provider(input, init);
+  };
+  const result = await syncInbox('user-a', 'user-a', env);
+  assert.equal(refusals, 2);
+  assert.equal(result.skipped, 0, 'the message arrived after the pause');
+  assert.ok(result.emails.some((email) => email.id === 'message'));
+  assert.equal((row('connections') as { error: string | null }).error, null, 'nobody is told to reconnect');
+});
+
+void test('a message Gmail was too busy to hand over arrives on the next refresh', async () => {
+  await seed();
+  inbox = [{ id: 'calm' }, { id: 'busy' }];
+  const provider = globalThis.fetch;
+  let busy = true;
+  globalThis.fetch = async (input, init) => {
+    if (busy && /\/messages\/busy\?format=full/.test(requestUrl(input)))
+      return new Response('{"error":{"code":429}}', { status: 429, headers: { 'retry-after': '0' } });
+    return provider(input, init);
+  };
+  const first = await syncInbox('user-a', 'user-a', env);
+  assert.equal(first.skipped, 0, 'a busy message is queued, not written off as unreadable');
+  assert.ok(!first.emails.some((email) => email.id === 'busy'));
+  // Gmail recovers, and the next listing no longer includes the message (for example an
+  // incremental refresh that cannot see it). It is still fetched by ID.
+  busy = false;
+  inbox = [{ id: 'calm' }, { id: 'busy' }];
+  const listOnlyCalm = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    if (requestUrl(input).includes('/users/me/messages?maxResults=100&q=')) return Response.json({ messages: [{ id: 'calm' }] });
+    return listOnlyCalm(input, init);
+  };
+  const second = await syncInbox('user-a', 'user-a', env);
+  assert.ok(second.emails.some((email) => email.id === 'busy'), 'the queued message is fetched by ID');
+  const snapshot = JSON.parse((storage.sql.prepare('SELECT data FROM snapshots WHERE account_id=?').get('user-a') as { data: string }).data) as { fetchRetry?: unknown[] };
+  assert.equal(snapshot.fetchRetry, undefined, 'and leaves the retry queue');
+});
+
+void test('sending is never retried automatically, even when Gmail is busy', async () => {
+  await seed();
+  await syncInbox('user-a', 'user-a', env);
+  const provider = globalThis.fetch;
+  let sends = 0;
+  globalThis.fetch = async (input, init) => {
+    if (requestUrl(input).endsWith('/messages/send')) { sends++; return new Response('{}', { status: 503 }); }
+    return provider(input, init);
+  };
+  const response = await replyAs('send');
+  assert.notEqual(response.status, 200);
+  assert.equal(sends, 1, 'one attempt only; the person confirms in Gmail before any retry');
+});
+
+void test('correcting an earlier message keeps the conversation’s "I already replied" mark', async () => {
+  await seed();
+  const start=Date.now()-3600000;
+  inbox=[
+    {id:'old',threadId:'conversation',receivedAt:start,body:'Please reply with your availability.'},
+    {id:'latest',threadId:'conversation',receivedAt:start+60000,body:'Please reply with your decision.'},
+  ];
+  await syncInbox('user-a','user-a',env);
+  const correct=(messageId:string,revision:number,action:Record<string,unknown>)=>classificationRoute(new Request(`${env.APP_URL}/api/classification`,{
+    method:'POST',headers:{origin:env.APP_URL!,'Content-Type':'application/json'},
+    body:JSON.stringify({messageId,accountId:'user-a',expectedRevision:revision,expectedSenderRevision:0,action})}));
+  assert.equal((await correct('latest',0,{type:'set-reply-preference',value:'answered'})).status,200);
+  const response=await correct('old',0,{type:'set-section',section:'work'});
+  assert.equal(response.status,200);
+  const body=await response.json() as {email:{needsReply:boolean;manualThreadAnswered?:boolean}};
+  assert.equal(body.email.needsReply,false,'the correction response agrees with the mailbox');
+  assert.equal(body.email.manualThreadAnswered,true);
+  const later=await correct('latest',1,{type:'clear-reply-preference'});
+  assert.equal(later.status,200);
+  const reopened=await correct('old',1,{type:'clear-section'});
+  assert.equal((await reopened.json() as {email:{needsReply:boolean}}).email.needsReply,true,'undoing the mark reopens it');
 });

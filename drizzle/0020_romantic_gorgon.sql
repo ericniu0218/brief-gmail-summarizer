@@ -1,0 +1,1 @@
+ALTER TABLE `connections` ADD `model_backfill_version` text;

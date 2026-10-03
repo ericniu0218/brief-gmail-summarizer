@@ -1,4 +1,4 @@
-import { failure, HttpError, json, mutation, runtime, userId } from '@/server/runtime';
+import { failure, HttpError, inputBytes, json, mutation, runtime, userId } from '@/server/runtime';
 import {
   activeJunkPreference,
   applyCorrection,
@@ -59,19 +59,32 @@ function correctionAction(value:unknown):CorrectionAction{
       exact(['type','obligationKey']);
       if(typeof action.obligationKey!=='string'||!action.obligationKey||action.obligationKey.length>MAX_OBLIGATION_KEY)break;
       return {type:'clear-obligation-state',obligationKey:action.obligationKey};
+    case 'set-reply-preference':
+      exact(['type','value']);
+      if(action.value!=='answered'&&action.value!=='not-needed')break;
+      return {type:'set-reply-preference',value:action.value};
+    case 'clear-reply-preference':exact(['type']);return {type:'clear-reply-preference'};
     case 'reset-all':exact(['type']);return {type:'reset-all'};
   }
   throw new HttpError(400,'That correction action is not supported.');
 }
 
 async function correctionBody(request:Request):Promise<Record<string,unknown>>{
-  const text=await request.text();
-  if(new TextEncoder().encode(text).byteLength>MAX_BODY_BYTES)throw new HttpError(413,'That correction request is too large.');
+  const text=new TextDecoder().decode(await inputBytes(request,MAX_BODY_BYTES));
   try{
     const value:unknown=JSON.parse(text);
     if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('bad body');
     return value as Record<string,unknown>;
   }catch{throw new HttpError(400,'Send a valid correction request.');}
+}
+
+/** Whether an "I already replied" mark on this or a later message in its conversation covers it. */
+async function answeredInThread(user:string,accountId:string,email:StoredEmail,e:ReturnType<typeof runtime>){
+  if(!email.threadId||!email.receivedAt)return false;
+  const mark=await e.DB.prepare(`SELECT 1 AS found FROM mailbox_messages m JOIN overrides o ON o.account_id=m.account_id AND o.user_id=m.user_id AND o.message_id=m.message_id
+    WHERE m.account_id=? AND m.user_id=? AND json_extract(m.data,'$.threadId')=? AND m.received_at>=? AND o.active=1 AND o.reply_preference='answered' LIMIT 1`)
+    .bind(accountId,user,email.threadId,email.receivedAt).first();
+  return !!mark;
 }
 
 function findMessage(snapshot:Snapshot,messageId:string):StoredEmail{
@@ -143,8 +156,12 @@ export async function POST(request:Request){
     const latestAutomatic=automaticBaseline(latestSource.automaticClassification)??automaticBaseline(latestSource.classification)??automatic;
     const effective=withSenderRule(manual,senderRule,messageId);
     const {classification,category,tags,priority,label}=composeClassification(latestAutomatic,effective,Date.now());
+    // The same conversation-wide "I already replied" rule the mailbox read applies, so a
+    // correction to an earlier message cannot bring its reply badge back.
+    const manualThreadAnswered=await answeredInThread(user,owned.id,latestSource,e);
     const email:StoredEmail={...latestSource,accountId:owned.id,accountEmail:owned.email,
-      automaticClassification:latestAutomatic,classification,category,tags,priority,label,needsReply:!latestSource.replied&&classification.replyRequired,
+      automaticClassification:latestAutomatic,classification,category,tags,priority,label,manualThreadAnswered,
+      needsReply:!latestSource.replied&&!manualThreadAnswered&&classification.replyRequired,
       correctionRevision:manual?.revision??0,manuallyCorrected:manual?.active!==false&&!!manual,
       manualCorrection:manualCorrectionView(manual),
       senderJunkPreference:activeJunkPreference(senderRule),senderRuleRevision:senderRule?.revision??0,

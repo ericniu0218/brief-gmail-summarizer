@@ -48,6 +48,15 @@ export async function readMailbox(user:string,requested:string,e:Runtime){
     const sentInSnapshot=rows.length?new Set<string>():snapshotSentIds(stored?.data);
     const overrides=await loadOverrides(user,c.id,e,accountEmails.map(email=>email.id));
     const senderRules=await loadSenderRules(user,c.id,e);
+    // An "I already replied" mark answers requests up to that message in the same
+    // conversation. The mark lives in the existing correction row, so clearing it
+    // immediately restores the older requests without a second source of truth.
+    const answeredThrough=new Map<string,number>();
+    for(const email of accountEmails){
+      const manual=overrides.get(email.id);
+      if(!email.threadId||manual?.active===false||manual?.replyPreference!=='answered')continue;
+      answeredThrough.set(email.threadId,Math.max(answeredThrough.get(email.threadId)||0,email.receivedAt||0));
+    }
     for(const email of accountEmails){
       // A legacy snapshot predates the replied marker; its send is read from the record.
       const source={...email,accountId:c.id,accountEmail:c.email,replied:email.replied||(!rows.length&&sentInSnapshot.has(email.id))};
@@ -55,13 +64,15 @@ export async function readMailbox(user:string,requested:string,e:Runtime){
       const automatic=automaticBaseline(email.automaticClassification)??automaticBaseline(email.classification);
       const manual=overrides.get(email.id),senderRule=senderRuleFor(senderRules,email.address);
       const effective=withSenderRule(manual,senderRule,email.id);
+      const manualThreadAnswered=!!email.threadId&&!!email.receivedAt&&email.receivedAt<=(answeredThrough.get(email.threadId)||0);
       // A legacy corrected snapshot has no recoverable automatic baseline. Keep its last
       // visible result until sync reclassifies it, and tell reset that recovery is needed.
-      if(!automatic){emails.push({...source,correctionRevision:manual?.revision??0,
+      if(!automatic){emails.push({...source,manualThreadAnswered,needsReply:!source.replied&&!manualThreadAnswered&&source.needsReply,correctionRevision:manual?.revision??0,
         manuallyCorrected:manual?.active!==false&&!!manual,manualCorrection:manualCorrectionView(manual),
         automaticClassificationAvailable:false});continue;}
       const {classification,category,tags,priority,label}=composeClassification(automatic,effective,now);
-      emails.push({...source,automaticClassification:automatic,classification,category,tags,priority,label,needsReply:!source.replied&&classification.replyRequired,
+      emails.push({...source,automaticClassification:automatic,classification,category,tags,priority,label,manualThreadAnswered,
+        needsReply:!source.replied&&!manualThreadAnswered&&classification.replyRequired,
         correctionRevision:manual?.revision??0,manuallyCorrected:manual?.active!==false&&!!manual,
         manualCorrection:manualCorrectionView(manual),
         senderJunkPreference:activeJunkPreference(senderRule),senderRuleRevision:senderRule?.revision??0,

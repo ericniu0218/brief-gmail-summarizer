@@ -361,7 +361,7 @@ void test('HTTP flow: auth, CSRF, preview, idempotent publish, fold, viewer read
   } as Runtime;
   const headers = (id: string) =>
     new Headers({
-      'oai-authenticated-user-id': id,
+      'x-brief-identity-secret':'test-ingress-secret-for-authenticated-proxy', 'oai-authenticated-user-id': id,
       'oai-authenticated-user-email': `${id}@example.com`,
     });
   const call = (path: string, data?: unknown, extra?: Record<string, string>) =>
@@ -464,7 +464,7 @@ void test('HTTP Gmail publication rejects a changed preview without sharing it',
     APP_URL: 'https://brief.example',
   } as Runtime;
   globalThis.__briefTestHeaders = new Headers({
-    'oai-authenticated-user-id': 'owner',
+    'x-brief-identity-secret':'test-ingress-secret-for-authenticated-proxy', 'oai-authenticated-user-id': 'owner',
     'oai-authenticated-user-email': 'owner@example.com',
   });
   const snapshot = {

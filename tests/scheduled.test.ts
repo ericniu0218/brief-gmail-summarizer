@@ -12,7 +12,8 @@ import { connect, decodeRaw, headerBlock, origin, post, rig, sends, signIn, type
 
 let r: Rig;
 const HOUR = 3600000;
-beforeEach(async () => { r = rig(); await connect(r, 'user-a', 'acct-1', 'me@gmail.example'); });
+beforeEach(async () => { r = rig(); await connect(r, 'user-a', 'acct-1', 'me@gmail.example');
+  r.storage.sql.prepare('INSERT INTO agent_status (id,last_run) VALUES (?,?)').run('scheduler',Date.now()); });
 afterEach(() => r.restore());
 
 const draft = { accountId: 'acct-1', to: 'sam@example.com', subject: 'Notes', body: 'See you then.' };
@@ -21,6 +22,16 @@ const row = (id: string) => r.storage.sql.prepare('SELECT status, error, attempt
 const makeDue = (id: string, ago = HOUR) => r.storage.sql.prepare('UPDATE scheduled_emails SET send_at = ? WHERE id = ?').run(Date.now() - ago, id);
 const queue = async (extra: Record<string, unknown> = {}) => (await (await schedule(extra)).json() as { id: string }).id;
 const subjectOf = (raw: string) => Buffer.from(decodeRaw(raw).match(/Subject: =\?UTF-8\?B\?([^?]+)\?=/)![1], 'base64').toString();
+
+void test('scheduling refuses a missing background sender and reports its status', async () => {
+  r.storage.sql.prepare("DELETE FROM agent_status WHERE id='scheduler'").run();
+  const result=await schedule();
+  assert.equal(result.status,503);
+  assert.match((await result.json() as {error:string}).error,/background sender/);
+  const listed=await (await listScheduled()).json() as {schedulerActive:boolean;items:unknown[]};
+  assert.equal(listed.schedulerActive,false);
+  assert.deepEqual(listed.items,[]);
+});
 
 void test('scheduling validates the time, needs a mailbox the user owns, ignores a double click, and caps the queue', async () => {
   for (const sendAt of [Date.now() - HOUR, Date.now() + 1000, Date.now() + 31 * 24 * HOUR, 'soon', null, 1.5]) assert.equal((await schedule({ sendAt })).status, 400, String(sendAt));

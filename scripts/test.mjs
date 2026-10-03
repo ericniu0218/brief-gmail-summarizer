@@ -34,7 +34,7 @@ await build({
         }));
         build.onLoad({ filter: /.*/, namespace: 'test-runtime' }, () => ({
           contents:
-            'export const env = new Proxy({}, {get: (_, key) => globalThis.__briefTestEnv[key]});',
+            'export const env = new Proxy({}, {get: (_, key) => (key === "IDENTITY_PROXY_SECRET" ? globalThis.__briefTestEnv?.[key] ?? "test-ingress-secret-for-authenticated-proxy" : globalThis.__briefTestEnv?.[key])});',
         }));
         build.onResolve({ filter: /^next\/headers$/ }, () => ({
           path: 'headers',

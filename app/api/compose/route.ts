@@ -4,7 +4,7 @@ import { composeDraft } from '@/server/ai';
 import { signatureBlock, userProfile } from '@/server/profile';
 import { scheduleEmail } from '@/server/scheduled';
 import { deliverOnce, fingerprintOf } from '@/server/send';
-import { encode, failure, HttpError, inputObject, json, mutation, runtime, userId } from '@/server/runtime';
+import { encode, failure, HttpError, inputBytes, inputObject, json, mutation, runtime, userId } from '@/server/runtime';
 
 const TONES=['Concise','Friendly','Professional'];
 /** Room for a 20,000-character message in any script, plus the other fields. */
@@ -14,8 +14,9 @@ async function readInput(request:Request):Promise<{input:Record<string,unknown>;
   if(!(request.headers.get('content-type')||'').startsWith('multipart/form-data'))return {input:await inputObject(request,JSON_LIMIT),files:[]};
   const length=Number(request.headers.get('content-length'));
   if(Number.isFinite(length)&&length>MAX_ATTACHMENT_BYTES+1048576)throw new HttpError(413,'Attachments are too large. Keep the total under 10.0 MB.');
+  const bytes=await inputBytes(request,MAX_ATTACHMENT_BYTES+1048576);
   let form:FormData;
-  try{form=await request.formData();}catch{throw new HttpError(400,'Provide a valid form submission.');}
+  try{form=await new Request(request.url,{method:'POST',headers:request.headers,body:bytes as BodyInit}).formData();}catch{throw new HttpError(400,'Provide a valid form submission.');}
   const input:Record<string,unknown>={};const files:File[]=[];
   for(const [name,value] of form.entries()){
     if(typeof value==='string')input[name]=value;
@@ -53,6 +54,8 @@ export async function POST(request:Request){
     if(input.subject.length>200||/[\r\n]/.test(input.subject))throw new HttpError(400,'Keep the subject to one line of up to 200 characters.');
     if(typeof input.body!=='string'||!input.body.trim()||input.body.length>20000)throw new HttpError(400,'Write a message of up to 20,000 characters.');
     if(typeof input.key!=='string'||!/^[a-zA-Z0-9-]{8,64}$/.test(input.key))throw new HttpError(400,'Reload the dashboard and try again.');
+    if(input.draftId!==undefined&&(typeof input.draftId!=='string'||!/^[-A-Za-z0-9_]{1,150}$/.test(input.draftId)))throw new HttpError(400,'The saved draft is no longer valid.');
+    if(input.saveKey!==undefined&&(typeof input.saveKey!=='string'||!/^[a-zA-Z0-9-]{8,64}$/.test(input.saveKey)))throw new HttpError(400,'Reload the draft and try again.');
     const subject=input.subject.trim();
     if(action==='schedule'){
       if(files.length)throw new HttpError(400,'Emails with attachments cannot be scheduled yet. Send it now, or remove the attachments.');
@@ -65,11 +68,13 @@ export async function POST(request:Request){
     const confirmUnsent=input.confirmUnsent===true||input.confirmUnsent==='true';
     const token=await accessToken(user,owned.id,e);
     const sendAs:'send'|'draft'=action;
-    const send={user,accountId:owned.id,token,e,action:sendAs,noun:'email' as const,reportThread:true,confirmUnsent};
-    if(!files.length)return json(await deliverOnce({...send,parts:['compose',input.key,sendAs,to,cc,bcc,subject,input.body],raw:buildRawMessage({to,cc,bcc,subject,body:input.body})}));
+    const draftId=typeof input.draftId==='string'?input.draftId:undefined;
+    const send={user,accountId:owned.id,token,e,action:sendAs,noun:'email' as const,reportThread:true,confirmUnsent,
+      ...(action==='draft'?{draftId}:{discardDraftId:draftId})};
+    if(!files.length)return json(await deliverOnce({...send,parts:['compose',input.key,sendAs,action==='draft'?input.saveKey||'':'',to,cc,bcc,subject,input.body],raw:buildRawMessage({to,cc,bcc,subject,body:input.body})}));
     const attachments=await Promise.all(files.map(async file=>({name:cleanFileName(file.name),type:cleanMediaType(file.type),bytes:new Uint8Array(await file.arrayBuffer())})));
     // The file contents are part of the fingerprint, so a retry of the same email is recognised.
     const digests=await Promise.all(attachments.map(async file=>[file.name,file.bytes.length,encode(new Uint8Array(await crypto.subtle.digest('SHA-256',file.bytes)))]));
-    return json(await deliverOnce({...send,parts:['compose',input.key,sendAs,to,cc,bcc,subject,input.body,digests],mime:buildMime({to,cc,bcc,subject,body:input.body,attachments})}));
+    return json(await deliverOnce({...send,parts:['compose',input.key,sendAs,action==='draft'?input.saveKey||'':'',to,cc,bcc,subject,input.body,digests],mime:buildMime({to,cc,bcc,subject,body:input.body,attachments})}));
   }catch(error){return failure(error);}
 }

@@ -156,7 +156,7 @@ void test('sample replies reject unauthenticated callers before contacting any p
  try{const response=await suggest(sampleRequest({id:'1',tone:'Concise'}));assert.equal(response.status,401);assert.equal(called,false);}finally{globalThis.fetch=original;}
 });
 void test('a concurrent demo digest request uses deterministic fallback instead of duplicating Gemini work',async()=>{
- globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
+ globalThis.__briefTestHeaders=new Headers({'x-brief-identity-secret':'test-ingress-secret-for-authenticated-proxy', 'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  const fakeDb={prepare(){return {bind(){return this;},async first(){return {data:'{"pending":true}',updated:Date.now()};}};}};
  globalThis.__briefTestEnv={...testEnv,DB:fakeDb as unknown as D1Database,GEMINI_API_KEY:'test-key'};
  const original=globalThis.fetch;let called=false;
@@ -168,7 +168,7 @@ void test('a concurrent demo digest request uses deterministic fallback instead 
  }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
 });
 void test('the demo digest stays available when Gemini is out of credit',async()=>{
- globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
+ globalThis.__briefTestHeaders=new Headers({'x-brief-identity-secret':'test-ingress-secret-for-authenticated-proxy', 'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  const fakeDb={prepare(){return {bind(){return this;},async first(){return null;},async run(){return {meta:{changes:1}};}};}};
  globalThis.__briefTestEnv={...testEnv,DB:fakeDb as unknown as D1Database,GEMINI_API_KEY:'test-key'};
  const original=globalThis.fetch;
@@ -181,7 +181,7 @@ void test('the demo digest stays available when Gemini is out of credit',async()
  }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
 });
 void test('sample replies generate only from the demo inbox, never from caller-supplied text',async()=>{
- globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
+ globalThis.__briefTestHeaders=new Headers({'x-brief-identity-secret':'test-ingress-secret-for-authenticated-proxy', 'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  globalThis.__briefTestEnv={...testEnv,GEMINI_API_KEY:'test-key'};
  const original=globalThis.fetch;let called=false;
  globalThis.fetch=async()=>{called=true;throw new Error('Must not contact a provider');};
@@ -191,7 +191,7 @@ void test('sample replies generate only from the demo inbox, never from caller-s
  }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
 });
 void test('sample reply options send the chosen tone and regeneration attempt to the model',async()=>{
- globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
+ globalThis.__briefTestHeaders=new Headers({'x-brief-identity-secret':'test-ingress-secret-for-authenticated-proxy', 'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  globalThis.__briefTestEnv={...testEnv,GEMINI_API_KEY:'test-key',GEMINI_MODEL:'test-model'};
  const original=globalThis.fetch;let url='';let sent:{systemInstruction:{parts:{text:string}[]};contents:{role:string;parts:{text:string}[]}[]}|null=null;
  globalThis.fetch=async(input,init)=>{url=requestUrl(input);sent=JSON.parse(typeof init?.body==='string'?init.body:'{}') as typeof sent;return Response.json({candidates:[{content:{parts:[{text:'{"options":["Hi Sarah, approving before 2 PM.","Hi Sarah, I will sign off shortly.","Hi Sarah, you have my approval."]}'}]},finishReason:'STOP'}]});};
@@ -212,7 +212,7 @@ void test('sample reply options send the chosen tone and regeneration attempt to
  }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
 });
 void test('polishing a reply sends the user’s notes and rejects empty ones before contacting any provider',async()=>{
- globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
+ globalThis.__briefTestHeaders=new Headers({'x-brief-identity-secret':'test-ingress-secret-for-authenticated-proxy', 'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  globalThis.__briefTestEnv={...testEnv,GEMINI_API_KEY:'test-key'};
  const original=globalThis.fetch;let called=false;let sent:{contents:{role:string;parts:{text:string}[]}[]}|null=null;
  globalThis.fetch=async(_input,init)=>{called=true;sent=JSON.parse(typeof init?.body==='string'?init.body:'{}') as typeof sent;return Response.json({candidates:[{content:{parts:[{text:'{"reply":"Hi Sarah, I will review by Friday and need two more days."}'}]},finishReason:'STOP'}]});};
@@ -228,7 +228,7 @@ void test('polishing a reply sends the user’s notes and rejects empty ones bef
  }finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
 });
 void test('a known successful send returns its receipt without sending a duplicate',async()=>{
- globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
+ globalThis.__briefTestHeaders=new Headers({'x-brief-identity-secret':'test-ingress-secret-for-authenticated-proxy', 'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  const encrypted=await encrypt('refresh','user-a',testEnv);
  const fakeDb={prepare(sql:string){return {bind(){return this;},async first(){if(sql.includes('FROM connections'))return {id:'acct-1',user_id:'user-a',provider_identity:null,email:'a@example.com',token:encrypted,token_version:1,last_sync:null,sync_lock:0,error:null,created:0};if(sql.includes('FROM operations'))return {status:'complete',result:'{"id":"sent-1","status":"sent"}'};return null;}};}};
  globalThis.__briefTestEnv={...testEnv,DB:fakeDb as unknown as D1Database,GOOGLE_CLIENT_ID:'client',GOOGLE_CLIENT_SECRET:'secret'};
@@ -237,7 +237,7 @@ void test('a known successful send returns its receipt without sending a duplica
  try{const response=await reply(new Request('https://brief.example/api/reply',{method:'POST',headers:{origin:'https://brief.example','Content-Type':'application/json'},body:JSON.stringify({id:'abc',accountId:'acct-1',action:'send',body:'Thanks, received.'})}));assert.equal(response.status,200);assert.deepEqual(await response.json(),{id:'sent-1',status:'sent'});assert.equal(sends,0);}finally{globalThis.fetch=original;globalThis.__briefTestEnv=testEnv;globalThis.__briefTestHeaders=new Headers();}
 });
 void test('an unconfirmed reply retries only after the user confirms they checked Gmail',async()=>{
- globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
+ globalThis.__briefTestHeaders=new Headers({'x-brief-identity-secret':'test-ingress-secret-for-authenticated-proxy', 'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  const encrypted=await encrypt('refresh','user-a',testEnv);
  let operation:{status:string;result:string|null;created:number}|null={status:'unconfirmed',result:null,created:Date.now()-120000};
  const fakeDb={prepare(sql:string){return {bind(){return this;},async first(){
@@ -280,7 +280,7 @@ void test('an expired dashboard session returns a usable sign-in destination',as
 
 void test('missing Gmail credentials are reported before starting Google OAuth',async()=>{
  const {GET:startGoogle}=await import('../app/api/auth/google/route');
- globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
+ globalThis.__briefTestHeaders=new Headers({'x-brief-identity-secret':'test-ingress-secret-for-authenticated-proxy', 'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  const original=globalThis.fetch;let called=false;
  globalThis.fetch=async()=>{called=true;throw new Error('Must not contact Google before setup');};
  try{
@@ -301,7 +301,7 @@ void test('a Gmail token failure does not masquerade as a dashboard sign-in fail
 
 void test('configured Gmail starts OAuth with PKCE and the exact callback origin',async()=>{
  const {GET:startGoogle}=await import('../app/api/auth/google/route');
- globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
+ globalThis.__briefTestHeaders=new Headers({'x-brief-identity-secret':'test-ingress-secret-for-authenticated-proxy', 'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  let bound:unknown[]=[];
  const db={prepare(){return {bind(...values:unknown[]){bound=values;return this;},async run(){return {};}};}};
  globalThis.__briefTestEnv={...testEnv,GOOGLE_CLIENT_ID:'client-id',GOOGLE_CLIENT_SECRET:'client-secret',DB:db as unknown as D1Database};
@@ -341,7 +341,7 @@ void test('completing Google OAuth stores the connection in the migrated schema'
 
  };
  globalThis.__briefTestEnv={...testEnv,GOOGLE_CLIENT_ID:'client-id',GOOGLE_CLIENT_SECRET:'client-secret',DB:db as unknown as D1Database};
- globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
+ globalThis.__briefTestHeaders=new Headers({'x-brief-identity-secret':'test-ingress-secret-for-authenticated-proxy', 'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  const original=globalThis.fetch;
  globalThis.fetch=async(input)=>{
   const url=String(input as string|URL);
@@ -1017,7 +1017,7 @@ void test('disconnecting removes manual corrections along with mail data',async(
  const fakeDb={prepare(sql:string){tables.push(sql);return {bind(){return this;},async first(){return sql.includes('FROM connections')?connection:null;},async run(){return {};},async all(){return {results:[]};}};},
   async batch(statements:unknown[]){return statements;}};
  globalThis.__briefTestEnv={...testEnv,DB:fakeDb as unknown as D1Database};
- globalThis.__briefTestHeaders=new Headers({'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
+ globalThis.__briefTestHeaders=new Headers({'x-brief-identity-secret':'test-ingress-secret-for-authenticated-proxy', 'oai-authenticated-user-id':'user-a','oai-authenticated-user-email':'a@example.com'});
  globalThis.fetch=async()=>Response.json({});
  try{
   const {POST:disconnect}=await import('../app/api/disconnect/route');

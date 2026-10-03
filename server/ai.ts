@@ -10,7 +10,7 @@ import type { Tag } from '@/lib/categories';
 const DEFAULT_GEMINI_MODEL='gemini-3.5-flash-lite';
 // Changing the classification instructions or the shared purpose checks invalidates every
 // cached model result, so existing mail is reclassified rather than keeping old answers.
-const PROMPT_VERSION='2026-09-29-purpose-context';
+const PROMPT_VERSION='2026-10-03-gmail-signals';
 function geminiModel(e:Runtime){return (e.GEMINI_MODEL||DEFAULT_GEMINI_MODEL).replace(/^models\//,'');}
 export function analysisVersion(e:Runtime){return `gemini:${geminiModel(e)}:${PROMPT_VERSION}`;}
 type JsonSchema={type?:string;enum?:unknown[];properties?:Record<string,JsonSchema>;required?:string[];additionalProperties?:boolean;items?:JsonSchema;minItems?:number;maxItems?:number;minimum?:number;maximum?:number};

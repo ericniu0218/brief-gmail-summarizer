@@ -1,8 +1,8 @@
 'use client';
 import { useState } from 'react';
-import { ChevronDown, ChevronRight, Inbox, Mails, Sparkles, BriefcaseBusiness, UserRound, Layers3 } from 'lucide-react';
+import { ChevronDown, ChevronRight, FilePenLine, Inbox, Mails, Sparkles, BriefcaseBusiness, UserRound, Layers3 } from 'lucide-react';
 import { SidebarMenu, SidebarMenuItem, SidebarMenuButton, useSidebar } from '@/components/ui/sidebar';
-import { SECTIONS, parseView, sectionCount, tagCount, toggleExpanded, type Section } from '@/lib/categories';
+import { SECTIONS, inGmailInbox, parseView, sectionCount, tagCount, toggleExpanded, type Section } from '@/lib/categories';
 import type { Email } from '@/lib/mail';
 
 const SECTION_ICONS:Record<Section,typeof Inbox>={work:BriefcaseBusiness,personal:UserRound,noise:Layers3};
@@ -16,9 +16,10 @@ const SECTION_ICONS:Record<Section,typeof Inbox>={work:BriefcaseBusiness,persona
  *
  * Account scope and category selection are deliberately separate concerns: `allInboxes`
  * describes which mailboxes are in scope, while `view` describes which messages within
- * that scope are listed. Choosing a category therefore never changes the scope.
+ * that scope are listed. Choosing a category therefore never changes the scope. The
+ * Inbox row asks the dashboard to return to the selected individual mailbox.
  */
-export function CategoryNav({emails,view,allInboxes,onSelect,onSelectAllInboxes}:{emails:Email[];view:string;allInboxes:boolean;onSelect:(view:string)=>void;onSelectAllInboxes:()=>void}){
+export function CategoryNav({emails,view,allInboxes,onSelect,onSelectAllInboxes,draftCount}:{emails:Email[];view:string;allInboxes:boolean;onSelect:(view:string)=>void;onSelectAllInboxes:()=>void;draftCount?:number}){
   // Each section tracks its own disclosure state, so expanding one never collapses
   // or expands another.
   const [expanded,setExpanded]=useState<Section[]>(()=>{
@@ -45,6 +46,8 @@ export function CategoryNav({emails,view,allInboxes,onSelect,onSelectAllInboxes}
   // Exactly one row is highlighted: the combined scope claims the active Inbox state so
   // "All inboxes" and a single account's "Inbox" can never both appear selected.
   const combinedInbox=allInboxes&&view==='inbox';
+  // Inbox counts what Gmail's own inbox shows, matching the list it opens.
+  const inboxCount=emails.filter(inGmailInbox).length;
   const active=parseView(view);
   // Keep the active path visible. Its disclosure is disabled while locked open so the
   // control never promises a collapse that cannot happen.
@@ -65,13 +68,13 @@ export function CategoryNav({emails,view,allInboxes,onSelect,onSelectAllInboxes}
           <Mails size={18}/><span>All inboxes</span>
           {/* The count is shown only while the combined scope is loaded; a single-account
               snapshot cannot report a total across mailboxes it has not read. */}
-          {allInboxes&&<span className="nav-count">{emails.length}</span>}
+          {allInboxes&&<span className="nav-count">{inboxCount}</span>}
         </SidebarMenuButton>
       </div>
     </SidebarMenuItem>
     <SidebarMenuItem>
       <div className="nav-row">
-        <SidebarMenuButton isActive={view==='inbox'&&!allInboxes} onClick={()=>onSelect('inbox')} className="nav-button"><Inbox size={18}/><span>Inbox</span><span className="nav-count">{emails.length}</span></SidebarMenuButton>
+        <SidebarMenuButton isActive={view==='inbox'&&!allInboxes} onClick={()=>onSelect('inbox')} className="nav-button"><Inbox size={18}/><span>Inbox</span>{!allInboxes&&<span className="nav-count">{inboxCount}</span>}</SidebarMenuButton>
         <button
           type="button"
           className="nav-arrow"
@@ -122,6 +125,14 @@ export function CategoryNav({emails,view,allInboxes,onSelect,onSelectAllInboxes}
           </li>;
         })}
       </ul>
+    </SidebarMenuItem>
+    {/* The Gmail Drafts folder; its count appears once it has been read. */}
+    <SidebarMenuItem>
+      <div className="nav-row">
+        <SidebarMenuButton isActive={view==='drafts'} onClick={()=>{onSelect('drafts');if(isMobile)setOpenMobile(false);}} className="nav-button">
+          <FilePenLine size={18}/><span>Drafts</span>{draftCount!==undefined&&<span className="nav-count">{draftCount}</span>}
+        </SidebarMenuButton>
+      </div>
     </SidebarMenuItem>
   </SidebarMenu>;
 }

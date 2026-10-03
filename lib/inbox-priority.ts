@@ -1,11 +1,9 @@
-import { isPublicMailDomain } from './addresses';
 import type { Email } from './mail';
-import { cachedImportance, evaluateImportance, receivedAtOf } from './importance';
+import { foldGroups, foldSenderKey, organizationKey, type FoldPreferences, type FoldReason } from './folding';
+import { cachedImportance, evaluateImportance, receivedAtOf, type Importance, type ImportanceTier } from './importance';
 
 const SECURITY_OR_ACCESS = /\b(verification code|verify (?:your|this)|security alert|security code|one[- ]time (?:code|password)|otp|two[- ]factor|2fa|password reset|reset your password|new (?:sign[- ]in|login|device)|unrecognized (?:sign[- ]in|login)|confirm your (?:email|account|identity)|activate your account)\b/i;
 const DIRECT_ACTION = /\b(action required|approval (?:needed|required)|response (?:needed|required)|complete (?:your|the) setup|finish (?:your|the) setup|setup incomplete|due (?:today|tomorrow)|deadline|urgent)\b/i;
-const FOLDABLE_OPERATIONAL = /\b(verification|verify|security|one[- ]time|authentication|two[- ]factor|2fa|setup|set up|getting started|sign[- ]in|login|password|confirm|activate|device|invitation|invited|repository|deployment|workflow|dependabot)\b/i;
-const COMMON_SECOND_LEVEL_DOMAINS = new Set(['co.uk','com.au','co.nz','co.jp']);
 
 export type InboxEmailRow = {kind:'email';email:Email};
 export type InboxFoldRow = {
@@ -16,12 +14,12 @@ export type InboxFoldRow = {
   needsReplyCount:number;
   /** The message that earned the group its position, shown so it is not buried. */
   lead:Email;
+  /** Why these messages are together: one conversation, one topic, or the reader's choice. */
+  reason:FoldReason;
+  /** A short description of the group, such as "Shipping updates" or "Conversation". */
+  label:string;
 };
 export type InboxRow = InboxEmailRow | InboxFoldRow;
-
-function searchable(email:Pick<Email,'subject'|'summary'|'body'>) {
-  return `${email.subject} ${email.summary} ${email.body}`;
-}
 
 export function hasImportantSignal(subject:string,content:string) {
   const text=`${subject} ${content}`;
@@ -39,18 +37,33 @@ export function isImportantEmail(email:Email,now:number|null) {
   return now===null?cachedImportance(email):evaluateImportance(email,now).important;
 }
 
-/** `newest` orders purely by arrival; `importance` applies the policy below. */
-export type SortMode='importance'|'newest';
+/**
+ * `newest` orders purely by arrival; `importance` applies the policy below; `reply` is the
+ * "Needs a reply" tab: answers wanted soon first, then routine ones, each in importance order.
+ */
+export type SortMode='importance'|'newest'|'reply';
+
+/** 0 for a reply wanted soon, 1 for any other pending reply, 2 for no pending reply. */
+function replyRank(email:Email){
+  if(!email.needsReply)return 2;
+  return email.classification?.reply?.urgency==='prompt'?0:1;
+}
 
 const identityOf=(email:Email)=>`${email.accountId||''}:${email.id}`;
+
+/** Tiers pinned above everything else in importance mode: what needs the reader now. */
+const PINNED=new Set<ImportanceTier>(['due-now','recent-request','overdue']);
+const pinned=(importance:Importance|undefined)=>!!importance&&importance.important&&PINNED.has(importance.tier);
 
 /**
  * Deterministic ordering.
  *
- * In importance mode: current obligations first, then recent direct requests, then
- * recently overdue work, then older unresolved items, then routine mail. Inside a tier the
- * earliest supported due time wins, then the most recent arrival, then the composite
- * identity — so the order never depends on the input order or on a clock tick mid-sort.
+ * In importance mode, only what needs the reader now is pinned: current obligations, then
+ * recent direct requests, then recently overdue work. Everything else, older unresolved
+ * items included, follows newest first, so new mail is never buried under weeks-old tasks.
+ * The reply tab ranks every tier as before. Inside a tier the earliest supported due time
+ * wins, then the most recent arrival, then the composite identity — so the order never
+ * depends on the input order or on a clock tick mid-sort.
  *
  * Importance is evaluated once per message rather than inside the comparator, which would
  * otherwise re-derive every classification on each of O(n log n) comparisons.
@@ -66,7 +79,15 @@ export function sortInboxEmails(emails:Email[],now:number|null,mode:SortMode='im
     importance:now===null?undefined:evaluateImportance(email,now),
   }));
   scored.sort((a,b)=>{
-    if(ordering==='importance'&&a.importance&&b.importance){
+    if(ordering==='reply'){
+      const rank=replyRank(a.email)-replyRank(b.email);
+      if(rank)return rank;
+    }
+    if(ordering==='importance'){
+      const aPinned=pinned(a.importance),bPinned=pinned(b.importance);
+      if(aPinned!==bPinned)return aPinned?-1:1;
+    }
+    if((ordering==='reply'||ordering==='importance'&&pinned(a.importance))&&a.importance&&b.importance){
       if(a.importance.important!==b.importance.important)return a.importance.important?-1:1;
       if(a.importance.rank!==b.importance.rank)return a.importance.rank-b.importance.rank;
       // Unknown due times sort last within a tier without ever producing NaN, because
@@ -82,15 +103,6 @@ export function sortInboxEmails(emails:Email[],now:number|null,mode:SortMode='im
   return scored.map(({email})=>email);
 }
 
-function organizationKey(email:Email) {
-  const hostname=email.address.split('@')[1]?.toLowerCase().replace(/^www\./,'');
-  if(!hostname)return email.sender.trim().toLowerCase();
-  const labels=hostname.split('.').filter(Boolean);
-  if(labels.length<=2)return hostname;
-  const lastTwo=labels.slice(-2).join('.');
-  return COMMON_SECOND_LEVEL_DOMAINS.has(lastTwo)?labels.slice(-3).join('.'):lastTwo;
-}
-
 function companyName(email:Email,key:string) {
   const sender=email.sender.trim();
   if(sender&&!/^(?:no[- ]?reply|notifications?|security|support)$/i.test(sender))return sender.replace(/\s+(?:security|notifications?|support)$/i,'');
@@ -98,47 +110,41 @@ function companyName(email:Email,key:string) {
   return name.toLowerCase()==='github'?'GitHub':name.charAt(0).toUpperCase()+name.slice(1);
 }
 
-function isFoldableOperationalEmail(email:Email) {
-  const [local,domain='']=email.address.toLowerCase().split('@');
-  return !isPublicMailDomain(domain)&&/^(?:no[-_]?reply|notifications?|security|accounts?|support)(?:[.+_-]|$)/.test(local)
-    &&FOLDABLE_OPERATIONAL.test(searchable(email));
+/** Who a conversation is between, by first name, for the folded row's heading. */
+function participants(group:Email[]){
+  const names=[...new Set(group.map(email=>(email.sender||email.address).trim().split(/\s+/)[0]))];
+  return names.length<=2?names.join(', '):`${names.slice(0,2).join(', ')} +${names.length-2}`;
 }
 
 /**
- * Rows for the inbox list, with operational mail from one organisation folded together.
+ * Rows for the inbox list, with related messages folded together (see lib/folding): one
+ * conversation, one topic from one organisation within a week, or a sender the reader
+ * chose to group. Senders the reader keeps separate are never folded.
  *
  * A group takes the position of its most important member and shows that member as its
  * heading, so an urgent message is never hidden under a routine preview or under a
  * sibling that merely happens to be older.
  */
-export function buildInboxRows(emails:Email[],now:number|null,mode:SortMode='importance'):InboxRow[] {
+export function buildInboxRows(emails:Email[],now:number|null,mode:SortMode='importance',preferences:FoldPreferences={},{conversationsOnly=false}={}):InboxRow[] {
   const sorted=sortInboxEmails(emails,now,mode);
-  const buckets=new Map<string,Email[]>();
-  const keyOf=new Map<Email,string>();
-  for(const email of sorted){
-    if(!isFoldableOperationalEmail(email))continue;
-    const key=`${email.accountId||''}:${organizationKey(email)}`;
-    keyOf.set(email,key);
-    const bucket=buckets.get(key);
-    if(bucket)bucket.push(email);
-    else buckets.set(key,[email]);
+  const groupOf=new Map<number,{members:number[];reason:FoldReason;label:string}>();
+  for(const group of foldGroups(sorted,preferences,{conversationsOnly})){
+    // Members in list order, so the first is the one that placed the group.
+    group.members.sort((a,b)=>a-b);
+    for(const index of group.members)groupOf.set(index,group);
   }
-  const emitted=new Set<string>();
   const rows:InboxRow[]=[];
-  for(const email of sorted){
-    // Membership is answered by the map built above rather than by scanning a group, and
-    // a bucket of one is simply not a group.
-    const key=keyOf.get(email);
-    const group=key===undefined?undefined:buckets.get(key);
-    if(key!==undefined&&group&&group.length>1){
-      if(emitted.has(key))continue;
-      emitted.add(key);
-      // `group` follows the sorted order, so its first member is the one that placed it.
-      rows.push({kind:'fold',id:`fold:${key}`,company:companyName(group[0],organizationKey(group[0])),emails:group,
-        needsReplyCount:group.filter(item=>item.needsReply).length,lead:group[0]});
-      continue;
-    }
-    rows.push({kind:'email',email});
-  }
+  sorted.forEach((email,index)=>{
+    const group=groupOf.get(index);
+    if(!group){rows.push({kind:'email',email});return;}
+    if(group.members[0]!==index)return;
+    const members=group.members.map(member=>sorted[member]);
+    const lead=members[0];
+    const reason=group.reason==='sender'&&members.some(member=>foldSenderKey(member)!==foldSenderKey(lead))?'topic':group.reason;
+    rows.push({kind:'fold',id:`fold:${identityOf(members.reduce((a,b)=>identityOf(a)<identityOf(b)?a:b))}`,
+      company:reason==='conversation'?participants(members):companyName(lead,organizationKey(lead)),
+      emails:members,needsReplyCount:members.filter(item=>item.needsReply).length,lead,reason,
+      label:reason==='conversation'?'Conversation':reason==='sender'?'Grouped sender':group.label||'Related updates'});
+  });
   return rows;
 }

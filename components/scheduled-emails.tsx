@@ -18,16 +18,23 @@ export function ScheduledEmails({connected,version,showAccount,onEdit}:{connecte
   const [open,setOpen]=useState(false);
   const [busy,setBusy]=useState('');
   const [error,setError]=useState('');
+  const [schedulerActive,setSchedulerActive]=useState(true);
+  const [now,setNow]=useState(0);
   const load=useCallback(async()=>{
-    try{setItems((await api<{items:Item[]}>('/api/scheduled')).items);}
+    try{const result=await api<{items:Item[];schedulerActive:boolean}>('/api/scheduled');setItems(result.items);setSchedulerActive(result.schedulerActive);setNow(Date.now());}
     catch{/* The list is a convenience; failing quietly keeps the rest of the dashboard usable. */}
   },[]);
   useEffect(()=>{
     if(!connected)return;
     let active=true;
-    api<{items:Item[]}>('/api/scheduled').then(result=>{if(active)setItems(result.items);}).catch(()=>{});
+    api<{items:Item[];schedulerActive:boolean}>('/api/scheduled').then(result=>{if(active){setItems(result.items);setSchedulerActive(result.schedulerActive);setNow(Date.now());}}).catch(()=>{});
     return()=>{active=false;};
   },[connected,version]);
+  useEffect(()=>{
+    if(!connected||!items.length)return;
+    const timer=window.setInterval(()=>void load(),60000);
+    return()=>window.clearInterval(timer);
+  },[connected,items.length,load]);
   async function cancel(item:Item,edit:boolean){
     setBusy(item.id);setError('');
     try{
@@ -39,15 +46,17 @@ export function ScheduledEmails({connected,version,showAccount,onEdit}:{connecte
     finally{setBusy('');}
   }
   if(!connected||(!items.length&&!open))return null;
+  const overdue=items.filter(item=>item.status==='scheduled'&&now>item.sendAt+40*60000).length;
   return <>
-    <button className="button white" onClick={()=>setOpen(true)}><CalendarClock size={15}/>Scheduled ({items.length})</button>
+    <button className="button white" onClick={()=>setOpen(true)}><CalendarClock size={15}/>{overdue?`Overdue scheduled (${overdue})`:!schedulerActive?`Scheduled paused (${items.length})`:`Scheduled (${items.length})`}</button>
     <Dialog open={open} onOpenChange={setOpen}><DialogContent className="compose-dialog sm:max-w-xl">
       <DialogTitle>Scheduled emails</DialogTitle>
-      <DialogDescription>These go out within about 30 minutes after their time. Edit one to change it, or cancel it.</DialogDescription>
+      <DialogDescription>The background sender checks about every 30 minutes. Edit an email to change it, or cancel it.</DialogDescription>
+      {!schedulerActive&&<p className="action-message error">The background sender has not checked in recently. Scheduled emails may be delayed; send them from Gmail if they are urgent.</p>}
       {!items.length&&<p className="compose-note">Nothing is scheduled.</p>}
       <ul className="scheduled-list">{items.map(item=><li key={item.id} className="scheduled-item" data-status={item.status}>
         <div><strong>{item.payload.subject}</strong><span>To {item.payload.to.join(', ')}{showAccount&&item.accountEmail?` · from ${item.accountEmail}`:''}</span>
-          <small>{item.status==='failed'?item.error:item.status==='sending'?'Sending now…':`Goes out around ${stamp(item.sendAt)}`}</small></div>
+          <small>{item.status==='failed'?item.error:item.status==='sending'?'Sending now…':now>item.sendAt+40*60000?`Overdue since ${stamp(item.sendAt)} — not confirmed sent`:`Scheduled for ${stamp(item.sendAt)}`}</small></div>
         <div className="scheduled-actions">
           <button className="button white" onClick={()=>void cancel(item,true)} disabled={item.status==='sending'||!!busy}><Pencil size={13}/>Edit</button>
           <button className="button white" onClick={()=>void cancel(item,false)} disabled={item.status==='sending'||!!busy}><X size={13}/>{item.status==='failed'?'Dismiss':'Cancel'}</button>

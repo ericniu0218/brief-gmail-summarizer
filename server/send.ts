@@ -1,4 +1,4 @@
-import { gmail, gmailUpload } from './gmail';
+import { gmail, gmailDelete, gmailUpload } from './gmail';
 import { encode, HttpError, parseStoredJson, type Runtime } from './runtime';
 
 /**
@@ -30,10 +30,16 @@ function isReceipt(value:unknown):value is Receipt {
  * optional thread) for an ordinary message, or `mime` for one with attachments.
  * `noun` only words the messages shown to the user.
  */
-export async function deliverOnce({user,accountId,token,e,action,parts,raw,mime,threadId,confirmUnsent=false,noun='reply',reportThread=false}:{
+export async function deliverOnce({user,accountId,token,e,action,parts,raw,mime,threadId,draftId,discardDraftId,confirmUnsent=false,noun='reply',reportThread=false}:{
   user:string;accountId:string;token:string;e:Runtime;action:'send'|'draft';parts:unknown[];
-  raw?:string;mime?:string;threadId?:string;confirmUnsent?:boolean;noun?:'reply'|'email';reportThread?:boolean;
+  raw?:string;mime?:string;threadId?:string;draftId?:string;discardDraftId?:string;confirmUnsent?:boolean;noun?:'reply'|'email';reportThread?:boolean;
 }):Promise<Receipt> {
+  if((draftId||discardDraftId)&&!/^[-A-Za-z0-9_]{1,150}$/.test(draftId||discardDraftId||''))throw new HttpError(400,'The saved draft is no longer valid.');
+  if(draftId||discardDraftId){
+    const known=await e.DB.prepare("SELECT 1 AS found FROM operations WHERE user_id=? AND account_id=? AND action='draft' AND status='complete' AND json_extract(result,'$.id')=? LIMIT 1")
+      .bind(user,accountId,draftId||discardDraftId).first();
+    if(!known)throw new HttpError(409,'That draft is not linked to this email. Save a new draft instead.');
+  }
   const fingerprint=await fingerprintOf([user,accountId,...parts]);
   const previous=await e.DB.prepare('SELECT status, result, created, attempt FROM operations WHERE id = ? AND user_id = ?').bind(fingerprint,user).first<{status:string;result:string;created:number;attempt:string|null}>();
   if(previous?.status==='complete')return parseStoredJson(previous.result,`${noun} receipt`,isReceipt);
@@ -70,20 +76,27 @@ export async function deliverOnce({user,accountId,token,e,action,parts,raw,mime,
       .bind(Date.now(),attempt,action,fingerprint,user,previous.status,previous.created,previous.attempt??null).run()
     :await e.DB.prepare("INSERT OR IGNORE INTO operations (id,user_id,account_id,status,created,attempt,action) VALUES (?,?,?,'pending',?,?,?)").bind(fingerprint,user,accountId,Date.now(),attempt,action).run();
   if(!claim.meta.changes)throw new HttpError(409,`This ${noun} is already being processed.`);
-  const path=action==='send'?'messages/send':'drafts';
+  const path=action==='send'?'messages/send':draftId?`drafts/${encodeURIComponent(draftId)}`:'drafts';
   let result:{id:string;threadId?:string};
+  const deliver=async(destination:string,method:'POST'|'PUT')=>mime!==undefined
+    ?gmailUpload<{id:string;threadId?:string}>(destination,token,mime,method)
+    :gmail<{id:string;threadId?:string}>(destination,token,{method,body:JSON.stringify(action==='send'
+      ?threadId?{raw,threadId}:{raw}
+      :{message:threadId?{raw,threadId}:{raw}})});
   try{
-    if(mime!==undefined)result=await gmailUpload<{id:string;threadId?:string}>(path,token,mime);
-    else{
-      const message=threadId?{raw,threadId}:{raw};
-      result=await gmail<{id:string;threadId?:string}>(path,token,{method:'POST',body:JSON.stringify(action==='send'?message:{message})});
+    try{result=await deliver(path,draftId&&action==='draft'?'PUT':'POST');}
+    catch(error){
+      if(action!=='draft'||!draftId||!(error instanceof HttpError)||error.status!==404)throw error;
+      // The person deleted this draft in Gmail after we last saved it. The update
+      // definitively created nothing, so make a fresh draft using the same content.
+      result=await deliver('drafts','POST');
     }
   }catch(error){
     // Gmail refusing the request outright means nothing was created, so the claim is
     // released and the same message can be sent again once the cause is fixed. A timeout
     // or a server error might still have been delivered, so that claim is kept and the
     // person is asked to check Gmail rather than risk sending twice.
-    const refused=error instanceof HttpError&&[400,401,403,429].includes(error.status);
+    const refused=error instanceof HttpError&&[400,401,403,404,429].includes(error.status);
     await (refused
       ? e.DB.prepare("DELETE FROM operations WHERE id = ? AND user_id = ? AND status = 'pending' AND attempt = ?").bind(fingerprint,user,attempt).run()
       : e.DB.prepare("UPDATE operations SET status='unconfirmed' WHERE id = ? AND user_id = ? AND status = 'pending' AND attempt = ?").bind(fingerprint,user,attempt).run());
@@ -91,5 +104,9 @@ export async function deliverOnce({user,accountId,token,e,action,parts,raw,mime,
   }
   const receipt:Receipt={id:result.id,status:action==='send'?'sent':'drafted',...(reportThread&&result.threadId?{threadId:result.threadId}:{})};
   await e.DB.prepare("UPDATE operations SET status='complete', result=? WHERE id=? AND user_id=? AND attempt=?").bind(JSON.stringify(receipt),fingerprint,user,attempt).run();
+  if(action==='send'&&discardDraftId){
+    try{await gmailDelete(`drafts/${encodeURIComponent(discardDraftId)}`,token);}
+    catch{console.error('Sent email, but its saved draft could not be removed.');}
+  }
   return receipt;
 }

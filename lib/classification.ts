@@ -1,6 +1,7 @@
 import type { Section, Tag } from './categories';
+import type { ReplyAssessment } from './reply';
 
-export const POLICY_VERSION='policy-2026-09-29-audit-fixes';
+export const POLICY_VERSION='policy-2026-10-03-sender-familiarity';
 
 export type Context='work'|'personal'|'unknown';
 export type Topic='research';
@@ -50,7 +51,13 @@ export type Classification={
   topics:Topic[];
   obligations:Obligation[];
   disposition:Disposition;
+  /**
+   * Whether an email answer is owed. Derived from `reply` wherever one exists, so the badge,
+   * the tab and every count read the same decision; kept as a field for older records.
+   */
   replyRequired:boolean;
+  /** Why an email answer is or is not owed, on what evidence, and how soon. See lib/reply. */
+  reply?:ReplyAssessment;
   securityEvent:boolean;
   processingStatus:ProcessingStatus;
   reason:string;
@@ -72,6 +79,8 @@ export type Classification={
    * records.
    */
   preservedEvidence?:string;
+  /** Server-verified prior correspondence on direct, non-promotional mail. */
+  priorCorrespondence?:boolean;
   /**
    * Set when a manual correction or user rule produced the effective result.
    * `category` records a deliberate user choice of section, which is the only thing
@@ -339,14 +348,18 @@ export function junkConflict(classification:Classification):string|undefined{
   // statement that the message is genuine: it may still be phishing.
   if(classification.securityEvent)return 'junk-with-security-event';
   if(classification.preservedEvidence)return 'junk-with-personal-record';
+  if(classification.priorCorrespondence)return 'junk-with-prior-correspondence';
   return undefined;
 }
 
 const REVIEW_EXPLANATIONS:Record<string,string>={
+  'junk-with-prior-correspondence':'You previously emailed this sender. This direct message was kept out of Junk because whether it is wanted is unclear.',
   'junk-with-open-obligation':'This message may contain a request for you, so it was kept out of Junk for review.',
   'junk-with-security-event':'This message claims to be an account or security notice, so it was kept out of Junk for review. It has not been checked for authenticity.',
   'junk-with-personal-record':'This message records something you earned or completed, such as a certification, so it was kept out of Junk for review.',
   'quoted-history-obligation':'A task in this message appears only in quoted earlier mail, so it was not treated as current work. Check whether it still applies.',
+  'suspicious-request':'This message shows signs of impersonation. Do not reply to it; check with the person through a contact you already know.',
+  'reply-uncertain':'It is not clear whether this message needs a reply from you, so it is waiting for your review.',
   'unclear-task-owner':'It is unclear whether this task is yours, so it is waiting for your review.',
   'ambiguous-date':'A date in this message could not be resolved, so it is waiting for your review.',
   'conflicting-dates':'This message gives more than one due date, so it is waiting for your review.',
@@ -407,5 +420,9 @@ export function needsReview(classification:Classification):string|undefined{
   if(obligations.some(o=>o.due?.ambiguous&&o.required))return 'ambiguous-date';
   const dated=obligations.filter(o=>o.kind==='deadline'&&o.due?.date&&!o.due.ambiguous).map(o=>o.due!.date!);
   if(new Set(dated).size>1)return 'conflicting-dates';
+  // A request that looks like impersonation is held for a person to check, and so is a
+  // reply decision the evidence cannot settle — never shown as a confident "no reply".
+  if(classification.reply?.reasonCode==='suspicious_request')return 'suspicious-request';
+  if(classification.reply?.status==='uncertain')return 'reply-uncertain';
   return undefined;
 }

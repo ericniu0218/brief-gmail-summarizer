@@ -14,6 +14,7 @@ export function database() {
     values: (string | number | null)[] = [];
     constructor(readonly query: string) {}
     bind(...values: (string | number | null)[]) {
+      if(values.length>100)throw new Error('D1 supports at most 100 bound parameters.');
       this.values = values;
       return this;
     }

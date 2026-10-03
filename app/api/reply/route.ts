@@ -15,7 +15,7 @@ import { deliverOnce } from '@/server/send';
 export async function POST(request:Request){
   try{
     mutation(request);const user=await userId();const e=runtime();
-    const input=await inputObject(request,65536) as {id?:unknown;accountId?:unknown;action?:unknown;tone?:unknown;body?:unknown;variation?:unknown;notes?:unknown;confirmUnsent?:unknown;replyAll?:unknown};
+    const input=await inputObject(request,65536) as {id?:unknown;accountId?:unknown;action?:unknown;tone?:unknown;body?:unknown;variation?:unknown;notes?:unknown;confirmUnsent?:unknown;replyAll?:unknown;sendKey?:unknown;saveKey?:unknown;draftId?:unknown};
     // JSON is untrusted: a cast checks nothing. A non-string id would be coerced to the same
     // message by the pattern and the URL, yet fingerprint differently, and slip past the
     // duplicate-send protection below.
@@ -40,6 +40,9 @@ export async function POST(request:Request){
       return json(await replyOptions(email,tone,variation,e,(await userProfile(user,e)).name||undefined));
     }
     if(typeof input.body!=='string'||!input.body.trim()||input.body.length>20000)throw new HttpError(400,'Write a reply of up to 20,000 characters.');
+    if(input.sendKey!==undefined&&(typeof input.sendKey!=='string'||!/^[a-zA-Z0-9-]{8,64}$/.test(input.sendKey)))throw new HttpError(400,'Reload the reply and try again.');
+    if(input.draftId!==undefined&&(typeof input.draftId!=='string'||!/^[-A-Za-z0-9_]{1,150}$/.test(input.draftId)))throw new HttpError(400,'The saved draft is no longer valid.');
+    if(input.saveKey!==undefined&&(typeof input.saveKey!=='string'||!/^[a-zA-Z0-9-]{8,64}$/.test(input.saveKey)))throw new HttpError(400,'Reload the draft and try again.');
     const recipient=replyAddress(original.payload?.headers||[],email.address);
     if(!recipient)throw new HttpError(400,'The reply address could not be verified. Please reply in Gmail.');
     // Reply-all copies are worked out here from the message's own headers, never taken from the
@@ -53,8 +56,9 @@ export async function POST(request:Request){
     // The send protocol (idempotent fingerprint, unconfirmed retries, releasing a refused
     // claim) is shared with new and scheduled emails; see server/send.ts.
     const response=await deliverOnce({user,accountId:owned.id,token,e,action:input.action as 'send'|'draft',noun:'reply',
-      parts:[input.id,input.action,input.body,...(cc.length?[cc]:[])],
+      parts:[input.id,input.action,input.action==='draft'?input.saveKey||'':input.sendKey||'',input.body,...(cc.length?[cc]:[])],
       raw:buildRawMessage({to,cc,subject,body:input.body,inReplyTo:headerId||undefined}),threadId:email.threadId,
+      ...(input.action==='draft'?{draftId:input.draftId as string|undefined}:{discardDraftId:input.draftId as string|undefined}),
       confirmUnsent:input.confirmUnsent===true});
     if(input.action==='send'){
       // Reflect a successful send in the cached inbox without waiting for the next sync.

@@ -1,5 +1,5 @@
 import { failure, inputObject, json, mutation, runtime, userId } from '@/server/runtime';
-import { syncInbox } from '@/server/sync';
+import { RefreshBusy, syncInbox } from '@/server/sync';
 import { ALL_INBOXES, getOwnedConnection, ownedConnections } from '@/server/gmail';
 import { readMailbox } from '@/server/mailbox';
 
@@ -19,14 +19,16 @@ export async function POST(request:Request){
     const targets=requested===ALL_INBOXES
       ? (await ownedConnections(user,e)).sort((a,b)=>(a.last_sync||0)-(b.last_sync||0))
       : [await getOwnedConnection(user,requested,e)];
-    const accounts:Record<string,{ok:boolean;error?:string}>={};
+    // `deferred`: not refreshed this time for a harmless reason (another refresh is running, or
+    // this request ran out of time). It is not a failure and catches up on the next refresh.
+    const accounts:Record<string,{ok:boolean;error?:string;deferred?:'busy'|'time'}>={};
     // How much Gmail work one request will start. Each account's own refresh is a single
     // bounded page under its own lease, so this only decides how many of them are begun:
     // the rest keep their cursor and continue on the next refresh.
     const deadline=Date.now()+20000;
     for(const target of targets){
       const accountId=target.id;
-      if(targets.length>1&&Date.now()>deadline){accounts[accountId]={ok:false,error:'Not refreshed yet — this refresh ran out of time. Refresh again to continue.'};continue;}
+      if(targets.length>1&&Date.now()>deadline){accounts[accountId]={ok:false,deferred:'time',error:'Not refreshed yet — this refresh ran out of time.'};continue;}
       try{
         // A very recent snapshot absorbs double-clicks without repeating Gmail work.
         const existing=await e.DB.prepare('SELECT snapshots.updated, connections.sync_page_token FROM connections LEFT JOIN snapshots ON snapshots.account_id=connections.id AND snapshots.user_id=connections.user_id WHERE connections.id=? AND connections.user_id=?')
@@ -38,14 +40,15 @@ export async function POST(request:Request){
         // The saved cursor lets scheduled and later explicit refreshes continue safely.
         await syncInbox(user,accountId,e);
         accounts[accountId]={ok:true};
-      }catch(error){accounts[accountId]={ok:false,error:error instanceof Error?error.message:'Refresh failed.'};}
+      }catch(error){accounts[accountId]=error instanceof RefreshBusy?{ok:false,deferred:'busy',error:error.message}:{ok:false,error:error instanceof Error?error.message:'Refresh failed.'};}
     }
     // Return the refreshed view itself, so a caller gets mail in one round trip. Accounts
     // that failed keep their previous snapshot and are listed with their error, which is
     // why a partial refresh still returns everything that did load.
     const view=await readMailbox(user,requested,e);
     const values=Object.values(accounts);
-    const failures=targets.flatMap(target=>accounts[target.id]?.ok?[]:[{accountId:target.id,email:target.email,error:accounts[target.id]?.error||'Refresh failed.'}]);
-    return json({...view,refreshed:values.filter(r=>r.ok).length,failed:failures.length,failures});
+    const failures=targets.flatMap(target=>accounts[target.id]?.ok||accounts[target.id]?.deferred?[]:[{accountId:target.id,email:target.email,error:accounts[target.id]?.error||'Refresh failed.'}]);
+    const deferred=targets.flatMap(target=>accounts[target.id]?.deferred?[{accountId:target.id,email:target.email,reason:accounts[target.id].deferred!}]:[]);
+    return json({...view,refreshed:values.filter(r=>r.ok).length,failed:failures.length,failures,deferred});
   }catch(error){return failure(error);}
 }
