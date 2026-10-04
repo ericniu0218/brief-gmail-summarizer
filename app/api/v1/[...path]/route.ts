@@ -156,6 +156,16 @@ async function handle(request: Request) {
           method === 'DELETE' ? null : (await body()).role,
         );
         result = { ok: true };
+      } else if (resource === 'code' && path.length === 3) {
+        // One live code per workspace, so it is a single resource, not a collection.
+        if (method === 'GET') result = { code: await store.joinCode(ws) };
+        else if (method === 'POST') {
+          result = await store.createJoinCode(ws, await body());
+          status = 201;
+        } else if (method === 'DELETE') {
+          await store.revokeJoinCode(ws);
+          result = { ok: true };
+        } else throw new HttpError(405, 'Method not allowed.');
       } else if (
         resource === 'invites' &&
         path.length === 3 &&

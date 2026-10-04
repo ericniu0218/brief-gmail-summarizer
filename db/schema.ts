@@ -269,6 +269,55 @@ export const workspaceInvites = sqliteTable(
     check('invite_role', sql`${t.role} IN ('editor','viewer')`),
   ],
 );
+/**
+ * Reusable join codes: one group code a whole team can type, beside the single-use
+ * invitations above.
+ *
+ * The code is stored readable, unlike invite and integration secrets, because its purpose
+ * is to be re-read and passed around by the owner. The compensating limits are in
+ * `WorkspaceStore`: a code grants only editor or viewer, expires, is revocable, counts its
+ * uses, and is visible to owners alone. `docs/SHARED_WORKSPACES.md` records the reasoning.
+ */
+export const workspaceJoinCodes = sqliteTable(
+  'workspace_join_codes',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id),
+    /** Normalized to the uppercase alphabet in `server/workspaces/join-code.ts`. */
+    code: text('code').notNull().unique(),
+    role: text('role').notNull(),
+    createdBy: text('created_by').notNull(),
+    expires: integer('expires').notNull(),
+    /** `null` means an unlimited number of people may use it before it expires. */
+    maxUses: integer('max_uses'),
+    uses: integer('uses').notNull().default(0),
+    revoked: integer('revoked'),
+    created: integer('created').notNull(),
+  },
+  (t) => [
+    // At most one live code per workspace, so rotating really replaces the old one and a
+    // workspace can never have two codes handing out different roles.
+    uniqueIndex('join_codes_active')
+      .on(t.workspaceId)
+      .where(sql`${t.revoked} IS NULL`),
+    check('join_code_role', sql`${t.role} IN ('editor','viewer')`),
+    check(
+      'join_code_uses',
+      sql`${t.uses} >= 0 AND (${t.maxUses} IS NULL OR ${t.maxUses} > 0)`,
+    ),
+  ],
+);
+/**
+ * Failed join attempts per user, so a guessable eight-character code cannot be searched
+ * for. Keyed by the signed-in user because a wrong code names no workspace to charge.
+ */
+export const joinAttempts = sqliteTable('join_attempts', {
+  userId: text('user_id').primaryKey(),
+  failures: integer('failures').notNull().default(0),
+  windowStart: integer('window_start').notNull(),
+});
 export const workspaceTokens = sqliteTable(
   'workspace_tokens',
   {

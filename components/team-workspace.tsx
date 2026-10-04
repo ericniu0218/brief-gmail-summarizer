@@ -33,6 +33,7 @@ import {
   type Artifact,
   type ArtifactInput,
   type ArtifactSummary,
+  type JoinCode,
   type Member,
   type Workspace,
   type WorkspaceEvent,
@@ -92,6 +93,8 @@ export function TeamWorkspace() {
   const publishKey = useRef('');
   const [inviteRole, setInviteRole] = useState('viewer');
   const [inviteLink, setInviteLink] = useState('');
+  const [joinCode, setJoinCode] = useState<JoinCode | null>(null);
+  const [codeRole, setCodeRole] = useState('editor');
   const [integrationName, setIntegrationName] = useState('');
   const [scope, setScope] = useState('read');
   const [newKey, setNewKey] = useState('');
@@ -130,6 +133,7 @@ export function TeamWorkspace() {
     setIntegrations([]);
     setPreview(null);
     setInviteLink('');
+    setJoinCode(null);
     setNewKey('');
     setCursor(null);
     setTab('results');
@@ -242,11 +246,13 @@ export function TeamWorkspace() {
     void Promise.all([
       api.request<{ items: Invite[] }>(`${base}/invites`),
       api.request<{ items: Integration[] }>(`${base}/tokens`),
+      api.request<{ code: JoinCode | null }>(`${base}/code`),
     ])
-      .then(([i, t]) => {
+      .then(([i, t, c]) => {
         if (!cancelled) {
           setInvites(i.items);
           setIntegrations(t.items);
+          setJoinCode(c.code);
         }
       })
       .catch(fail);
@@ -346,28 +352,37 @@ export function TeamWorkspace() {
             onSubmit={(e) => {
               e.preventDefault();
               void act(async () => {
-                const result = await api.request<{ workspaceId: string }>(
-                  'join',
-                  {
-                    method: 'POST',
-                    body: JSON.stringify({ token: joinToken }),
-                  },
-                );
+                // One field takes both a reusable group code and a single-use invitation
+                // link; the server decides which was given.
+                const result = await api.request<{
+                  workspaceId: string;
+                  joined: boolean;
+                }>('join', {
+                  method: 'POST',
+                  body: JSON.stringify({ token: joinToken }),
+                });
                 await loadWorkspaces(result.workspaceId);
                 setJoinToken('');
-                setNotice('You joined the workspace.');
+                setNotice(
+                  result.joined
+                    ? 'You joined the workspace.'
+                    : 'You are already a member of this workspace.',
+                );
               });
             }}
           >
-            <label htmlFor="join-token">Have an invitation?</label>
+            <label htmlFor="join-token">Have a group code?</label>
             <Input
               id="join-token"
               value={joinToken}
               required
-              placeholder="Paste invitation code"
+              maxLength={120}
+              placeholder="e.g. ABCD-2345"
               onChange={(e) => setJoinToken(e.target.value)}
             />
-            <Button variant="outline" disabled={busy || !!signIn}>
+            {/* Without an explicit type this renders as type="button", which leaves the
+                form submittable only by pressing Enter in the field. */}
+            <Button variant="outline" type="submit" disabled={busy || !!signIn}>
               Join workspace
             </Button>
           </form>
@@ -754,7 +769,127 @@ export function TeamWorkspace() {
                     ))}
                     {owner && (
                       <>
-                        <h3>Invite a colleague</h3>
+                        <h3>Group code</h3>
+                        <p>
+                          One code the whole group can type, so you do not need
+                          an invitation each. Replace or turn it off at any
+                          time. Everyone still needs access to this Site through
+                          its sharing settings.
+                        </p>
+                        {joinCode ? (
+                          <div className="team-secret">
+                            <label htmlFor="group-code">
+                              {joinCode.expires < clockNow
+                                ? 'This code has expired. Replace it to let anyone else in.'
+                                : `Share this code to join as ${joinCode.role}`}
+                            </label>
+                            <Input
+                              id="group-code"
+                              className="team-code"
+                              readOnly
+                              value={joinCode.code}
+                            />
+                            <Button
+                              variant="outline"
+                              onClick={() => void act(() => copy(joinCode.code))}
+                            >
+                              <Copy size={14} /> Copy code
+                            </Button>
+                            <p className="team-meta">
+                              {joinCode.expires < clockNow
+                                ? 'Expired'
+                                : `Expires ${date(joinCode.expires)}`}
+                              {' · '}
+                              {joinCode.uses === 1
+                                ? 'used once'
+                                : `used ${joinCode.uses} times`}
+                              {joinCode.maxUses === null
+                                ? ''
+                                : ` of ${joinCode.maxUses}`}
+                            </p>
+                            <div className="team-inline">
+                              <Button
+                                variant="ghost"
+                                disabled={busy}
+                                onClick={() =>
+                                  void act(async () => {
+                                    // Replacing is one call: the server revokes the old code
+                                    // and issues the new one together.
+                                    setJoinCode(
+                                      await api.request<JoinCode>(
+                                        `${base}/code`,
+                                        {
+                                          method: 'POST',
+                                          body: JSON.stringify({
+                                            role: joinCode.role,
+                                          }),
+                                        },
+                                      ),
+                                    );
+                                    setNotice(
+                                      'New code created. The old one no longer works.',
+                                    );
+                                  })
+                                }
+                              >
+                                <RefreshCw size={14} /> Replace code
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                disabled={busy}
+                                onClick={() =>
+                                  void act(async () => {
+                                    await api.request(`${base}/code`, {
+                                      method: 'DELETE',
+                                    });
+                                    setJoinCode(null);
+                                    setNotice(
+                                      'Code turned off. Nobody new can join with it.',
+                                    );
+                                  })
+                                }
+                              >
+                                Turn off
+                              </Button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="team-inline">
+                            <NativeSelect
+                              aria-label="Group code role"
+                              value={codeRole}
+                              onChange={(e) => setCodeRole(e.target.value)}
+                            >
+                              <option value="editor">
+                                Editor · read and publish
+                              </option>
+                              <option value="viewer">
+                                Viewer · read results
+                              </option>
+                            </NativeSelect>
+                            <Button
+                              disabled={busy}
+                              onClick={() =>
+                                void act(async () => {
+                                  setJoinCode(
+                                    await api.request<JoinCode>(
+                                      `${base}/code`,
+                                      {
+                                        method: 'POST',
+                                        body: JSON.stringify({
+                                          role: codeRole,
+                                        }),
+                                      },
+                                    ),
+                                  );
+                                })
+                              }
+                            >
+                              <KeyRound size={15} /> Create group code
+                            </Button>
+                          </div>
+                        )}
+                        <h3>Invite one person</h3>
                         <p>
                           Invitations can be used once and expire in seven days.
                           Your colleague also needs access to this Site through

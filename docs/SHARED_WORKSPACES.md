@@ -93,7 +93,8 @@ Mount the copied handler at `/api/v1/[...path]`, or translate its branches to th
 | Route | Purpose |
 | --- | --- |
 | `GET/POST /workspaces` | list or create human workspaces |
-| `POST /join` | redeem a single-use invitation |
+| `POST /join` | redeem a single-use invitation or a reusable group code |
+| `GET/POST/DELETE /workspaces/:id/code` | read, issue/replace, or turn off the group code |
 | `GET/POST /workspaces/:id/artifacts` | list metadata or publish an artifact |
 | `GET /workspaces/:id/artifacts/:artifactId` | read the full shared result |
 | `POST /workspaces/:id/artifacts/:artifactId/fold` | derive a fold |
@@ -135,6 +136,23 @@ In the target project, run its equivalent migration, test, typecheck, and produc
 - An event consumer resumes after `nextAfter`.
 - With Gmail enabled, only selected summaries appear in preview and a changed snapshot requires a fresh preview.
 - Tests, typecheck, migration inspection, and production build pass.
+
+## Group codes
+
+A workspace also has one reusable join code, so a team joins by typing `ABCD-2345` instead of needing an invitation each. Eight characters from a thirty-symbol alphabet that omits `0 O 1 I L U`, which is what people mistype when a code is read aloud.
+
+This is the one secret in the feature **stored readable**, because its purpose is to be re-read by the owner and passed around; hashing it would also buy little, since a short code is brute-forceable from a leaked database anyway. The limits that replace hashing:
+
+| Risk | Limit |
+| --- | --- |
+| A stale code circulating | expires in 1–30 days, default 7; revocable; replaceable |
+| Two codes granting different roles | partial unique index `join_codes_active`, one live code per workspace |
+| Escalation through a code | CHECK `editor/viewer`; never owner, and a rejoin never changes an existing role |
+| Searching the code space | `join_attempts` caps a user at 10 wrong codes per 10 minutes, failing closed |
+| Learning which codes exist | revoked, expired, exhausted and never-issued share one refusal |
+| Spending a use without joining | the use is claimed first, and membership inserts only on `changes() > 0` |
+
+A malformed code answers with the expected shape and is not counted as a guess, so typos never cause a lockout.
 
 ## Invariants worth keeping
 
