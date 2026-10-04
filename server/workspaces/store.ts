@@ -18,6 +18,12 @@ import {
   normalizeJoinCode,
 } from './join-code';
 import {
+  TASK_STATUSES,
+  taskDueAt,
+  type Task,
+  type TaskStatus,
+} from '@/lib/tasks';
+import {
   artifactInput,
   canonical,
   corpusDocuments,
@@ -62,6 +68,47 @@ type ArtifactRow = {
 };
 const META_COLUMNS =
   'id, workspace_id, kind, schema_version, title, summary, provenance, parent_ids, created_by, author_name, created, checksum';
+type TaskRow = {
+  id: string;
+  workspace_id: string;
+  title: string;
+  detail: string;
+  status: TaskStatus;
+  assignee_id: string | null;
+  assignee_name: string | null;
+  due_at: number | null;
+  due_kind: string | null;
+  created_by: string;
+  creator_name: string;
+  created: number;
+  updated: number;
+  version: number;
+  completed: number | null;
+};
+function taskOf(row: TaskRow | null): Task {
+  // A row read back immediately after its own write; a miss means the record is gone, not
+  // that the caller sent anything wrong.
+  if (!row) throw new HttpError(500, 'The task could not be read back.');
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    title: row.title,
+    detail: row.detail,
+    status: row.status,
+    assigneeId: row.assignee_id,
+    assigneeName: row.assignee_name,
+    dueAt: row.due_at,
+    dueKind: row.due_kind as Task['dueKind'],
+    createdBy: row.created_by,
+    creatorName: row.creator_name,
+    created: row.created,
+    updated: row.updated,
+    version: row.version,
+    completed: row.completed,
+  };
+}
+/** Enough for any team that is actually tracking work by hand. */
+const TASK_LIMIT = 500;
 /** Wrong group codes tolerated per user before they must wait, and the window they age out in. */
 const JOIN_FAILURE_LIMIT = 10;
 const JOIN_FAILURE_WINDOW = 10 * 60000;
@@ -576,6 +623,221 @@ export class WorkspaceStore {
     ]);
     if (!results[0].meta.changes)
       throw new HttpError(404, 'Integration not found.');
+  }
+  private taskStatus(value: unknown): TaskStatus {
+    if (!TASK_STATUSES.includes(value as TaskStatus))
+      throw new HttpError(
+        400,
+        `Choose a status: ${TASK_STATUSES.join(', ')}.`,
+      );
+    return value as TaskStatus;
+  }
+  /** Work can only be given to someone who is in the workspace now. */
+  private async assignee(ws: string, value: unknown) {
+    if (value === null || value === undefined || value === '') return null;
+    const userId = string(value, 'Assignee', 200);
+    const member = await this.db
+      .prepare(
+        'SELECT display_name AS displayName FROM workspace_members WHERE workspace_id = ? AND user_id = ?',
+      )
+      .bind(ws, userId)
+      .first<{ displayName: string }>();
+    if (!member)
+      throw new HttpError(400, 'Assign this task to someone in the workspace.');
+    return { id: userId, name: member.displayName };
+  }
+  private deadline(value: unknown) {
+    const due = taskDueAt(value);
+    if (due === undefined)
+      throw new HttpError(
+        400,
+        'Give a deadline as a date (2026-10-09), a full date and time, or nothing.',
+      );
+    return due;
+  }
+  private async taskRow(ws: string, id: string): Promise<TaskRow> {
+    const row = await this.db
+      .prepare('SELECT * FROM workspace_tasks WHERE workspace_id = ? AND id = ?')
+      .bind(ws, string(id, 'Task ID'))
+      .first<TaskRow>();
+    if (!row) throw new HttpError(404, 'Task not found.');
+    return row;
+  }
+  /**
+   * Every task in the workspace, newest first with live work ahead of finished work, so a
+   * capped response drops completed history rather than something still owed.
+   */
+  async tasks(ws: string) {
+    await this.authorize(ws);
+    const rows = await this.db
+      .prepare(
+        `SELECT * FROM workspace_tasks WHERE workspace_id = ? ORDER BY CASE WHEN status IN ('done','cancelled') THEN 1 ELSE 0 END, created DESC LIMIT ?`,
+      )
+      .bind(ws, TASK_LIMIT)
+      .all<TaskRow>();
+    return {
+      items: rows.results.map(taskOf),
+      // Who the viewer is, so the browser can mark their own work without the page having
+      // to guess which member row is theirs.
+      me: {
+        actor: this.actorId,
+        userId: this.actor.type === 'user' ? this.actor.id : null,
+      },
+    };
+  }
+  async createTask(
+    ws: string,
+    value: unknown,
+    requestKey: unknown,
+  ): Promise<Task> {
+    await this.authorize(ws, 'write');
+    const data = object(value);
+    const key = string(requestKey, 'Idempotency-Key', 128);
+    const title = string(data.title, 'Task title', 200);
+    const detail = string(data.detail ?? '', 'Task detail', 4000, true);
+    const status = this.taskStatus(data.status ?? 'todo');
+    const due = this.deadline(data.due);
+    const assignee = await this.assignee(ws, data.assigneeId);
+    const existing = await this.db
+      .prepare(
+        'SELECT * FROM workspace_tasks WHERE workspace_id = ? AND created_by = ? AND request_key = ?',
+      )
+      .bind(ws, this.actorId, key)
+      .first<TaskRow>();
+    // A retried creation returns the task it already made instead of a duplicate.
+    if (existing) return taskOf(existing);
+    const id = crypto.randomUUID();
+    const now = Date.now();
+    await this.db.batch([
+      this.db
+        .prepare(
+          'INSERT INTO workspace_tasks (id, workspace_id, title, detail, status, assignee_id, assignee_name, due_at, due_kind, created_by, creator_name, created, updated, version, completed, request_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?) ON CONFLICT(workspace_id, created_by, request_key) DO NOTHING',
+        )
+        .bind(
+          id,
+          ws,
+          title,
+          detail,
+          status,
+          assignee?.id ?? null,
+          assignee?.name ?? null,
+          due?.dueAt ?? null,
+          due?.dueKind ?? null,
+          this.actorId,
+          this.actor.name,
+          now,
+          now,
+          status === 'done' ? now : null,
+          key,
+        ),
+      this.db
+        .prepare(
+          "INSERT INTO workspace_events (workspace_id, type, actor_id, subject_id, created) SELECT ?, 'task.created', ?, ?, ? WHERE changes() > 0",
+        )
+        .bind(ws, this.actorId, id, now),
+    ]);
+    return taskOf(
+      await this.db
+        .prepare(
+          'SELECT * FROM workspace_tasks WHERE workspace_id = ? AND created_by = ? AND request_key = ?',
+        )
+        .bind(ws, this.actorId, key)
+        .first<TaskRow>(),
+    );
+  }
+  /**
+   * Applies only the fields the caller sent, against the version they were looking at.
+   *
+   * Both halves matter: naming the version means a stale save is refused instead of
+   * overwriting someone, and sending only changed fields means two people editing
+   * different parts of one task do not have to fight over the fields they never touched.
+   */
+  async updateTask(ws: string, id: string, value: unknown): Promise<Task> {
+    await this.authorize(ws, 'write');
+    const data = object(value);
+    const version = integer(data.version, 'version', 1, Number.MAX_SAFE_INTEGER);
+    const current = await this.taskRow(ws, id);
+    const title = 'title' in data ? string(data.title, 'Task title', 200) : current.title;
+    const detail =
+      'detail' in data
+        ? string(data.detail ?? '', 'Task detail', 4000, true)
+        : current.detail;
+    const status = 'status' in data ? this.taskStatus(data.status) : current.status;
+    const due =
+      'due' in data
+        ? this.deadline(data.due)
+        : current.due_at === null
+          ? null
+          : { dueAt: current.due_at, dueKind: current.due_kind as 'day' | 'time' };
+    const assignee =
+      'assigneeId' in data
+        ? await this.assignee(ws, data.assigneeId)
+        : current.assignee_id === null
+          ? null
+          : { id: current.assignee_id, name: current.assignee_name as string };
+    const now = Date.now();
+    // Finishing stamps the time; reopening clears it, so a reopened task cannot claim to
+    // have been completed.
+    const completed =
+      status === 'done' ? (current.completed ?? now) : null;
+    // One event per update, naming the most consequential change, so the activity feed
+    // reads as a history of the work rather than of keystrokes.
+    const event =
+      status !== current.status
+        ? 'task.status'
+        : (assignee?.id ?? null) !== current.assignee_id
+          ? 'task.assignee'
+          : (due?.dueAt ?? null) !== current.due_at
+            ? 'task.due'
+            : 'task.edited';
+    const results = await this.db.batch([
+      this.db
+        .prepare(
+          'UPDATE workspace_tasks SET title = ?, detail = ?, status = ?, assignee_id = ?, assignee_name = ?, due_at = ?, due_kind = ?, completed = ?, updated = ?, version = version + 1 WHERE workspace_id = ? AND id = ? AND version = ?',
+        )
+        .bind(
+          title,
+          detail,
+          status,
+          assignee?.id ?? null,
+          assignee?.name ?? null,
+          due?.dueAt ?? null,
+          due?.dueKind ?? null,
+          completed,
+          now,
+          ws,
+          id,
+          version,
+        ),
+      this.db
+        .prepare(
+          'INSERT INTO workspace_events (workspace_id, type, actor_id, subject_id, created) SELECT ?, ?, ?, ?, ? WHERE changes() > 0',
+        )
+        .bind(ws, event, this.actorId, id, now),
+    ]);
+    if (!results[0].meta.changes)
+      throw new HttpError(
+        409,
+        'Someone else changed this task first. It has been reloaded.',
+      );
+    return taskOf(await this.taskRow(ws, id));
+  }
+  async deleteTask(ws: string, id: string) {
+    const role = await this.authorize(ws, 'write');
+    const current = await this.taskRow(ws, id);
+    // Deleting removes the record of the work, so it stays with the person who added it
+    // and the owner. Anyone else marks it cancelled, which is visible.
+    if (role !== 'owner' && current.created_by !== this.actorId)
+      throw new HttpError(
+        403,
+        'Only an owner, or whoever added this task, can delete it.',
+      );
+    await this.db.batch([
+      this.db
+        .prepare('DELETE FROM workspace_tasks WHERE workspace_id = ? AND id = ?')
+        .bind(ws, id),
+      this.event(ws, 'task.deleted', id),
+    ]);
   }
   async listArtifacts(
     ws: string,

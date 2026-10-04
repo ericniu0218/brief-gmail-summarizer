@@ -369,6 +369,58 @@ export const workspaceArtifacts = sqliteTable(
     index('artifacts_workspace_created').on(t.workspaceId, t.created, t.id),
   ],
 );
+/**
+ * Team tasks: the first workspace record that changes after it is written, unlike an
+ * immutable artifact. Two people editing one task is therefore a real event, so every row
+ * carries a `version` that an update must name; the losing write is refused rather than
+ * silently overwriting the winner. What changed, and who changed it, is recorded in
+ * `workspace_events`.
+ */
+export const workspaceTasks = sqliteTable(
+  'workspace_tasks',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id),
+    title: text('title').notNull(),
+    detail: text('detail').notNull().default(''),
+    status: text('status').notNull(),
+    /** A member's `workspace_members.user_id`; null while the work is unclaimed. */
+    assigneeId: text('assignee_id'),
+    assigneeName: text('assignee_name'),
+    dueAt: integer('due_at'),
+    dueKind: text('due_kind'),
+    /** The actor that created it (`user:…` or `integration:…`), as artifacts record. */
+    createdBy: text('created_by').notNull(),
+    creatorName: text('creator_name').notNull(),
+    created: integer('created').notNull(),
+    updated: integer('updated').notNull(),
+    version: integer('version').notNull().default(1),
+    completed: integer('completed'),
+    requestKey: text('request_key').notNull(),
+  },
+  (t) => [
+    // Retrying one creation makes one task, as retrying a publish makes one artifact.
+    uniqueIndex('tasks_idempotency').on(t.workspaceId, t.createdBy, t.requestKey),
+    index('tasks_workspace_assignee').on(t.workspaceId, t.assigneeId, t.status),
+    index('tasks_workspace_due').on(t.workspaceId, t.status, t.dueAt),
+    check(
+      'task_status',
+      sql`${t.status} IN ('todo','doing','blocked','done','cancelled')`,
+    ),
+    // A deadline and the precision it was given in travel together or not at all.
+    check(
+      'task_due',
+      sql`(${t.dueAt} IS NULL AND ${t.dueKind} IS NULL) OR (${t.dueAt} IS NOT NULL AND ${t.dueKind} IN ('day','time'))`,
+    ),
+    check(
+      'task_assignee',
+      sql`(${t.assigneeId} IS NULL AND ${t.assigneeName} IS NULL) OR (${t.assigneeId} IS NOT NULL AND ${t.assigneeName} IS NOT NULL)`,
+    ),
+    check('task_version', sql`${t.version} >= 1`),
+  ],
+);
 export const workspaceEvents = sqliteTable(
   'workspace_events',
   {

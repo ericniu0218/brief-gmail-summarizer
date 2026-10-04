@@ -27,6 +27,7 @@ import {
   SheetDescription,
 } from '@/components/ui/sheet';
 import { ArtifactContent } from './artifact-content';
+import { TeamTasks } from './team-tasks';
 import { WorkspaceApiError, WorkspaceClient } from '@/lib/workspaces/client';
 import {
   CORPUS_KIND,
@@ -466,6 +467,7 @@ export function TeamWorkspace() {
               >
                 <TabsList className="team-tabs">
                   <TabsTrigger value="results">Results</TabsTrigger>
+                  <TabsTrigger value="tasks">Tasks</TabsTrigger>
                   <TabsTrigger value="publish" disabled={!canWrite}>
                     Publish
                   </TabsTrigger>
@@ -577,6 +579,16 @@ export function TeamWorkspace() {
                       Load more results
                     </Button>
                   )}
+                </TabsContent>
+                <TabsContent value="tasks">
+                  <TeamTasks
+                    workspaceId={workspaceId}
+                    members={members}
+                    canWrite={canWrite}
+                    busy={busy}
+                    act={(fn) => void act(fn)}
+                    notify={setNotice}
+                  />
                 </TabsContent>
                 <TabsContent value="publish">
                   <div className="team-panel">

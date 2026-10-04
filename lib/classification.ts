@@ -193,7 +193,17 @@ export function obligationDueAt(obligation:Obligation):number|undefined{
     return parsed;
   }
   if(!due.date)return undefined;
-  const match=/^(\d{4})-(\d{2})-(\d{2})$/.exec(due.date);
+  return endOfUtcDay(due.date);
+}
+
+/**
+ * The instant a `YYYY-MM-DD` day ends, 23:59:59 UTC, or undefined when the date is not a
+ * real one. Team task deadlines call this too, so a task due on a date and a message due on
+ * the same date fall due together rather than a second or a day apart.
+ */
+export function endOfUtcDay(date:unknown):number|undefined{
+  if(typeof date!=='string')return undefined;
+  const match=/^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
   if(!match)return undefined;
   const year=Number(match[1]),month=Number(match[2])-1,day=Number(match[3]);
   const at=Date.UTC(year,month,day,23,59,59);

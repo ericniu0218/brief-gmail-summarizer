@@ -154,6 +154,25 @@ This is the one secret in the feature **stored readable**, because its purpose i
 
 A malformed code answers with the expected shape and is not counted as a guess, so typos never cause a lockout.
 
+## Tasks
+
+A workspace also tracks work: `workspace_tasks` answers who is doing what, by when. Tasks sit beside artifacts rather than inside them, because an artifact is an immutable result and a task is a record that changes for as long as the work lasts.
+
+That difference drives the design:
+
+| Concern | Decision |
+| --- | --- |
+| Two people editing one task | every row carries `version`; an update names the version it edits and a stale save is refused with 409, never merged silently |
+| Partial edits | an update applies only the fields it sends, so editing the deadline cannot revert someone's title |
+| What "due" means | a day deadline resolves through `endOfUtcDay`, the same rule mail deadlines use, so a task and a message due on one date fall due together |
+| Deadline precision | `due_kind` records whether a date or an instant was given, so a day-level deadline is never displayed as 23:59 |
+| Assignment | the assignee must be a current member; removing someone leaves their work in place, shown against their name |
+| History | one event per update (`task.status`, `task.assignee`, `task.due`, `task.edited`) so Activity reads as a history of the work |
+| Retries | unique `(workspace_id, created_by, request_key)`, as artifacts have |
+| Deleting | an owner, or whoever added the task; anyone else marks it cancelled, which stays visible |
+
+Grouping, ordering and the overdue/today/this-week buckets live in `lib/tasks.ts`, are pure, and take `now` as an argument, so the server and the browser cannot disagree about what is late and the view re-ranks as the day passes without a write.
+
 ## Invariants worth keeping
 
 - Artifacts are immutable. A revision is a new artifact pointing to its predecessors.

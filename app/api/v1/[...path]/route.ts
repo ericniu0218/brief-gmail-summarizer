@@ -156,6 +156,19 @@ async function handle(request: Request) {
           method === 'DELETE' ? null : (await body()).role,
         );
         result = { ok: true };
+      } else if (resource === 'tasks' && path.length === 3) {
+        if (method === 'GET') result = await store.tasks(ws);
+        else if (method === 'POST') {
+          result = await store.createTask(ws, await body(), key);
+          status = 201;
+        } else throw new HttpError(405, 'Method not allowed.');
+      } else if (resource === 'tasks' && path.length === 4) {
+        // An update names the version it edits; see `WorkspaceStore.updateTask`.
+        if (method === 'PATCH') result = await store.updateTask(ws, id, await body());
+        else if (method === 'DELETE') {
+          await store.deleteTask(ws, id);
+          result = { ok: true };
+        } else throw new HttpError(405, 'Method not allowed.');
       } else if (resource === 'code' && path.length === 3) {
         // One live code per workspace, so it is a single resource, not a collection.
         if (method === 'GET') result = { code: await store.joinCode(ws) };
