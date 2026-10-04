@@ -16,6 +16,7 @@ import {
   type Task,
 } from '../lib/tasks';
 import { obligationDueAt } from '../lib/classification';
+import { emailTaskDraft } from '../server/workspaces/email-task';
 
 /**
  * Team tasks: who is doing what, by when.
@@ -441,4 +442,238 @@ void test('HTTP flow: add a task, hand it on, finish it, and lose a stale save',
     (await DELETE(call(`workspaces/${ws.id}/tasks/${task.id}`, 'DELETE'))).status,
     200,
   );
+});
+
+const seedMailbox = (
+  db: D1Database,
+  classification: unknown,
+  over: Record<string, unknown> = {},
+) =>
+  db
+    .prepare(
+      'INSERT INTO snapshots (account_id, user_id, data, updated) VALUES (?, ?, ?, ?)',
+    )
+    .bind(
+      'owner-account',
+      'owner',
+      JSON.stringify({
+        emails: [
+          {
+            id: 'mail-1',
+            subject: 'Assay\u200b scheduling',
+            summary:
+              'Luke needs the binding results before the review.\u200c\u200c\u200c\u200c  \u200c',
+            sender: 'Luke Li',
+            address: 'luke@private.example',
+            body: 'Private raw body with the full thread.',
+            classification,
+            ...over,
+          },
+        ],
+        ai: true,
+      }),
+      1000,
+    )
+    .run();
+const obligation = (over: Record<string, unknown> = {}) => ({
+  kind: 'deadline',
+  required: true,
+  ownerIsUser: true,
+  state: 'open',
+  due: { phrase: 'by 9 October', date: '2026-10-09', ambiguous: false },
+  ...over,
+});
+
+void test('a message becomes a task carrying the deadline Brief already found', async () => {
+  const { db } = await setup();
+  await seedMailbox(db, { disposition: 'keep', obligations: [obligation()] });
+  const draft = await emailTaskDraft(db, 'owner', {
+    accountId: 'owner-account',
+    messageId: 'mail-1',
+  });
+  assert.equal(draft.title, 'Assay scheduling');
+  // The date the classifier recorded, as a day rather than the instant it resolves to.
+  assert.equal(draft.due, '2026-10-09');
+  assert.match(draft.detail, /^From Luke Li: Luke needs the binding results/);
+  // Campaign preview padding is invisible in a mail client and a wall of junk anywhere
+  // else, so it never reaches the team's task list.
+  assert.doesNotMatch(
+    draft.detail,
+    /[\u00ad\u180e\u200b-\u200f\u2060-\u2064\ufeff]|\u034f/,
+  );
+  assert.doesNotMatch(draft.title, /\s{2,}/);
+  // The mailbox stays private: no body, no address, beyond the summary already shown.
+  const text = JSON.stringify(draft);
+  assert.ok(!text.includes('Private raw body'));
+  assert.ok(!text.includes('luke@private.example'));
+});
+
+void test('a deadline is only carried over when it is live and the reader owns it', async () => {
+  const cases: [string, unknown, string | null] = ['', null, null];
+  void cases;
+  for (const [name, obligations, expected] of [
+    ['no obligation at all', [], null],
+    ['already done', [obligation({ state: 'completed' })], null],
+    ['somebody else owes it', [obligation({ ownerIsUser: false })], null],
+    ['not actually required', [obligation({ required: false })], null],
+    ['an ambiguous date', [obligation({ due: { phrase: 'soon', ambiguous: true } })], null],
+    ['the soonest of several', [obligation(), obligation({ due: { phrase: 'Oct 6', date: '2026-10-06', ambiguous: false } })], '2026-10-06'],
+    ['a timed obligation', [obligation({ due: { phrase: '3pm', time: '2026-10-09T15:00:00Z', ambiguous: false } })], '2026-10-09T15:00:00.000Z'],
+  ] as [string, unknown[], string | null][]) {
+    const { db } = await setup();
+    await seedMailbox(db, { disposition: 'keep', obligations });
+    const draft = await emailTaskDraft(db, 'owner', {
+      accountId: 'owner-account',
+      messageId: 'mail-1',
+    });
+    assert.equal(draft.due, expected, name);
+  }
+});
+
+void test('the task bridge reads only the signed-in owner’s own mailbox', async () => {
+  const { db } = await setup();
+  await seedMailbox(db, { disposition: 'keep', obligations: [] });
+  await assert.rejects(
+    () =>
+      emailTaskDraft(db, 'luke', {
+        accountId: 'owner-account',
+        messageId: 'mail-1',
+      }),
+    denied(404),
+  );
+  await assert.rejects(
+    () =>
+      emailTaskDraft(db, 'owner', {
+        accountId: 'owner-account',
+        messageId: 'missing',
+      }),
+    denied(409),
+  );
+  await assert.rejects(
+    () => emailTaskDraft(db, 'owner', { accountId: 'all', messageId: 'mail-1' }),
+    denied(400),
+  );
+});
+
+void test('HTTP: a reviewed message becomes a task, and a changed one must be reviewed again', async () => {
+  const { db, ws } = await setup();
+  await seedMailbox(db, { disposition: 'keep', obligations: [obligation()] });
+  globalThis.__briefTestEnv = {
+    DB: db,
+    APP_URL: 'https://brief.example',
+  } as Runtime;
+  const call = (data: unknown, extra?: Record<string, string>) =>
+    new Request(
+      `https://brief.example/api/v1/workspaces/${ws.id}/task-from-email`,
+      {
+        method: 'POST',
+        headers: {
+          origin: 'https://brief.example',
+          'content-type': 'application/json',
+          ...extra,
+        },
+        body: JSON.stringify(data),
+      },
+    );
+  globalThis.__briefTestHeaders = new Headers({
+    'x-brief-identity-secret': 'test-ingress-secret-for-authenticated-proxy',
+    'oai-authenticated-user-id': 'owner',
+    'oai-authenticated-user-email': 'owner@example.com',
+  });
+  const reviewed = (await (
+    await POST(call({ accountId: 'owner-account', messageId: 'mail-1' }))
+  ).json()) as { draft: { detail: string }; draftHash: string };
+
+  const created = await POST(
+    call(
+      {
+        accountId: 'owner-account',
+        messageId: 'mail-1',
+        create: true,
+        draftHash: reviewed.draftHash,
+        title: 'Send Luke the binding results',
+        assigneeId: 'luke',
+      },
+      { 'idempotency-key': 'from-mail-1' },
+    ),
+  );
+  assert.equal(created.status, 201);
+  const made = (await created.json()) as Task;
+  assert.equal(made.title, 'Send Luke the binding results');
+  assert.equal(made.assigneeName, 'Person luke');
+  assert.equal(made.dueAt, Date.UTC(2026, 9, 9, 23, 59, 59));
+  // The description is the server's own text, not anything the browser sent.
+  assert.equal(made.detail, reviewed.draft.detail);
+  const injected = await POST(
+    call(
+      {
+        accountId: 'owner-account',
+        messageId: 'mail-1',
+        create: true,
+        draftHash: reviewed.draftHash,
+        title: 'Second task',
+        detail: 'Text the browser made up about this mailbox.',
+      },
+      { 'idempotency-key': 'from-mail-injected' },
+    ),
+  );
+  assert.equal(injected.status, 201);
+  assert.equal((await injected.json() as Task).detail, reviewed.draft.detail);
+
+  // A hash from a draft nobody read is refused rather than added silently.
+  assert.equal(
+    (
+      await POST(
+        call(
+          {
+            accountId: 'owner-account',
+            messageId: 'mail-1',
+            create: true,
+            draftHash: 'stale',
+            title: 'Sneaky',
+          },
+          { 'idempotency-key': 'from-mail-2' },
+        ),
+      )
+    ).status,
+    409,
+  );
+  globalThis.__briefTestHeaders = new Headers({
+    'x-brief-identity-secret': 'test-ingress-secret-for-authenticated-proxy',
+    'oai-authenticated-user-id': 'viewer',
+    'oai-authenticated-user-email': 'viewer@example.com',
+  });
+  assert.equal(
+    (await POST(call({ accountId: 'owner-account', messageId: 'mail-1' }))).status,
+    403,
+  );
+});
+
+void test('the inbox strip shows live work assigned to you, wherever it lives', async () => {
+  const { ws, owner, luke, ethan } = await setup();
+  const other = await owner.createWorkspace('Antibody B');
+  await luke.join((await owner.createJoinCode(other.id, { role: 'editor' })).code);
+  await add(owner, ws.id, { title: 'Mine here', assigneeId: 'luke', due: '2026-10-09' });
+  await add(owner, other.id, { title: 'Mine there', assigneeId: 'luke' });
+  await add(owner, ws.id, { title: 'Ethan task', assigneeId: 'ethan' });
+  await add(owner, ws.id, { title: 'Nobody task' });
+  const finished = await add(owner, ws.id, { title: 'Already done', assigneeId: 'luke' });
+  await owner.updateTask(ws.id, finished.id, { version: finished.version, status: 'done' });
+
+  const mine = await luke.myTasks();
+  // Only live work, only mine, across both workspaces, soonest deadline first.
+  assert.deepEqual(
+    mine.map((task) => [task.title, task.workspaceName]),
+    [
+      ['Mine here', 'Antibody A'],
+      ['Mine there', 'Antibody B'],
+    ],
+  );
+  // Losing membership takes the workspace's tasks off your list.
+  await owner.changeMember(other.id, 'luke', null);
+  assert.deepEqual(
+    (await luke.myTasks()).map((task) => task.title),
+    ['Mine here'],
+  );
+  assert.deepEqual((await ethan.myTasks()).map((task) => task.title), ['Ethan task']);
 });

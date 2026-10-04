@@ -173,6 +173,14 @@ That difference drives the design:
 
 Grouping, ordering and the overdue/today/this-week buckets live in `lib/tasks.ts`, are pure, and take `now` as an argument, so the server and the browser cannot disagree about what is late and the view re-ranks as the day passes without a write.
 
+### From a message to a task
+
+`POST /workspaces/:id/task-from-email` turns a message in the caller's own mailbox into a task. It follows the corpus bridge next door: the mailbox is read **on the server** from the private snapshot, only the sender's name and the summary cross into the workspace, and the browser never submits message text. The deadline comes from the obligation the classifier already recorded — live, required, and owed by the reader — so a date Brief found is not typed in a second time.
+
+The call is made twice, as sharing is: once to build a draft, then with that draft's hash to create the task. If the message was reclassified in between, the hash no longer matches and the person reviews the new wording instead of adding a task built from text nobody saw. The title, assignee and deadline are the caller's to override; the description is always the server's own.
+
+`GET /tasks` returns live work assigned to the caller across every workspace they belong to, which is what the inbox strip reads. The membership join is the access check.
+
 ## Invariants worth keeping
 
 - Artifacts are immutable. A revision is a new artifact pointing to its predecessors.

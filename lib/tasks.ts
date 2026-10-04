@@ -130,7 +130,7 @@ export function dueLabel(
  * finally the id, so two tasks created in the same millisecond never swap places between
  * renders.
  */
-export function sortTasks(tasks: Task[]): Task[] {
+export function sortTasks<T extends Task>(tasks: T[]): T[] {
   return [...tasks].sort((a, b) => {
     if (isClosed(a.status) !== isClosed(b.status)) return isClosed(a.status) ? 1 : -1;
     const left = a.dueAt ?? Infinity;

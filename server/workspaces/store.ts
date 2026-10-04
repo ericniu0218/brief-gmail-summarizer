@@ -685,6 +685,31 @@ export class WorkspaceStore {
       },
     };
   }
+  /**
+   * Live work assigned to the signed-in person, across every workspace they belong to, so
+   * the inbox can show what the team is waiting on without knowing about workspaces.
+   *
+   * The membership join is the access check: a task is only returned when its workspace
+   * still has this person as a member.
+   */
+  async myTasks(): Promise<(Task & { workspaceName: string })[]> {
+    const actor = this.user();
+    const rows = await this.db
+      .prepare(
+        `SELECT t.*, w.name AS workspace_name FROM workspace_tasks t
+           JOIN workspace_members m ON m.workspace_id = t.workspace_id AND m.user_id = ?
+           JOIN workspaces w ON w.id = t.workspace_id
+          WHERE t.assignee_id = ? AND t.status NOT IN ('done','cancelled')
+          ORDER BY CASE WHEN t.due_at IS NULL THEN 1 ELSE 0 END, t.due_at, t.created
+          LIMIT 50`,
+      )
+      .bind(actor.id, actor.id)
+      .all<TaskRow & { workspace_name: string }>();
+    return rows.results.map((row) => ({
+      ...taskOf(row),
+      workspaceName: row.workspace_name,
+    }));
+  }
   async createTask(
     ws: string,
     value: unknown,
