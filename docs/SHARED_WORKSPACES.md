@@ -181,6 +181,27 @@ The call is made twice, as sharing is: once to build a draft, then with that dra
 
 `GET /tasks` returns live work assigned to the caller across every workspace they belong to, which is what the inbox strip reads. The membership join is the access check.
 
+## Conversation
+
+`workspace_messages` is the group's chat: append-only, ordered by a monotonic `sequence`, read by cursor. A reader asks for everything after the highest sequence it holds, so it can neither miss a message nor see one twice however the timing falls — the cursor the event feed already uses.
+
+Messages are deliberately **not** artifacts. An artifact is an immutable, checksummed result with lineage; putting chatter in that feed would bury the results it exists to hold. They are also kept out of `workspace_events`, which background consumers read.
+
+| Concern | Decision |
+| --- | --- |
+| A retried send | unique `(workspace_id, author_id, request_key)`, as artifacts and tasks have |
+| Withdrawing | the row and its sequence stay, the text goes (CHECK: a withdrawn message holds no body). Deleting the row would leave a hole in every reader's cursor |
+| Who may withdraw | an owner, or whoever wrote it |
+| Reading vs posting | reading needs membership, posting needs `editor` — so invite people as editors if everyone should talk |
+| Flooding | 30 messages per author per minute, counted from the messages themselves |
+| Content | plain text, 4000 characters, rendered as a string and never as markup. No attachments: `.openai/hosting.json` has no R2 |
+
+There is no push channel on this host, so the browser polls: often while the tab is in front, rarely when it is not, and the whole tail occasionally, because withdrawing changes a message already sent and a forward-only cursor would never revisit it.
+
+Unread is a dot, from a sequence in that browser's `localStorage`. A read receipt everyone shares is a bigger thing, and would need its own table.
+
+`authorize` also refreshes a member's `display_name` when the verified identity disagrees with the stored copy, which is what keeps names current in the member list and the conversation; the name is otherwise copied once at join and never revisited.
+
 ## Invariants worth keeping
 
 - Artifacts are immutable. A revision is a new artifact pointing to its predecessors.

@@ -421,6 +421,46 @@ export const workspaceTasks = sqliteTable(
     check('task_version', sql`${t.version} >= 1`),
   ],
 );
+/**
+ * The workspace's conversation. Messages are append-only and ordered by a monotonic
+ * `sequence`, so a reader asks for everything after the last one it holds and can neither
+ * miss a message nor see one twice — the same cursor the event feed uses.
+ *
+ * They are deliberately not artifacts: an artifact is an immutable, checksummed result
+ * with lineage, and burying chat in that feed would bury the results it exists to hold.
+ */
+export const workspaceMessages = sqliteTable(
+  'workspace_messages',
+  {
+    sequence: integer('sequence').primaryKey({ autoIncrement: true }),
+    id: text('id').notNull().unique(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id),
+    /** The actor that wrote it (`user:…`), as artifacts and tasks record. */
+    authorId: text('author_id').notNull(),
+    authorName: text('author_name').notNull(),
+    body: text('body').notNull(),
+    created: integer('created').notNull(),
+    /** Set when withdrawn; the row stays so the cursor keeps its meaning. */
+    deleted: integer('deleted'),
+    requestKey: text('request_key').notNull(),
+  },
+  (t) => [
+    // One send makes one message, however many times a flaky connection retries it.
+    uniqueIndex('messages_idempotency').on(
+      t.workspaceId,
+      t.authorId,
+      t.requestKey,
+    ),
+    index('messages_workspace_sequence').on(t.workspaceId, t.sequence),
+    // A withdrawn message keeps no text.
+    check(
+      'message_withdrawn',
+      sql`${t.deleted} IS NULL OR ${t.body} = ''`,
+    ),
+  ],
+);
 export const workspaceEvents = sqliteTable(
   'workspace_events',
   {

@@ -23,6 +23,7 @@ import {
   type Task,
   type TaskStatus,
 } from '@/lib/tasks';
+import { MAX_MESSAGE_LENGTH, type Message } from '@/lib/chat';
 import {
   artifactInput,
   canonical,
@@ -109,6 +110,8 @@ function taskOf(row: TaskRow | null): Task {
 }
 /** Enough for any team that is actually tracking work by hand. */
 const TASK_LIMIT = 500;
+/** Messages one author may post in a minute before they are asked to slow down. */
+const MESSAGE_RATE_LIMIT = 30;
 /** Wrong group codes tolerated per user before they must wait, and the window they age out in. */
 const JOIN_FAILURE_LIMIT = 10;
 const JOIN_FAILURE_WINDOW = 10 * 60000;
@@ -184,11 +187,21 @@ export class WorkspaceStore {
       );
     const member = await this.db
       .prepare(
-        'SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?',
+        'SELECT role, display_name AS displayName FROM workspace_members WHERE workspace_id = ? AND user_id = ?',
       )
       .bind(workspaceId, a.type === 'user' ? a.id : a.ownerId)
-      .first<{ role: Role }>();
+      .first<{ role: Role; displayName: string }>();
     if (!member) throw new HttpError(404, 'Workspace not found.');
+    // A member's name is copied in when they join, so it would otherwise stay as it was
+    // forever. Refreshed from the verified identity when it has actually changed, which
+    // keeps the member list and the conversation showing what people are called now.
+    if (a.type === 'user' && member.displayName !== a.name)
+      await this.db
+        .prepare(
+          'UPDATE workspace_members SET display_name = ? WHERE workspace_id = ? AND user_id = ?',
+        )
+        .bind(a.name, workspaceId, a.id)
+        .run();
     if (
       (permission === 'manage' && member.role !== 'owner') ||
       (permission === 'write' && member.role === 'viewer')
@@ -863,6 +876,115 @@ export class WorkspaceStore {
         .bind(ws, id),
       this.event(ws, 'task.deleted', id),
     ]);
+  }
+  /**
+   * The conversation after `after`, oldest first, with the newest sequence in the
+   * workspace so a caller can tell there is more without fetching it.
+   */
+  async messages(ws: string, params: URLSearchParams) {
+    await this.authorize(ws);
+    const after = integer(
+      Number(params.get('after') ?? 0),
+      'message cursor',
+      0,
+      Number.MAX_SAFE_INTEGER,
+    );
+    const limit = integer(Number(params.get('limit') ?? 50), 'limit', 1, 100);
+    // Opening the conversation asks for the most recent messages; following it asks for
+    // everything after what is already held. Both are answered in reading order.
+    const newest = after === 0;
+    const rows = await this.db
+      .prepare(
+        `SELECT sequence, id, workspace_id AS workspaceId, author_id AS authorId, author_name AS authorName, body, created, deleted
+           FROM workspace_messages WHERE workspace_id = ? AND sequence > ?
+          ORDER BY sequence ${newest ? 'DESC' : 'ASC'} LIMIT ?`,
+      )
+      .bind(ws, after, limit)
+      .all<Message>();
+    const items = newest ? rows.results.reverse() : rows.results;
+    const latest = await this.db
+      .prepare(
+        'SELECT MAX(sequence) AS latest FROM workspace_messages WHERE workspace_id = ?',
+      )
+      .bind(ws)
+      .first<{ latest: number | null }>();
+    return {
+      items,
+      latest: latest?.latest ?? 0,
+      me: this.actorId,
+    };
+  }
+  async postMessage(
+    ws: string,
+    value: unknown,
+    requestKey: unknown,
+  ): Promise<Message> {
+    await this.authorize(ws, 'write');
+    const data = object(value);
+    const key = string(requestKey, 'Idempotency-Key', 128);
+    const body = string(data.body, 'Message', MAX_MESSAGE_LENGTH);
+    const now = Date.now();
+    const existing = await this.db
+      .prepare(
+        'SELECT sequence, id, workspace_id AS workspaceId, author_id AS authorId, author_name AS authorName, body, created, deleted FROM workspace_messages WHERE workspace_id = ? AND author_id = ? AND request_key = ?',
+      )
+      .bind(ws, this.actorId, key)
+      .first<Message>();
+    // A retried send returns the message it already posted rather than saying it twice.
+    if (existing) return existing;
+    // A runaway client or a loop cannot flood the workspace. Counted from the messages
+    // themselves, like the daily send cap.
+    const recent = await this.db
+      .prepare(
+        'SELECT COUNT(*) AS count FROM workspace_messages WHERE workspace_id = ? AND author_id = ? AND created > ?',
+      )
+      .bind(ws, this.actorId, now - 60000)
+      .first<{ count: number }>();
+    if ((recent?.count ?? 0) >= MESSAGE_RATE_LIMIT)
+      throw new HttpError(
+        429,
+        'That is a lot of messages at once. Wait a moment and try again.',
+      );
+    const id = crypto.randomUUID();
+    await this.db
+      .prepare(
+        'INSERT INTO workspace_messages (id, workspace_id, author_id, author_name, body, created, deleted, request_key) VALUES (?, ?, ?, ?, ?, ?, NULL, ?) ON CONFLICT(workspace_id, author_id, request_key) DO NOTHING',
+      )
+      .bind(id, ws, this.actorId, this.actor.name, body, now, key)
+      .run();
+    const stored = await this.db
+      .prepare(
+        'SELECT sequence, id, workspace_id AS workspaceId, author_id AS authorId, author_name AS authorName, body, created, deleted FROM workspace_messages WHERE workspace_id = ? AND author_id = ? AND request_key = ?',
+      )
+      .bind(ws, this.actorId, key)
+      .first<Message>();
+    if (!stored) throw new HttpError(500, 'The message could not be read back.');
+    return stored;
+  }
+  /**
+   * Withdraws a message: the row and its place in the order stay, the text goes.
+   * Deleting the row outright would leave a hole in the cursor every reader is following.
+   */
+  async deleteMessage(ws: string, id: string) {
+    const role = await this.authorize(ws, 'write');
+    const row = await this.db
+      .prepare(
+        'SELECT author_id AS authorId FROM workspace_messages WHERE workspace_id = ? AND id = ?',
+      )
+      .bind(ws, string(id, 'Message ID'))
+      .first<{ authorId: string }>();
+    if (!row) throw new HttpError(404, 'Message not found.');
+    if (role !== 'owner' && row.authorId !== this.actorId)
+      throw new HttpError(
+        403,
+        'Only an owner, or whoever wrote it, can withdraw a message.',
+      );
+    await this.db
+      .prepare(
+        "UPDATE workspace_messages SET body = '', deleted = COALESCE(deleted, ?) WHERE workspace_id = ? AND id = ?",
+      )
+      .bind(Date.now(), ws, id)
+      .run();
   }
   async listArtifacts(
     ws: string,

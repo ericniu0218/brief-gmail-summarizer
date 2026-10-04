@@ -169,6 +169,13 @@
       "when": 1791148983500,
       "tag": "0023_romantic_otto_octavius",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1791155611641,
+      "tag": "0024_rainy_scorpion",
+      "breakpoints": true
     }
   ]
 }

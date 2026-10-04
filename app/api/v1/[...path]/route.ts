@@ -160,6 +160,19 @@ async function handle(request: Request) {
           method === 'DELETE' ? null : (await body()).role,
         );
         result = { ok: true };
+      } else if (resource === 'messages' && path.length === 3) {
+        if (method === 'GET') result = await store.messages(ws, url.searchParams);
+        else if (method === 'POST') {
+          result = await store.postMessage(ws, await body(), key);
+          status = 201;
+        } else throw new HttpError(405, 'Method not allowed.');
+      } else if (
+        resource === 'messages' &&
+        path.length === 4 &&
+        method === 'DELETE'
+      ) {
+        await store.deleteMessage(ws, id);
+        result = { ok: true };
       } else if (resource === 'tasks' && path.length === 3) {
         if (method === 'GET') result = await store.tasks(ws);
         else if (method === 'POST') {

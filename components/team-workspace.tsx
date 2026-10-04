@@ -28,6 +28,7 @@ import {
 } from '@/components/ui/sheet';
 import { ArtifactContent } from './artifact-content';
 import { TeamTasks } from './team-tasks';
+import { TeamChat } from './team-chat';
 import { WorkspaceApiError, WorkspaceClient } from '@/lib/workspaces/client';
 import {
   CORPUS_KIND,
@@ -95,6 +96,28 @@ export function TeamWorkspace() {
   const [inviteRole, setInviteRole] = useState('viewer');
   const [inviteLink, setInviteLink] = useState('');
   const [joinCode, setJoinCode] = useState<JoinCode | null>(null);
+  const [unread, setUnread] = useState(false);
+  // How far this browser has read the conversation. Per browser on purpose: a read
+  // receipt everyone shares is a bigger thing than a dot on a tab.
+  const seenKey = `brief.chat.${workspaceId}`;
+  const lastSeen = useCallback(() => {
+    try {
+      return Number(localStorage.getItem(seenKey)) || 0;
+    } catch {
+      return 0;
+    }
+  }, [seenKey]);
+  const markRead = useCallback(
+    (sequence: number) => {
+      try {
+        localStorage.setItem(seenKey, String(sequence));
+      } catch {
+        // A browser refusing storage simply shows the dot again next time.
+      }
+      setUnread(false);
+    },
+    [seenKey],
+  );
   const [codeRole, setCodeRole] = useState('editor');
   const [integrationName, setIntegrationName] = useState('');
   const [scope, setScope] = useState('read');
@@ -199,7 +222,7 @@ export function TeamWorkspace() {
       running = true;
       try {
         const params = new URLSearchParams({ q: query, kind });
-        const [results, people, activity] = await Promise.all([
+        const [results, people, activity, chat] = await Promise.all([
           api.request<{ items: ArtifactSummary[]; nextCursor: string | null }>(
             `${base}/artifacts?${params}`,
             { signal: controller.signal },
@@ -212,6 +235,11 @@ export function TeamWorkspace() {
             `${base}/events?latest=true&limit=100`,
             { signal: controller.signal },
           ),
+          // One message beyond what this browser has read is all the dot needs to know.
+          api.request<{ items: unknown[] }>(
+            `${base}/messages?after=${lastSeen()}&limit=1`,
+            { signal: controller.signal },
+          ),
         ]);
         if (!controller.signal.aborted) {
           setClockNow(Date.now());
@@ -219,6 +247,7 @@ export function TeamWorkspace() {
           setCursor(results.nextCursor);
           setMembers(people.items);
           setEvents(activity.items);
+          setUnread(chat.items.length > 0);
         }
       } catch (error) {
         if (!controller.signal.aborted) fail(error);
@@ -238,7 +267,7 @@ export function TeamWorkspace() {
       clearInterval(interval);
       window.removeEventListener('focus', focus);
     };
-  }, [workspaceId, base, query, kind, fail]);
+  }, [workspaceId, base, query, kind, fail, lastSeen]);
   useEffect(() => {
     // Owner-only secrets are loaded only while an administrative tab is open.
     if (!owner || !workspaceId || (tab !== 'people' && tab !== 'integrations'))
@@ -468,6 +497,10 @@ export function TeamWorkspace() {
                 <TabsList className="team-tabs">
                   <TabsTrigger value="results">Results</TabsTrigger>
                   <TabsTrigger value="tasks">Tasks</TabsTrigger>
+                  <TabsTrigger value="chat">
+                    Chat
+                    {unread && <span className="team-unread" aria-label="New messages" />}
+                  </TabsTrigger>
                   <TabsTrigger value="publish" disabled={!canWrite}>
                     Publish
                   </TabsTrigger>
@@ -588,6 +621,13 @@ export function TeamWorkspace() {
                     busy={busy}
                     act={(fn) => void act(fn)}
                     notify={setNotice}
+                  />
+                </TabsContent>
+                <TabsContent value="chat">
+                  <TeamChat
+                    workspaceId={workspaceId}
+                    canWrite={canWrite}
+                    onRead={markRead}
                   />
                 </TabsContent>
                 <TabsContent value="publish">
