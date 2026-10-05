@@ -93,7 +93,8 @@ Mount the copied handler at `/api/v1/[...path]`, or translate its branches to th
 | Route | Purpose |
 | --- | --- |
 | `GET/POST /workspaces` | list or create human workspaces |
-| `POST /join` | redeem a single-use invitation |
+| `POST /join` | redeem a single-use invitation or a reusable group code |
+| `GET/POST/DELETE /workspaces/:id/code` | read, issue/replace, or turn off the group code |
 | `GET/POST /workspaces/:id/artifacts` | list metadata or publish an artifact |
 | `GET /workspaces/:id/artifacts/:artifactId` | read the full shared result |
 | `POST /workspaces/:id/artifacts/:artifactId/fold` | derive a fold |
@@ -135,6 +136,71 @@ In the target project, run its equivalent migration, test, typecheck, and produc
 - An event consumer resumes after `nextAfter`.
 - With Gmail enabled, only selected summaries appear in preview and a changed snapshot requires a fresh preview.
 - Tests, typecheck, migration inspection, and production build pass.
+
+## Group codes
+
+A workspace also has one reusable join code, so a team joins by typing `ABCD-2345` instead of needing an invitation each. Eight characters from a thirty-symbol alphabet that omits `0 O 1 I L U`, which is what people mistype when a code is read aloud.
+
+This is the one secret in the feature **stored readable**, because its purpose is to be re-read by the owner and passed around; hashing it would also buy little, since a short code is brute-forceable from a leaked database anyway. The limits that replace hashing:
+
+| Risk | Limit |
+| --- | --- |
+| A stale code circulating | expires in 1–30 days, default 7; revocable; replaceable |
+| Two codes granting different roles | partial unique index `join_codes_active`, one live code per workspace |
+| Escalation through a code | CHECK `editor/viewer`; never owner, and a rejoin never changes an existing role |
+| Searching the code space | `join_attempts` caps a user at 10 wrong codes per 10 minutes, failing closed |
+| Learning which codes exist | revoked, expired, exhausted and never-issued share one refusal |
+| Spending a use without joining | the use is claimed first, and membership inserts only on `changes() > 0` |
+
+A malformed code answers with the expected shape and is not counted as a guess, so typos never cause a lockout.
+
+## Tasks
+
+A workspace also tracks work: `workspace_tasks` answers who is doing what, by when. Tasks sit beside artifacts rather than inside them, because an artifact is an immutable result and a task is a record that changes for as long as the work lasts.
+
+That difference drives the design:
+
+| Concern | Decision |
+| --- | --- |
+| Two people editing one task | every row carries `version`; an update names the version it edits and a stale save is refused with 409, never merged silently |
+| Partial edits | an update applies only the fields it sends, so editing the deadline cannot revert someone's title |
+| What "due" means | a day deadline resolves through `endOfUtcDay`, the same rule mail deadlines use, so a task and a message due on one date fall due together |
+| Deadline precision | `due_kind` records whether a date or an instant was given, so a day-level deadline is never displayed as 23:59 |
+| Assignment | the assignee must be a current member; removing someone leaves their work in place, shown against their name |
+| History | one event per update (`task.status`, `task.assignee`, `task.due`, `task.edited`) so Activity reads as a history of the work |
+| Retries | unique `(workspace_id, created_by, request_key)`, as artifacts have |
+| Deleting | an owner, or whoever added the task; anyone else marks it cancelled, which stays visible |
+
+Grouping, ordering and the overdue/today/this-week buckets live in `lib/tasks.ts`, are pure, and take `now` as an argument, so the server and the browser cannot disagree about what is late and the view re-ranks as the day passes without a write.
+
+### From a message to a task
+
+`POST /workspaces/:id/task-from-email` turns a message in the caller's own mailbox into a task. It follows the corpus bridge next door: the mailbox is read **on the server** from the private snapshot, only the sender's name and the summary cross into the workspace, and the browser never submits message text. The deadline comes from the obligation the classifier already recorded — live, required, and owed by the reader — so a date Brief found is not typed in a second time.
+
+The call is made twice, as sharing is: once to build a draft, then with that draft's hash to create the task. If the message was reclassified in between, the hash no longer matches and the person reviews the new wording instead of adding a task built from text nobody saw. The title, assignee and deadline are the caller's to override; the description is always the server's own.
+
+`GET /tasks` returns live work assigned to the caller across every workspace they belong to, which is what the inbox strip reads. The membership join is the access check.
+
+## Conversation
+
+`workspace_messages` is the group's chat: append-only, ordered by a monotonic `sequence`, read by cursor. A reader asks for everything after the highest sequence it holds, so it can neither miss a message nor see one twice however the timing falls — the cursor the event feed already uses.
+
+Messages are deliberately **not** artifacts. An artifact is an immutable, checksummed result with lineage; putting chatter in that feed would bury the results it exists to hold. They are also kept out of `workspace_events`, which background consumers read.
+
+| Concern | Decision |
+| --- | --- |
+| A retried send | unique `(workspace_id, author_id, request_key)`, as artifacts and tasks have |
+| Withdrawing | the row and its sequence stay, the text goes (CHECK: a withdrawn message holds no body). Deleting the row would leave a hole in every reader's cursor |
+| Who may withdraw | an owner, or whoever wrote it |
+| Reading vs posting | reading needs membership, posting needs `editor` — so invite people as editors if everyone should talk |
+| Flooding | 30 messages per author per minute, counted from the messages themselves |
+| Content | plain text, 4000 characters, rendered as a string and never as markup. No attachments: `.openai/hosting.json` has no R2 |
+
+There is no push channel on this host, so the browser polls: often while the tab is in front, rarely when it is not, and the whole tail occasionally, because withdrawing changes a message already sent and a forward-only cursor would never revisit it.
+
+Unread is a dot, from a sequence in that browser's `localStorage`. A read receipt everyone shares is a bigger thing, and would need its own table.
+
+`authorize` also refreshes a member's `display_name` when the verified identity disagrees with the stored copy, which is what keeps names current in the member list and the conversation; the name is otherwise copied once at join and never revisited.
 
 ## Invariants worth keeping
 

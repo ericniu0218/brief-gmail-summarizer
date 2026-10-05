@@ -27,12 +27,15 @@ import {
   SheetDescription,
 } from '@/components/ui/sheet';
 import { ArtifactContent } from './artifact-content';
+import { TeamTasks } from './team-tasks';
+import { TeamChat } from './team-chat';
 import { WorkspaceApiError, WorkspaceClient } from '@/lib/workspaces/client';
 import {
   CORPUS_KIND,
   type Artifact,
   type ArtifactInput,
   type ArtifactSummary,
+  type JoinCode,
   type Member,
   type Workspace,
   type WorkspaceEvent,
@@ -92,6 +95,30 @@ export function TeamWorkspace() {
   const publishKey = useRef('');
   const [inviteRole, setInviteRole] = useState('viewer');
   const [inviteLink, setInviteLink] = useState('');
+  const [joinCode, setJoinCode] = useState<JoinCode | null>(null);
+  const [unread, setUnread] = useState(false);
+  // How far this browser has read the conversation. Per browser on purpose: a read
+  // receipt everyone shares is a bigger thing than a dot on a tab.
+  const seenKey = `brief.chat.${workspaceId}`;
+  const lastSeen = useCallback(() => {
+    try {
+      return Number(localStorage.getItem(seenKey)) || 0;
+    } catch {
+      return 0;
+    }
+  }, [seenKey]);
+  const markRead = useCallback(
+    (sequence: number) => {
+      try {
+        localStorage.setItem(seenKey, String(sequence));
+      } catch {
+        // A browser refusing storage simply shows the dot again next time.
+      }
+      setUnread(false);
+    },
+    [seenKey],
+  );
+  const [codeRole, setCodeRole] = useState('editor');
   const [integrationName, setIntegrationName] = useState('');
   const [scope, setScope] = useState('read');
   const [newKey, setNewKey] = useState('');
@@ -130,6 +157,7 @@ export function TeamWorkspace() {
     setIntegrations([]);
     setPreview(null);
     setInviteLink('');
+    setJoinCode(null);
     setNewKey('');
     setCursor(null);
     setTab('results');
@@ -194,7 +222,7 @@ export function TeamWorkspace() {
       running = true;
       try {
         const params = new URLSearchParams({ q: query, kind });
-        const [results, people, activity] = await Promise.all([
+        const [results, people, activity, chat] = await Promise.all([
           api.request<{ items: ArtifactSummary[]; nextCursor: string | null }>(
             `${base}/artifacts?${params}`,
             { signal: controller.signal },
@@ -207,6 +235,11 @@ export function TeamWorkspace() {
             `${base}/events?latest=true&limit=100`,
             { signal: controller.signal },
           ),
+          // One message beyond what this browser has read is all the dot needs to know.
+          api.request<{ items: unknown[] }>(
+            `${base}/messages?after=${lastSeen()}&limit=1`,
+            { signal: controller.signal },
+          ),
         ]);
         if (!controller.signal.aborted) {
           setClockNow(Date.now());
@@ -214,6 +247,7 @@ export function TeamWorkspace() {
           setCursor(results.nextCursor);
           setMembers(people.items);
           setEvents(activity.items);
+          setUnread(chat.items.length > 0);
         }
       } catch (error) {
         if (!controller.signal.aborted) fail(error);
@@ -233,7 +267,7 @@ export function TeamWorkspace() {
       clearInterval(interval);
       window.removeEventListener('focus', focus);
     };
-  }, [workspaceId, base, query, kind, fail]);
+  }, [workspaceId, base, query, kind, fail, lastSeen]);
   useEffect(() => {
     // Owner-only secrets are loaded only while an administrative tab is open.
     if (!owner || !workspaceId || (tab !== 'people' && tab !== 'integrations'))
@@ -242,11 +276,13 @@ export function TeamWorkspace() {
     void Promise.all([
       api.request<{ items: Invite[] }>(`${base}/invites`),
       api.request<{ items: Integration[] }>(`${base}/tokens`),
+      api.request<{ code: JoinCode | null }>(`${base}/code`),
     ])
-      .then(([i, t]) => {
+      .then(([i, t, c]) => {
         if (!cancelled) {
           setInvites(i.items);
           setIntegrations(t.items);
+          setJoinCode(c.code);
         }
       })
       .catch(fail);
@@ -346,28 +382,37 @@ export function TeamWorkspace() {
             onSubmit={(e) => {
               e.preventDefault();
               void act(async () => {
-                const result = await api.request<{ workspaceId: string }>(
-                  'join',
-                  {
-                    method: 'POST',
-                    body: JSON.stringify({ token: joinToken }),
-                  },
-                );
+                // One field takes both a reusable group code and a single-use invitation
+                // link; the server decides which was given.
+                const result = await api.request<{
+                  workspaceId: string;
+                  joined: boolean;
+                }>('join', {
+                  method: 'POST',
+                  body: JSON.stringify({ token: joinToken }),
+                });
                 await loadWorkspaces(result.workspaceId);
                 setJoinToken('');
-                setNotice('You joined the workspace.');
+                setNotice(
+                  result.joined
+                    ? 'You joined the workspace.'
+                    : 'You are already a member of this workspace.',
+                );
               });
             }}
           >
-            <label htmlFor="join-token">Have an invitation?</label>
+            <label htmlFor="join-token">Have a group code?</label>
             <Input
               id="join-token"
               value={joinToken}
               required
-              placeholder="Paste invitation code"
+              maxLength={120}
+              placeholder="e.g. ABCD-2345"
               onChange={(e) => setJoinToken(e.target.value)}
             />
-            <Button variant="outline" disabled={busy || !!signIn}>
+            {/* Without an explicit type this renders as type="button", which leaves the
+                form submittable only by pressing Enter in the field. */}
+            <Button variant="outline" type="submit" disabled={busy || !!signIn}>
               Join workspace
             </Button>
           </form>
@@ -451,6 +496,11 @@ export function TeamWorkspace() {
               >
                 <TabsList className="team-tabs">
                   <TabsTrigger value="results">Results</TabsTrigger>
+                  <TabsTrigger value="tasks">Tasks</TabsTrigger>
+                  <TabsTrigger value="chat">
+                    Chat
+                    {unread && <span className="team-unread" aria-label="New messages" />}
+                  </TabsTrigger>
                   <TabsTrigger value="publish" disabled={!canWrite}>
                     Publish
                   </TabsTrigger>
@@ -562,6 +612,23 @@ export function TeamWorkspace() {
                       Load more results
                     </Button>
                   )}
+                </TabsContent>
+                <TabsContent value="tasks">
+                  <TeamTasks
+                    workspaceId={workspaceId}
+                    members={members}
+                    canWrite={canWrite}
+                    busy={busy}
+                    act={(fn) => void act(fn)}
+                    notify={setNotice}
+                  />
+                </TabsContent>
+                <TabsContent value="chat">
+                  <TeamChat
+                    workspaceId={workspaceId}
+                    canWrite={canWrite}
+                    onRead={markRead}
+                  />
                 </TabsContent>
                 <TabsContent value="publish">
                   <div className="team-panel">
@@ -754,7 +821,127 @@ export function TeamWorkspace() {
                     ))}
                     {owner && (
                       <>
-                        <h3>Invite a colleague</h3>
+                        <h3>Group code</h3>
+                        <p>
+                          One code the whole group can type, so you do not need
+                          an invitation each. Replace or turn it off at any
+                          time. Everyone still needs access to this Site through
+                          its sharing settings.
+                        </p>
+                        {joinCode ? (
+                          <div className="team-secret">
+                            <label htmlFor="group-code">
+                              {joinCode.expires < clockNow
+                                ? 'This code has expired. Replace it to let anyone else in.'
+                                : `Share this code to join as ${joinCode.role}`}
+                            </label>
+                            <Input
+                              id="group-code"
+                              className="team-code"
+                              readOnly
+                              value={joinCode.code}
+                            />
+                            <Button
+                              variant="outline"
+                              onClick={() => void act(() => copy(joinCode.code))}
+                            >
+                              <Copy size={14} /> Copy code
+                            </Button>
+                            <p className="team-meta">
+                              {joinCode.expires < clockNow
+                                ? 'Expired'
+                                : `Expires ${date(joinCode.expires)}`}
+                              {' · '}
+                              {joinCode.uses === 1
+                                ? 'used once'
+                                : `used ${joinCode.uses} times`}
+                              {joinCode.maxUses === null
+                                ? ''
+                                : ` of ${joinCode.maxUses}`}
+                            </p>
+                            <div className="team-inline">
+                              <Button
+                                variant="ghost"
+                                disabled={busy}
+                                onClick={() =>
+                                  void act(async () => {
+                                    // Replacing is one call: the server revokes the old code
+                                    // and issues the new one together.
+                                    setJoinCode(
+                                      await api.request<JoinCode>(
+                                        `${base}/code`,
+                                        {
+                                          method: 'POST',
+                                          body: JSON.stringify({
+                                            role: joinCode.role,
+                                          }),
+                                        },
+                                      ),
+                                    );
+                                    setNotice(
+                                      'New code created. The old one no longer works.',
+                                    );
+                                  })
+                                }
+                              >
+                                <RefreshCw size={14} /> Replace code
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                disabled={busy}
+                                onClick={() =>
+                                  void act(async () => {
+                                    await api.request(`${base}/code`, {
+                                      method: 'DELETE',
+                                    });
+                                    setJoinCode(null);
+                                    setNotice(
+                                      'Code turned off. Nobody new can join with it.',
+                                    );
+                                  })
+                                }
+                              >
+                                Turn off
+                              </Button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="team-inline">
+                            <NativeSelect
+                              aria-label="Group code role"
+                              value={codeRole}
+                              onChange={(e) => setCodeRole(e.target.value)}
+                            >
+                              <option value="editor">
+                                Editor · read and publish
+                              </option>
+                              <option value="viewer">
+                                Viewer · read results
+                              </option>
+                            </NativeSelect>
+                            <Button
+                              disabled={busy}
+                              onClick={() =>
+                                void act(async () => {
+                                  setJoinCode(
+                                    await api.request<JoinCode>(
+                                      `${base}/code`,
+                                      {
+                                        method: 'POST',
+                                        body: JSON.stringify({
+                                          role: codeRole,
+                                        }),
+                                      },
+                                    ),
+                                  );
+                                })
+                              }
+                            >
+                              <KeyRound size={15} /> Create group code
+                            </Button>
+                          </div>
+                        )}
+                        <h3>Invite one person</h3>
                         <p>
                           Invitations can be used once and expire in seven days.
                           Your colleague also needs access to this Site through

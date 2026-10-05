@@ -7,6 +7,7 @@ import {
 import { canonical, hash, readBody } from '@/server/workspaces/validation';
 import { compressText, foldCorpus } from '@/server/workspaces/processors';
 import { gmailPreview } from '@/server/workspaces/gmail-adapter';
+import { emailTaskDraft } from '@/server/workspaces/email-task';
 
 /**
  * Versioned HTTP router for shared workspaces. It resolves a human or integration actor,
@@ -67,6 +68,9 @@ async function handle(request: Request) {
         result = await store.createWorkspace((await body()).name);
         status = 201;
       } else throw new HttpError(405, 'Method not allowed.');
+    } else if (root === 'tasks' && path.length === 1 && method === 'GET') {
+      // Everything assigned to the caller, whichever workspace it lives in.
+      result = { items: await store.myTasks() };
     } else if (root === 'join' && path.length === 1 && method === 'POST') {
       result = await store.join((await body()).token);
     } else if (
@@ -156,6 +160,79 @@ async function handle(request: Request) {
           method === 'DELETE' ? null : (await body()).role,
         );
         result = { ok: true };
+      } else if (resource === 'messages' && path.length === 3) {
+        if (method === 'GET') result = await store.messages(ws, url.searchParams);
+        else if (method === 'POST') {
+          result = await store.postMessage(ws, await body(), key);
+          status = 201;
+        } else throw new HttpError(405, 'Method not allowed.');
+      } else if (
+        resource === 'messages' &&
+        path.length === 4 &&
+        method === 'DELETE'
+      ) {
+        await store.deleteMessage(ws, id);
+        result = { ok: true };
+      } else if (resource === 'tasks' && path.length === 3) {
+        if (method === 'GET') result = await store.tasks(ws);
+        else if (method === 'POST') {
+          result = await store.createTask(ws, await body(), key);
+          status = 201;
+        } else throw new HttpError(405, 'Method not allowed.');
+      } else if (resource === 'tasks' && path.length === 4) {
+        // An update names the version it edits; see `WorkspaceStore.updateTask`.
+        if (method === 'PATCH') result = await store.updateTask(ws, id, await body());
+        else if (method === 'DELETE') {
+          await store.deleteTask(ws, id);
+          result = { ok: true };
+        } else throw new HttpError(405, 'Method not allowed.');
+      } else if (
+        resource === 'task-from-email' &&
+        path.length === 3 &&
+        method === 'POST'
+      ) {
+        await store.authorize(ws, 'write');
+        if (actor.type !== 'user')
+          throw new HttpError(
+            403,
+            'Only a signed-in user can turn their own mail into a task.',
+          );
+        const data = await body();
+        const draft = await emailTaskDraft(db, actor.id, data);
+        const draftHash = await hash(canonical(draft));
+        if (data.create === true) {
+          // The task is created from the draft a person actually read. If the mailbox has
+          // been reclassified since, they review the new draft instead of silently adding
+          // a task built from text nobody saw.
+          if (data.draftHash !== draftHash)
+            throw new HttpError(
+              409,
+              'This message changed. Review it again before adding the task.',
+            );
+          const saved = await store.createTask(
+            ws,
+            {
+              title: data.title ?? draft.title,
+              // Only the server's own text describes the message.
+              detail: draft.detail,
+              assigneeId: data.assigneeId ?? null,
+              due: data.due === undefined ? draft.due : data.due,
+            },
+            key,
+          );
+          result = saved;
+          status = 201;
+        } else result = { draft, draftHash };
+      } else if (resource === 'code' && path.length === 3) {
+        // One live code per workspace, so it is a single resource, not a collection.
+        if (method === 'GET') result = { code: await store.joinCode(ws) };
+        else if (method === 'POST') {
+          result = await store.createJoinCode(ws, await body());
+          status = 201;
+        } else if (method === 'DELETE') {
+          await store.revokeJoinCode(ws);
+          result = { ok: true };
+        } else throw new HttpError(405, 'Method not allowed.');
       } else if (
         resource === 'invites' &&
         path.length === 3 &&

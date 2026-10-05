@@ -269,6 +269,55 @@ export const workspaceInvites = sqliteTable(
     check('invite_role', sql`${t.role} IN ('editor','viewer')`),
   ],
 );
+/**
+ * Reusable join codes: one group code a whole team can type, beside the single-use
+ * invitations above.
+ *
+ * The code is stored readable, unlike invite and integration secrets, because its purpose
+ * is to be re-read and passed around by the owner. The compensating limits are in
+ * `WorkspaceStore`: a code grants only editor or viewer, expires, is revocable, counts its
+ * uses, and is visible to owners alone. `docs/SHARED_WORKSPACES.md` records the reasoning.
+ */
+export const workspaceJoinCodes = sqliteTable(
+  'workspace_join_codes',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id),
+    /** Normalized to the uppercase alphabet in `server/workspaces/join-code.ts`. */
+    code: text('code').notNull().unique(),
+    role: text('role').notNull(),
+    createdBy: text('created_by').notNull(),
+    expires: integer('expires').notNull(),
+    /** `null` means an unlimited number of people may use it before it expires. */
+    maxUses: integer('max_uses'),
+    uses: integer('uses').notNull().default(0),
+    revoked: integer('revoked'),
+    created: integer('created').notNull(),
+  },
+  (t) => [
+    // At most one live code per workspace, so rotating really replaces the old one and a
+    // workspace can never have two codes handing out different roles.
+    uniqueIndex('join_codes_active')
+      .on(t.workspaceId)
+      .where(sql`${t.revoked} IS NULL`),
+    check('join_code_role', sql`${t.role} IN ('editor','viewer')`),
+    check(
+      'join_code_uses',
+      sql`${t.uses} >= 0 AND (${t.maxUses} IS NULL OR ${t.maxUses} > 0)`,
+    ),
+  ],
+);
+/**
+ * Failed join attempts per user, so a guessable eight-character code cannot be searched
+ * for. Keyed by the signed-in user because a wrong code names no workspace to charge.
+ */
+export const joinAttempts = sqliteTable('join_attempts', {
+  userId: text('user_id').primaryKey(),
+  failures: integer('failures').notNull().default(0),
+  windowStart: integer('window_start').notNull(),
+});
 export const workspaceTokens = sqliteTable(
   'workspace_tokens',
   {
@@ -318,6 +367,98 @@ export const workspaceArtifacts = sqliteTable(
       t.requestKey,
     ),
     index('artifacts_workspace_created').on(t.workspaceId, t.created, t.id),
+  ],
+);
+/**
+ * Team tasks: the first workspace record that changes after it is written, unlike an
+ * immutable artifact. Two people editing one task is therefore a real event, so every row
+ * carries a `version` that an update must name; the losing write is refused rather than
+ * silently overwriting the winner. What changed, and who changed it, is recorded in
+ * `workspace_events`.
+ */
+export const workspaceTasks = sqliteTable(
+  'workspace_tasks',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id),
+    title: text('title').notNull(),
+    detail: text('detail').notNull().default(''),
+    status: text('status').notNull(),
+    /** A member's `workspace_members.user_id`; null while the work is unclaimed. */
+    assigneeId: text('assignee_id'),
+    assigneeName: text('assignee_name'),
+    dueAt: integer('due_at'),
+    dueKind: text('due_kind'),
+    /** The actor that created it (`user:…` or `integration:…`), as artifacts record. */
+    createdBy: text('created_by').notNull(),
+    creatorName: text('creator_name').notNull(),
+    created: integer('created').notNull(),
+    updated: integer('updated').notNull(),
+    version: integer('version').notNull().default(1),
+    completed: integer('completed'),
+    requestKey: text('request_key').notNull(),
+  },
+  (t) => [
+    // Retrying one creation makes one task, as retrying a publish makes one artifact.
+    uniqueIndex('tasks_idempotency').on(t.workspaceId, t.createdBy, t.requestKey),
+    index('tasks_workspace_assignee').on(t.workspaceId, t.assigneeId, t.status),
+    index('tasks_workspace_due').on(t.workspaceId, t.status, t.dueAt),
+    check(
+      'task_status',
+      sql`${t.status} IN ('todo','doing','blocked','done','cancelled')`,
+    ),
+    // A deadline and the precision it was given in travel together or not at all.
+    check(
+      'task_due',
+      sql`(${t.dueAt} IS NULL AND ${t.dueKind} IS NULL) OR (${t.dueAt} IS NOT NULL AND ${t.dueKind} IN ('day','time'))`,
+    ),
+    check(
+      'task_assignee',
+      sql`(${t.assigneeId} IS NULL AND ${t.assigneeName} IS NULL) OR (${t.assigneeId} IS NOT NULL AND ${t.assigneeName} IS NOT NULL)`,
+    ),
+    check('task_version', sql`${t.version} >= 1`),
+  ],
+);
+/**
+ * The workspace's conversation. Messages are append-only and ordered by a monotonic
+ * `sequence`, so a reader asks for everything after the last one it holds and can neither
+ * miss a message nor see one twice — the same cursor the event feed uses.
+ *
+ * They are deliberately not artifacts: an artifact is an immutable, checksummed result
+ * with lineage, and burying chat in that feed would bury the results it exists to hold.
+ */
+export const workspaceMessages = sqliteTable(
+  'workspace_messages',
+  {
+    sequence: integer('sequence').primaryKey({ autoIncrement: true }),
+    id: text('id').notNull().unique(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id),
+    /** The actor that wrote it (`user:…`), as artifacts and tasks record. */
+    authorId: text('author_id').notNull(),
+    authorName: text('author_name').notNull(),
+    body: text('body').notNull(),
+    created: integer('created').notNull(),
+    /** Set when withdrawn; the row stays so the cursor keeps its meaning. */
+    deleted: integer('deleted'),
+    requestKey: text('request_key').notNull(),
+  },
+  (t) => [
+    // One send makes one message, however many times a flaky connection retries it.
+    uniqueIndex('messages_idempotency').on(
+      t.workspaceId,
+      t.authorId,
+      t.requestKey,
+    ),
+    index('messages_workspace_sequence').on(t.workspaceId, t.sequence),
+    // A withdrawn message keeps no text.
+    check(
+      'message_withdrawn',
+      sql`${t.deleted} IS NULL OR ${t.body} = ''`,
+    ),
   ],
 );
 export const workspaceEvents = sqliteTable(

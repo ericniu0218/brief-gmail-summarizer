@@ -78,9 +78,18 @@ const URL=/\bhttps?:\/\/\S+|\bwww\.\S+/gi;
 // review the 'Last chance: 30% off' banner" is a task about a campaign.
 const QUOTED_SPAN=/“[^”\n]{1,160}”|"[^"\n]{1,160}"|‘[^’\n]{1,160}’|(?:^|(?<=\s))'[^'\n]{1,160}'(?=[\s.,;:!?]|$)/g;
 
+/**
+ * The same padding removed, for text that will be read by a person rather than matched.
+ * A campaign's preview padding is invisible in a mail client but arrives as a run of
+ * hundreds of characters anywhere else it is shown.
+ */
+export function withoutInvisibles(value:string){
+  return value.replace(INVISIBLE,'');
+}
+
 /** Text as it should be matched: padding and links gone, whitespace collapsed. */
 export function matchableText(value:string){
-  return value.replace(INVISIBLE,'').replace(URL,' ').replace(/[ \t\f\v]+/g,' ');
+  return withoutInvisibles(value).replace(URL,' ').replace(/[ \t\f\v]+/g,' ');
 }
 
 function sentencesOf(value:string){

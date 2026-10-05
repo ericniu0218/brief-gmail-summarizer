@@ -25,6 +25,17 @@ export type Member = {
   role: Role;
   joined: number;
 };
+/** A workspace's reusable group code. `code` is the grouped display form. */
+export type JoinCode = {
+  id: string;
+  code: string;
+  role: 'editor' | 'viewer';
+  expires: number;
+  /** `null` when any number of people may join before it expires. */
+  maxUses: number | null;
+  uses: number;
+  created: number;
+};
 export type ArtifactInput = {
   // `kind` and `schemaVersion` tell readers how to interpret immutable content.
   kind: string;
